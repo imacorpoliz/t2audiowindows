@@ -1,20 +1,32 @@
 # T2AudioPort Driver Debugging Log
 
-**Last Updated:** 2026-10-05 22:40 UTC
+**Last Updated:** 2026-10-05 21:49 UTC
 
 ## Current Problem Summary
-T2AudioMiniport.sys driver **loads successfully** through PortCls (DriverEntry and AddDevice succeed), but **fails in StartDevice** with **STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)**. Device Manager shows "Problem Code: 10 (CM_PROB_FAILED_START)".
+T2AudioMiniport.sys driver **loads successfully** through PortCls (DriverEntry and AddDevice succeed), but **fails in StartDevice** with **STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)**. 
 
-**Previous problem (FIXED):** STATUS_INVALID_PARAMETER (0xC000000D) caused by swapped arguments to PcAddAdapterDevice.
+**ROOT CAUSE IDENTIFIED (2026-10-05 21:47 UTC):**
+- **Failure Point**: FAIL_K in T2AudioMapResources (Device.c:125)
+- **Condition**: GPR signature validation fails (0xFFFFFFFF != 0x19870423)
+- **Evidence**: All GPR registers at offset 0xC000 return 0xFFFFFFFF (hardware not responding)
+- **Resources**: 3 memory resources allocated, BAR1/BAR2 mapped successfully
+- **Conclusion**: Either T2AUDIO_GPR_OFFSET incorrect, or T2 chip requires initialization before registers accessible
+
+See `docs/MAPRESOURCES_ROOT_CAUSE.md` for complete analysis.
+
+**Previous problems (FIXED):** 
+- STATUS_INVALID_PARAMETER (0xC000000D) caused by swapped arguments to PcAddAdapterDevice
 
 ## Hardware Configuration
 - **Model**: MacBookPro16,1 (2019)
 - **OS**: Windows 11
 - **Audio Chip**: Apple T2 (PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01)
 - **Target Audio**: 6-channel speaker array, 48kHz, 24-bit in 32-bit containers
-- **Memory BARs**: 
-  - BAR1 (audio buffers): 0x404 cache type
-  - BAR2 (config/GPR): 0x204 cache type
+- **Memory Resources (CONFIRMED 2026-10-05)**:
+  - 3 memory descriptors allocated by Windows
+  - BAR1: Physical 0xC1000000, Length 0x400000 (4 MB) - audio buffers
+  - BAR2: Physical 0xC1680000, Length 0x80000 (512 KB) - config/GPR
+  - BAR3: Not queried (unused by driver)
 
 ## Boot Configuration
 ```
@@ -523,28 +535,69 @@ When this driver is working, we should see:
 - .gitignore configured (secrets, artifacts excluded)
 - Initial commit: d8510ea "Initial commit: T2AudioPort Windows driver"
 
-**21:45 - Build verification after reorganization:**
-- MSBuild executed successfully (0 errors, 33 warnings)
-- Output: src\bin\Debug\T2AudioMiniport.sys
-- SHA256: 085D979658C993BEA05849A3D929A4970DEAD6829C37FA4CDD613C726ECD7FB7
-- Size: 20,992 bytes (differs from verified package due to path changes)
-- **NOT INSTALLED** — verified package (30867A4B...) remains in packaging/
+**21:39 - Diagnostic build (COMPLETED):**
+- Added granular KdPrint to T2AudioMapResources with FAIL_A through FAIL_N labels
+- Added logging: memory resource count, BAR addresses, GPR values, BufferStruct metadata
+- MSBuild successful (0 errors, warnings expected)
+- Output: src\bin\Debug\T2AudioMiniport.sys (25,088 bytes unsigned)
+- Signed: packaging\T2AudioMiniport.sys (32,264 bytes)
+- SHA256: 5FE84ED9CDEA42870EA1F79FFB5CB116A7EA912A1B62970F8E38287CC8B033A9
+- Commit: a4e1bc7, pushed to diagnostics branch
 
-### Next Actions (NOT YET EXECUTED)
+**21:41 - First installation attempt (FAILED - wrong driver loaded):**
+- pnputil reported "Driver package is up-to-date" but did NOT replace SYS file
+- Device restart captured old driver output (no diagnostic messages)
+- Confirmed: C:\Windows\System32\drivers\T2AudioMiniport.sys still 28,168 bytes (old hash)
 
-**Immediate (next session):**
-1. Add granular KdPrint in T2AudioMapResources before each return statement
-2. Log: NumberOfEntriesOfType(CmResourceTypeMemory), Bar1Physical, Bar2Physical
-3. Rebuild, sign, install, restart device, capture DebugView output
-4. Identify exact failure line and resource state
+**21:46 - Manual driver replacement (SUCCESS):**
+- Disabled device with pnputil /disable-device
+- Copied diagnostic SYS to System32\drivers (32,264 bytes)
+- Enabled device with pnputil /enable-device
+- Verified hash: 5FE84ED9CDEA42870EA1F79FFB5CB116A7EA912A1B62970F8E38287CC8B033A9
 
-**After diagnostic:**
-- If ResourceList is NULL: Investigate why StartDevice IRP lacks resources
-- If resources present but count < 2: Research AppleAudio.sys approach, check INF LogConfig needs
-- If resources present with wrong cache types: Fix cache type matching logic
-- If MmMapIoSpaceEx fails: Add error logging for physical addresses and map attempt
+**21:47 - Diagnostic capture (ROOT CAUSE IDENTIFIED):**
+- DebugView restarted, device restarted
+- **Full diagnostic output captured** to diagnostic_20261005_214749_SUCCESS.log
+- ✅ **Memory resource count: 3** (not 0 or 1 — hypothesis of missing resources DISPROVEN)
+- ✅ **BAR1: Physical 0xC1000000, Length 0x400000** (4 MB) — mapped successfully
+- ✅ **BAR2: Physical 0xC1680000, Length 0x80000** (512 KB) — mapped successfully
+- ❌ **GPR read: version=0xFFFFFFFF, signature=0xFFFFFFFF, bufferOffset=0xFFFFFFFF**
+- ❌ **FAIL_K: GPR signature 0xFFFFFFFF != 0x19870423**
+- **Conclusion**: Hardware NOT responding at offset 0xC000, or device not initialized
 
-**Do NOT execute without diagnostic:**
-- Do NOT add INF LogConfig directive without evidence it's needed
-- Do NOT rewrite MapResources for direct PCI config access without proof ResourceList is unusable
-- Do NOT bypass PortCls or return fake STATUS_SUCCESS
+**21:49 - Root cause analysis completed:**
+- Created docs/MAPRESOURCES_ROOT_CAUSE.md with full analysis
+- Commit: 14a8e0a, pushed to diagnostics branch
+- Updated DEBUGGING_LOG.md with confirmed hardware configuration
+
+### Verified Facts (2026-10-05 21:47 UTC)
+
+✅ Windows allocates 3 memory resources to PCI\VEN_106B&DEV_1803  
+✅ BAR1 and BAR2 map successfully with MmMapIoSpaceEx  
+✅ Driver executes through StartDevice to GPR register read  
+❌ GPR registers at offset 0xC000 return all-ones (0xFFFFFFFF)  
+❌ Either T2AUDIO_GPR_OFFSET is incorrect, or T2 requires initialization
+
+### Next Actions (AFTER Root Cause Confirmation)
+
+**Option 1 - Search BAR2 for signature (RECOMMENDED):**
+- Scan BAR2 from 0x0000 to 0x80000 for signature 0x19870423
+- Log offset where found
+- Update T2AUDIO_GPR_OFFSET if found at different location
+
+**Option 2 - Dump BAR2 contents:**
+- Log first 1-4 KB of BAR2 to check if ANY non-0xFF data exists
+- If all 0xFF: hardware not responding, may need BCE initialization
+
+**Option 3 - Try different cache types:**
+- Test BAR2 with PAGE_WRITECOMBINE instead of PAGE_NOCACHE
+- Compare with AppleAudio.sys cache settings
+
+**Option 4 - Check T2 power state:**
+- Query PCI configuration space for power management capabilities
+- Verify device is in D0 (fully powered) state
+
+**Do NOT execute without new data:**
+- Do NOT hardcode different GPR offset without evidence
+- Do NOT add BCE initialization without understanding requirements
+- Do NOT skip signature search before trying alternative approaches
