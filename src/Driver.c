@@ -86,7 +86,66 @@ T2AudioStartDevice(
     }
     KdPrint(("T2Audio: Resources mapped successfully\n"));
     
-    // Return success without creating ports - just test basic startup
-    KdPrint(("T2Audio: StartDevice returning success (test mode)\n"));
+    // Phase 3: Create WaveRT port and register subdevice
+    // BCE transport and hardware I/O remain disabled (SpeakerDeviceId == 0)
+    PUNKNOWN portUnknown = NULL;
+    PPORTWAVERT port = NULL;
+    PMINIPORTWAVERT miniport = NULL;
+    
+    KdPrint(("T2Audio: Creating WaveRT port\n"));
+    status = PcNewPort(&portUnknown, &CLSID_PortWaveRT);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: PcNewPort failed: 0x%08X\n", status));
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    status = portUnknown->lpVtbl->QueryInterface(portUnknown, &IID_IPortWaveRT, (PVOID*)&port);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: QueryInterface IPortWaveRT failed: 0x%08X\n", status));
+        portUnknown->lpVtbl->Release(portUnknown);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    portUnknown->lpVtbl->Release(portUnknown);
+    
+    KdPrint(("T2Audio: Creating WaveRT miniport\n"));
+    status = T2AudioCreateMiniport(context, &miniport);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: CreateMiniport failed: 0x%08X\n", status));
+        port->lpVtbl->Release((PUNKNOWN)port);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    KdPrint(("T2Audio: Initializing WaveRT miniport\n"));
+    status = ((PPORT)port)->lpVtbl->Init((PPORT)port, DeviceObject, Irp, 
+                                          (PUNKNOWN)miniport, NULL, ResourceList);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: Port Init failed: 0x%08X\n", status));
+        miniport->lpVtbl->Release((PUNKNOWN)miniport);
+        port->lpVtbl->Release((PUNKNOWN)port);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    KdPrint(("T2Audio: Registering WaveRT subdevice\n"));
+    status = PcRegisterSubdevice(DeviceObject, L"Wave", (PUNKNOWN)port);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: PcRegisterSubdevice failed: 0x%08X\n", status));
+        miniport->lpVtbl->Release((PUNKNOWN)miniport);
+        port->lpVtbl->Release((PUNKNOWN)port);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    // Release references - PcRegisterSubdevice holds its own
+    miniport->lpVtbl->Release((PUNKNOWN)miniport);
+    port->lpVtbl->Release((PUNKNOWN)port);
+    
+    context->HardwareReady = TRUE;
+    context->SpeakerDeviceId = 0; // BCE transport disabled
+    
+    KdPrint(("T2Audio: StartDevice SUCCESS - WaveRT registered, BCE disabled\n"));
     return STATUS_SUCCESS;
 }

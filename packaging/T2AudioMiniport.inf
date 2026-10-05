@@ -15,6 +15,16 @@ CatalogFile=T2AudioMiniport.cat
 [T2Audio_Install.NT]
 CopyFiles=T2Audio_CopyFiles
 
+[T2Audio_Install.NT.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Wave%,T2Audio.Wave
+
+[T2Audio.Wave]
+AddReg=T2Audio.Wave.AddReg
+
+[T2Audio.Wave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%T2Audio.Wave.FriendlyName%
+
 [T2Audio_Install.NT.Services]
 AddService=T2AudioMiniport,0x00000002,T2Audio_Service
 
@@ -42,3 +52,7 @@ DiskName="T2 Audio Driver Installation Disk"
 ProviderName="T2AudioPort"
 T2Audio.DeviceDesc="Apple T2 Audio Device (6-channel Native Driver)"
 T2Audio.ServiceDesc="T2 Audio PortCls Miniport Driver"
+T2Audio.Wave.FriendlyName="T2 Audio Speaker"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSNAME_Wave="Wave"
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"

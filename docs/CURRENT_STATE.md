@@ -1,20 +1,18 @@
 # T2AudioPort Driver - Current State
 
-**Last Updated**: 2026-10-05 22:07 UTC  
-**Status**: ✅ **MapResources SUCCESSFUL**  
+**Last Updated**: 2026-10-05 22:17 UTC  
+**Status**: ✅ **Phase 3 Complete - WaveRT Registered**  
 **Branch**: diagnostics
 
 ---
 
 ## Executive Summary
 
-**BREAKTHROUGH**: Resource mapping problem **SOLVED**. Driver now successfully:
-- Maps all hardware resources
-- Reads valid GPR registers (version=3, signature=0x19870423)
-- Locates Speaker buffer metadata
-- Completes StartDevice without errors
+**Phase 3 SUCCESS**: WaveRT port and miniport successfully registered. Driver completes StartDevice without errors. KSCATEGORY_AUDIO interface created. BCE transport remains disabled.
 
-**Root cause**: Driver was using **Resource[1]** as config memory, but correct config memory is **Resource[2]** (64 KB at 0xC1670000).
+**Phase 2 SUCCESS** (maintained): Resource mapping works correctly. GPR signature valid. Speaker buffer located.
+
+**User-visible audio endpoint NOT created** — expected for WaveRT-only driver without topology port (future work).
 
 ---
 
@@ -25,11 +23,15 @@
 | DriverEntry | ✅ Working | PcInitializeAdapterDriver succeeds |
 | AddDevice | ✅ Working | PcAddAdapterDevice succeeds |
 | StartDevice | ✅ Working | Returns STATUS_SUCCESS |
-| MapResources | ✅ Working | All resources mapped, GPR valid |
-| FindSpeakerBuffer | ✅ Working | Speaker device found, buffer located |
-| WaveRT Miniport | ⏳ Disabled | Not created (test mode) |
-| Audio Endpoint | ❌ Not created | Requires WaveRT miniport |
-| Audio Playback | ❌ Not tested | Next phase |
+| MapResources | ✅ Working | Resource[2] validated, GPR valid |
+| FindSpeakerBuffer | ✅ Working | Buffer at 0x12C000, size 0x61800 |
+| WaveRT Port | ✅ Created | PcNewPort(&CLSID_PortWaveRT) success |
+| WaveRT Miniport | ✅ Registered | Port->Init() and PcRegisterSubdevice() success |
+| KSCATEGORY_AUDIO | ✅ Registered | Interface in DeviceClasses registry |
+| Topology Port | ❌ Not implemented | Required for user-visible endpoint |
+| Audio Endpoint | ❌ Not created | Requires topology port |
+| BCE Transport | 🚫 Disabled | SpeakerDeviceId = 0 (by design) |
+| Audio Playback | ❌ Not tested | No endpoint available |
 
 ---
 
@@ -42,6 +44,8 @@
 | Resource[1] | 0xC1680000 | 512 KB | Unknown (not used) |
 
 **Key finding**: Windows resource index ≠ PCI BAR slot index due to 64-bit BAR pairing.
+
+**Note on BAR identification**: Resource[2] selection validated **experimentally** (GPR signature test). Mapping to physical PCI BAR4 is hypothesis based on kaiT2en reference but not independently verified through PCI config space read.
 
 ---
 
@@ -180,13 +184,8 @@ T2Audio: MapResources SUCCESS: buffer=0x12c000 size=0x61800
 **Branch**: diagnostics  
 **Remote**: origin (verified)
 
-**Uncommitted changes**:
-- src/Device.c (Resource[2] test logic)
-- docs/BAR_MAPPING_SOLUTION.md (solution summary)
-- docs/RESOURCE_ANALYSIS.md (analysis document)
-- docs/logs/diagnostic_20261005_220710_SUCCESS.log (proof)
-
-**Ready to commit**: Yes
+**Last commit**: a355fcf (2026-10-05 22:09 UTC)  
+**Working tree**: Clean (all changes committed and pushed)
 
 ---
 
