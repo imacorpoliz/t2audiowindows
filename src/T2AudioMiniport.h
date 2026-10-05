@@ -120,6 +120,10 @@ NTSTATUS T2AudioCreateMiniport(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
     _Out_ PMINIPORTWAVERT *Miniport);
 
+NTSTATUS T2AudioCreateTopology(
+    _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _Out_ PMINIPORTTOPOLOGY *Topology);
+
 NTSTATUS T2AudioCreateSpeakerMdl(
     _Inout_ PT2AUDIO_DEVICE_CONTEXT Context,
     _Out_ PMDL *Mdl,

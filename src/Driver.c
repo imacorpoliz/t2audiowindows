@@ -57,20 +57,8 @@ T2AudioStartDevice(
     KdPrint(("T2Audio: StartDevice entry\n"));
     
     // Validate parameters
-    if (DeviceObject == NULL) {
-        KdPrint(("T2Audio: DeviceObject is NULL\n"));
-        return STATUS_INVALID_PARAMETER;
-    }
-    if (Irp == NULL) {
-        KdPrint(("T2Audio: Irp is NULL\n"));
-        return STATUS_INVALID_PARAMETER;
-    }
-    if (ResourceList == NULL) {
-        KdPrint(("T2Audio: ResourceList is NULL\n"));
-        return STATUS_INVALID_PARAMETER;
-    }
-    if (context == NULL) {
-        KdPrint(("T2Audio: Context is NULL\n"));
+    if (DeviceObject == NULL || Irp == NULL || ResourceList == NULL || context == NULL) {
+        KdPrint(("T2Audio: Invalid parameters\n"));
         return STATUS_INVALID_PARAMETER;
     }
     
@@ -86,8 +74,65 @@ T2AudioStartDevice(
     }
     KdPrint(("T2Audio: Resources mapped successfully\n"));
     
-    // Phase 3: Create WaveRT port and register subdevice
-    // BCE transport and hardware I/O remain disabled (SpeakerDeviceId == 0)
+    // Phase 3.1: Register topology FIRST (defines audio path)
+    PUNKNOWN topologyPortUnknown = NULL;
+    PPORTTOPOLOGY topologyPort = NULL;
+    PMINIPORTTOPOLOGY topologyMiniport = NULL;
+    
+    KdPrint(("T2Audio: Creating Topology port\n"));
+    status = PcNewPort(&topologyPortUnknown, &CLSID_PortTopology);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: PcNewPort(Topology) failed: 0x%08X\n", status));
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    status = topologyPortUnknown->lpVtbl->QueryInterface(topologyPortUnknown, 
+                                                          &IID_IPortTopology, 
+                                                          (PVOID*)&topologyPort);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: QueryInterface IPortTopology failed: 0x%08X\n", status));
+        topologyPortUnknown->lpVtbl->Release(topologyPortUnknown);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    topologyPortUnknown->lpVtbl->Release(topologyPortUnknown);
+    
+    KdPrint(("T2Audio: Creating Topology miniport\n"));
+    status = T2AudioCreateTopology(context, &topologyMiniport);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: CreateTopology failed: 0x%08X\n", status));
+        topologyPort->lpVtbl->Release((PUNKNOWN)topologyPort);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    KdPrint(("T2Audio: Initializing Topology port (topology FIRST, UnknownAdapter=NULL)\n"));
+    status = ((PPORT)topologyPort)->lpVtbl->Init((PPORT)topologyPort, DeviceObject, 
+                                                  Irp, (PUNKNOWN)topologyMiniport, 
+                                                  NULL, ResourceList);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: Topology Port Init failed: 0x%08X\n", status));
+        topologyMiniport->lpVtbl->Release((PUNKNOWN)topologyMiniport);
+        topologyPort->lpVtbl->Release((PUNKNOWN)topologyPort);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    KdPrint(("T2Audio: Registering Topology subdevice\n"));
+    status = PcRegisterSubdevice(DeviceObject, L"Topology", (PUNKNOWN)topologyPort);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: PcRegisterSubdevice(Topology) failed: 0x%08X\n", status));
+        topologyMiniport->lpVtbl->Release((PUNKNOWN)topologyMiniport);
+        topologyPort->lpVtbl->Release((PUNKNOWN)topologyPort);
+        T2AudioUnmapResources(context);
+        return status;
+    }
+    
+    topologyMiniport->lpVtbl->Release((PUNKNOWN)topologyMiniport);
+    topologyPort->lpVtbl->Release((PUNKNOWN)topologyPort);
+    
+    // Phase 3: Create WaveRT port (connects to topology)
     PUNKNOWN portUnknown = NULL;
     PPORTWAVERT port = NULL;
     PMINIPORTWAVERT miniport = NULL;
@@ -139,13 +184,12 @@ T2AudioStartDevice(
         return status;
     }
     
-    // Release references - PcRegisterSubdevice holds its own
     miniport->lpVtbl->Release((PUNKNOWN)miniport);
     port->lpVtbl->Release((PUNKNOWN)port);
     
     context->HardwareReady = TRUE;
     context->SpeakerDeviceId = 0; // BCE transport disabled
     
-    KdPrint(("T2Audio: StartDevice SUCCESS - WaveRT registered, BCE disabled\n"));
+    KdPrint(("T2Audio: StartDevice SUCCESS - Topology + WaveRT registered (topology FIRST), BCE disabled\n"));
     return STATUS_SUCCESS;
 }
