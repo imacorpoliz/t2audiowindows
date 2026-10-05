@@ -30,6 +30,7 @@ T2AudioMapResources(
     ULONG signature;
     ULONG bufferOffset;
     ULONG memoryResourceCount;
+    ULONG i;
     NTSTATUS status;
 
     PAGED_CODE();
@@ -44,6 +45,17 @@ T2AudioMapResources(
     memoryResourceCount = ResourceList->lpVtbl->NumberOfEntriesOfType(
             (INTERFACE *)ResourceList, CmResourceTypeMemory);
     KdPrint(("T2Audio: Memory resource count: %u\n", memoryResourceCount));
+    
+    // Log all memory resources for BAR correspondence analysis
+    for (i = 0; i < memoryResourceCount && i < 6; ++i) {
+        descriptor = ResourceList->lpVtbl->FindTranslatedEntry(
+            (INTERFACE *)ResourceList, CmResourceTypeMemory, i);
+        if (descriptor != NULL && descriptor->Type == CmResourceTypeMemory) {
+            KdPrint(("T2Audio: Resource[%u] Translated: Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+                     i, descriptor->u.Memory.Start.QuadPart, 
+                     descriptor->u.Memory.Length, descriptor->Flags));
+        }
+    }
     
     if (memoryResourceCount < 2) {
         KdPrint(("T2Audio: MapResources FAIL_B: Insufficient memory resources (need 2, got %u)\n", 
@@ -65,18 +77,63 @@ T2AudioMapResources(
     
     Context->Bar1Size = descriptor->u.Memory.Length;
     Context->Bar1Physical = descriptor->u.Memory.Start;
-    KdPrint(("T2Audio: BAR1 Physical=0x%I64X Length=0x%IX\n",
+    KdPrint(("T2Audio: Using Resource[0] as buffer memory (kaiT2en BAR0)\n"));
+    KdPrint(("T2Audio: Resource[0] Physical=0x%I64X Length=0x%IX\n",
              Context->Bar1Physical.QuadPart, Context->Bar1Size));
     
     Context->Bar1Mapped = MmMapIoSpaceEx(descriptor->u.Memory.Start,
                                          Context->Bar1Size,
                                          PAGE_READONLY | PAGE_WRITECOMBINE);
     if (Context->Bar1Mapped == NULL) {
-        KdPrint(("T2Audio: MapResources FAIL_E: MmMapIoSpaceEx failed for BAR1\n"));
+        KdPrint(("T2Audio: MapResources FAIL_E: MmMapIoSpaceEx failed for Resource[0]\n"));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    KdPrint(("T2Audio: BAR1 mapped at %p\n", Context->Bar1Mapped));
+    KdPrint(("T2Audio: Resource[0] mapped at %p\n", Context->Bar1Mapped));
 
+    // TEST: Try Resource[2] as config memory (64 KB at 0xC1670000)
+    // Hypothesis: Resource[2] might be actual config BAR, not Resource[1]
+    // Resource[2] is physically between buffers and Resource[1]
+    
+    if (memoryResourceCount >= 3) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR testDescriptor;
+        testDescriptor = ResourceList->lpVtbl->FindTranslatedEntry(
+            (INTERFACE *)ResourceList, CmResourceTypeMemory, 2);
+        
+        if (testDescriptor != NULL && testDescriptor->Type == CmResourceTypeMemory) {
+            SIZE_T testSize = testDescriptor->u.Memory.Length;
+            KdPrint(("T2Audio: Testing Resource[2] as config memory\n"));
+            KdPrint(("T2Audio: Resource[2] Physical=0x%I64X Length=0x%IX\n",
+                     testDescriptor->u.Memory.Start.QuadPart, testSize));
+            
+            if (testSize > T2AUDIO_GPR_OFFSET + sizeof(ULONG) * 3) {
+                PVOID testMapped = MmMapIoSpaceEx(testDescriptor->u.Memory.Start,
+                                                   testSize,
+                                                   PAGE_READONLY | PAGE_NOCACHE);
+                if (testMapped != NULL) {
+                    PUCHAR testGpr = (PUCHAR)testMapped + T2AUDIO_GPR_OFFSET;
+                    ULONG testVersion = READ_REGISTER_ULONG((PULONG)(testGpr + 0));
+                    ULONG testSignature = READ_REGISTER_ULONG((PULONG)(testGpr + 4));
+                    ULONG testBufferOffset = READ_REGISTER_ULONG((PULONG)(testGpr + 8));
+                    
+                    KdPrint(("T2Audio: Resource[2] GPR test: version=0x%08X signature=0x%08X bufferOffset=0x%08X\n",
+                             testVersion, testSignature, testBufferOffset));
+                    
+                    MmUnmapIoSpace(testMapped, testSize);
+                    
+                    if (testSignature == T2AUDIO_SIG) {
+                        KdPrint(("T2Audio: FOUND valid signature in Resource[2]! Using Resource[2] as config.\n"));
+                        // Switch to Resource[2] for actual mapping
+                        descriptor = testDescriptor;
+                        goto MapConfigResource;
+                    }
+                }
+            }
+        }
+    }
+    
+    // If Resource[2] test failed, fall back to Resource[1]
+    KdPrint(("T2Audio: Resource[2] test failed or unavailable, trying Resource[1]\n"));
+    
     descriptor = ResourceList->lpVtbl->FindTranslatedEntry(
         (INTERFACE *)ResourceList, CmResourceTypeMemory, 1);
     if (descriptor == NULL) {
@@ -90,9 +147,10 @@ T2AudioMapResources(
         status = STATUS_DEVICE_CONFIGURATION_ERROR;
         goto Exit;
     }
-    
+
+MapConfigResource:
     Context->Bar2Size = descriptor->u.Memory.Length;
-    KdPrint(("T2Audio: BAR2 Physical=0x%I64X Length=0x%IX\n",
+    KdPrint(("T2Audio: Using config memory: Physical=0x%I64X Length=0x%IX\n",
              descriptor->u.Memory.Start.QuadPart, Context->Bar2Size));
     
     if (Context->Bar2Size <= T2AUDIO_GPR_OFFSET + sizeof(ULONG) * 3) {

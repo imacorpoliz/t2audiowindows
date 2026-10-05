@@ -1,32 +1,35 @@
 # T2AudioPort Driver Debugging Log
 
-**Last Updated:** 2026-10-05 21:49 UTC
+**Last Updated:** 2026-10-05 22:07 UTC
 
-## Current Problem Summary
-T2AudioMiniport.sys driver **loads successfully** through PortCls (DriverEntry and AddDevice succeed), but **fails in StartDevice** with **STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)**. 
+## Current Status: ✅ PROBLEM SOLVED
 
-**ROOT CAUSE IDENTIFIED (2026-10-05 21:47 UTC):**
-- **Failure Point**: FAIL_K in T2AudioMapResources (Device.c:125)
-- **Condition**: GPR signature validation fails (0xFFFFFFFF != 0x19870423)
-- **Evidence**: All GPR registers at offset 0xC000 return 0xFFFFFFFF (hardware not responding)
-- **Resources**: 3 memory resources allocated, BAR1/BAR2 mapped successfully
-- **Conclusion**: Either T2AUDIO_GPR_OFFSET incorrect, or T2 chip requires initialization before registers accessible
+T2AudioMiniport.sys driver now **loads and starts successfully**. MapResources completes without errors.
 
-See `docs/MAPRESOURCES_ROOT_CAUSE.md` for complete analysis.
+**SOLUTION APPLIED (2026-10-05 22:07 UTC):**
+- **Problem**: Driver was using Resource[1] as config memory, but GPR registers returned 0xFFFFFFFF
+- **Root Cause**: Incorrect resource selection. Config memory is **Resource[2]** (64 KB at 0xC1670000), NOT Resource[1]
+- **Fix**: Test Resource[2] first, use it if GPR signature valid (Device.c:93-132)
+- **Result**: GPR reads now return valid values (version=3, signature=0x19870423, bufferOffset=0x4000)
+- **Speaker Buffer**: Successfully located at offset 0x12C000 in BAR0, size 0x61800 bytes
+
+See `docs/BAR_MAPPING_SOLUTION.md` for complete solution.
+See `docs/RESOURCE_ANALYSIS.md` for analysis that led to solution.
 
 **Previous problems (FIXED):** 
-- STATUS_INVALID_PARAMETER (0xC000000D) caused by swapped arguments to PcAddAdapterDevice
+- STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182) - incorrect resource selection → FIXED
+- STATUS_INVALID_PARAMETER (0xC000000D) - swapped arguments to PcAddAdapterDevice → FIXED
 
 ## Hardware Configuration
 - **Model**: MacBookPro16,1 (2019)
 - **OS**: Windows 11
 - **Audio Chip**: Apple T2 (PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01)
 - **Target Audio**: 6-channel speaker array, 48kHz, 24-bit in 32-bit containers
-- **Memory Resources (CONFIRMED 2026-10-05)**:
+- **Memory Resources (CONFIRMED 2026-10-05, CORRECTED 22:07 UTC)**:
   - 3 memory descriptors allocated by Windows
-  - BAR1: Physical 0xC1000000, Length 0x400000 (4 MB) - audio buffers
-  - BAR2: Physical 0xC1680000, Length 0x80000 (512 KB) - config/GPR
-  - BAR3: Not queried (unused by driver)
+  - Resource[0]: Physical 0xC1000000, Length 0x400000 (4 MB) - audio buffers (kaiT2en BAR0)
+  - Resource[2]: Physical 0xC1670000, Length 0x10000 (64 KB) - **config/GPR** (kaiT2en BAR4) ✅ CORRECT
+  - Resource[1]: Physical 0xC1680000, Length 0x80000 (512 KB) - unknown (not used)
 
 ## Boot Configuration
 ```
