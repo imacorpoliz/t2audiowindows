@@ -1,0 +1,52 @@
+
+00001330	1982.48425293	System	T2Audio: Device[1]: Name='Speaker' (match=7) NumOut=1	
+00001331	1982.48425293	System	T2Audio: Speaker stream[0]: NumBuffers=1	
+00001332	1982.48425293	System	T2Audio: Speaker buffer[0]: Address=0x12c000 Size=0x61800	
+00001333	1982.48425293	System	T2Audio: FindSpeaker SUCCESS: buffer located	
+00001334	1982.48425293	System	T2Audio: MapResources SUCCESS: buffer=0x12c000 size=0x61800	
+00001335	1982.48425293	System	T2Audio: Resources mapped successfully	
+00001336	1982.48425293	System	T2Audio: Creating Topology port	
+00001337	1982.48425293	System	T2Audio: Creating Topology miniport	
+00001338	1982.48425293	System	T2Audio: Topology miniport created	
+00001339	1982.48425293	System	T2Audio: Initializing Topology port (topology FIRST, UnknownAdapter=NULL)	
+00001340	1982.48425293	System	T2Audio: Topology Init success	
+00001341	1982.48425293	System	T2Audio: Topology Port Init failed: 0xC000028C	
+00001342	1988.24975586	System	T2Audio: DriverEntry called	
+00001343	1988.24975586	System	T2Audio: PortCls driver initialized	
+00001344	1988.25000000	System	T2Audio: AddDevice called	
+00001345	1988.25024414	System	T2Audio: PcAddAdapterDevice returned: 0x00000000	
+00001346	1988.27893066	System	T2Audio: StartDevice entry	
+00001347	1988.27893066	System	T2Audio: All parameters valid	
+00001348	1988.27893066	System	T2Audio: Mapping resources	
+00001349	1988.27893066	System	T2Audio: MapResources entry	
+00001350	1988.27893066	System	T2Audio: Memory resource count: 3	
+00001351	1988.27893066	System	T2Audio: Resource[0] Translated: Phys=0xC1000000 Len=0x400000 Flags=0x0084	
+00001352	1988.27893066	System	T2Audio: Resource[1] Translated: Phys=0xC1680000 Len=0x80000 Flags=0x0084	
+00001353	1988.27893066	System	T2Audio: Resource[2] Translated: Phys=0xC1670000 Len=0x10000 Flags=0x0084	
+00001354	1988.27893066	System	T2Audio: Using Resource[0] as buffer memory (kaiT2en BAR0)	
+00001355	1988.27893066	System	T2Audio: Resource[0] Physical=0xC1000000 Length=0x400000	
+00001356	1988.27893066	System	T2Audio: Resource[0] mapped at FFFFF4705EC00000	
+00001357	1988.27893066	System	T2Audio: Testing Resource[2] as config memory	
+00001358	1988.27893066	System	T2Audio: Resource[2] Physical=0xC1670000 Length=0x10000	
+00001359	1988.27893066	System	T2Audio: Resource[2] GPR test: version=0x00000003 signature=0x19870423 bufferOffset=0x00004000	
+00001360	1988.27893066	System	T2Audio: FOUND valid signature in Resource[2]! Using Resource[2] as config.	
+00001361	1988.27893066	System	T2Audio: Using config memory: Physical=0xC1670000 Length=0x10000	
+00001362	1988.27893066	System	T2Audio: BAR2 mapped at FFFFF384EC056000	
+00001363	1988.27893066	System	T2Audio: GPR read: version=0x00000003 signature=0x19870423 bufferOffset=0x00004000	
+00001364	1988.27893066	System	T2Audio: BufferStruct at offset 0x4000	
+00001365	1988.27893066	System	T2Audio: FindSpeakerBuffer entry	
+00001366	1988.27893066	System	T2Audio: BufferStruct: Signature=0x19870423 Version=3 NumDevices=5	
+00001367	1988.27905273	System	T2Audio: Device[0]: Name='Bridge Loopback' (match=0) NumOut=1	
+00001368	1988.27905273	System	T2Audio: Device[1]: Name='Speaker' (match=7) NumOut=1	
+00001369	1988.27905273	System	T2Audio: Speaker stream[0]: NumBuffers=1	
+00001370	1988.27905273	System	T2Audio: Speaker buffer[0]: Address=0x12c000 Size=0x61800	
+00001371	1988.27905273	System	T2Audio: FindSpeaker SUCCESS: buffer located	
+00001372	1988.27905273	System	T2Audio: MapResources SUCCESS: buffer=0x12c000 size=0x61800	
+00001373	1988.27905273	System	T2Audio: Resources mapped successfully	
+00001374	1988.27905273	System	T2Audio: Creating Topology port	
+00001375	1988.27905273	System	T2Audio: Creating Topology miniport	
+00001376	1988.27905273	System	T2Audio: Topology miniport created	
+00001377	1988.27905273	System	T2Audio: Initializing Topology port (topology FIRST, UnknownAdapter=NULL)	
+00001378	1988.27905273	System	T2Audio: Topology Init success	
+00001379	1988.27905273	System	T2Audio: Topology Port Init failed: 0xC000028C	
+

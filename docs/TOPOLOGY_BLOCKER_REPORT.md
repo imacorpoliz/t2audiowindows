@@ -2,13 +2,18 @@
 
 **Date:** 2026-10-06  
 **Driver:** T2AudioMiniport.sys (Apple T2 Audio WDM Driver)  
-**Critical Error:** `STATUS_INVALID_DEVICE_STATE (0xC000028C)` from PortCls Topology Port->Init()
+**Critical Error:** `STATUS_RANGE_NOT_FOUND (0xC000028C)` from PortCls Topology Port->Init()
+
+**CORRECTION (2026-10-06):** Initial report incorrectly identified 0xC000028C as STATUS_INVALID_DEVICE_STATE.  
+Actual NTSTATUS per ntstatus.h: **STATUS_RANGE_NOT_FOUND** (0xC000028C).  
+STATUS_INVALID_DEVICE_STATE = 0xC0000184 (different error).  
+See raw kernel log: `docs/logs/topology_init_failure_20261006.log`
 
 ---
 
 ## Executive Summary
 
-WaveRT miniport registration works perfectly. Topology miniport registration **consistently fails** at `Port->Init()` with STATUS_INVALID_DEVICE_STATE, preventing audio endpoint creation. This error persists across 8+ different configuration attempts, suggesting a fundamental missing requirement in the topology descriptor or device state.
+WaveRT miniport registration works perfectly. Topology miniport registration **consistently fails** at `Port->Init()` with STATUS_RANGE_NOT_FOUND (0xC000028C), preventing audio endpoint creation. This error persists across 8+ different configuration attempts, suggesting **missing or invalid data ranges** in pin descriptors.
 
 ---
 
@@ -55,11 +60,12 @@ This means:
 
 ### Error Code Analysis
 
-`STATUS_INVALID_DEVICE_STATE (0xC000028C)` means:
-> "The device is not in a valid state to perform this request."
+**CORRECTED:** `STATUS_RANGE_NOT_FOUND (0xC000028C)` per ntstatus.h means:
+> "The request failed because a valid data range could not be found."
 
-This is **NOT** `STATUS_INVALID_PARAMETER` (which would indicate malformed descriptor).  
-This suggests PortCls sees a syntactically correct descriptor, but believes the **device state** prevents topology registration.
+This is **NOT** a device state issue. PortCls is specifically looking for **data ranges** in the pin descriptors and failing to find valid/matching ranges during validation.
+
+**Initial diagnosis was incorrect:** The error name was misidentified, leading to wrong hypotheses about device state, automation tables, and filter categories. The actual issue points directly to **missing or incompatible pin data ranges**.
 
 ---
 
@@ -251,140 +257,57 @@ All methods are correctly implemented. Miniport->Init() succeeds.
 
 ## Hypotheses
 
-### Hypothesis 1: Missing Automation Table (LIKELY)
-PortCls may **require** topology filters to have at least basic property handlers:
-- `KSPROPERTY_TOPOLOGY_*` handlers
-- `KSPROPSETID_Topology` support
+### Hypothesis 1: Missing Pin Data Ranges (CONFIRMED - ROOT CAUSE)
+**STATUS_RANGE_NOT_FOUND** explicitly indicates PortCls cannot find valid data ranges during pin validation.
 
-Current descriptor has `AutomationTable = NULL` for filter, nodes, and pins.
+Current descriptor had `DataRangeCount = 0, DataRanges = NULL` for both pins.
 
 **Evidence:**
-- All WDK topology samples include automation tables
-- Topology is specifically for **property routing** (volume, mute, etc.)
-- Empty automation may trigger "invalid state" since topology has no functionality
+- Error name directly references "RANGE"
+- PortCls validates data ranges during Port->Init()
+- Even KSPIN_COMMUNICATION_NONE pins require data range descriptors
 
-**Test needed:**
-Add minimal automation table with KSPROPERTY_TOPOLOGY_NAME handler.
+**Fix applied:**
+Added KSDATARANGE with KSDATAFORMAT_TYPE_AUDIO/SUBTYPE_ANALOG/SPECIFIER_NONE for both bridge and speaker pins.
 
-### Hypothesis 2: Missing Data Ranges (POSSIBLE)
-Even with `KSPIN_COMMUNICATION_NONE`, PortCls may validate that pins have data ranges defined.
+### Hypothesis 2: Missing Automation Table (DEPRIORITIZED)
+Initially suspected based on incorrect error diagnosis. STATUS_RANGE_NOT_FOUND does not indicate missing property handlers.
 
-Current descriptor has `0, NULL` for DataRanges on both pins.
+Automation tables are for property routing (volume, mute), not topology validation.
 
-**Test needed:**
-Add dummy KSDATARANGE_AUDIO to both pins.
-
-### Hypothesis 3: PcAddAdapterDevice Size Mismatch (UNLIKELY)
-If `PcAddAdapterDevice` was called with wrong `DeviceExtensionSize`, DeviceObject may not have proper PortCls extension.
-
-Current code:
-```c
-status = PcAddAdapterDevice(DriverObject, PhysicalDeviceObject, 
-                           T2AudioStartDevice, MAX_MINIPORTS, 0);
-```
-
-`DeviceExtensionSize = 0` means PortCls allocates default size. This should be correct.
-
-**Evidence against:** WaveRT Port->Init() works fine with same DeviceObject.
-
-### Hypothesis 4: Multiple Topology Ports Forbidden (UNLIKELY)
-PortCls may enforce "only one topology per adapter."
-
-**Evidence against:** Only one topology port created. No duplicates.
-
-### Hypothesis 5: Topology Requires WaveRT Reference (POSSIBLE)
-Topology may need `UnknownAdapter` pointing to registered WaveRT miniport to validate bridge connection.
-
-**Already tested:** UnknownAdapter=WaveRT miniport pointer → still FAILED.
-
-### Hypothesis 6: Pin InstantiationCount Issue (RULED OUT)
-Initial hypothesis was that `{0, 0, 0}` means "pin cannot be instantiated."
-
-**Already tested:** Changed to `{1, 1, 0}` → still FAILED.
-
-### Hypothesis 7: Missing KSCATEGORY in Filter Categories (POSSIBLE)
-Filter descriptor has:
-```c
-0,        // CategoryCount
-NULL      // Categories
-```
-
-Topology filters may require `KSCATEGORY_AUDIO` or `KSCATEGORY_TOPOLOGY` in filter categories array.
-
-**Test needed:**
-```c
-static const GUID* g_T2AudioTopologyCategories[] = {
-    &KSCATEGORY_AUDIO
-};
-
-// In filter descriptor:
-1,
-g_T2AudioTopologyCategories
-```
+### Hypothesis 3: Missing Filter Categories (UNLIKELY)
+Filter categories advertise filter capabilities. Not required for basic topology registration.
 
 ---
 
 ## Next Steps (Priority Order)
 
-### 1. Add Automation Table (HIGH PRIORITY)
-Create minimal automation table with KSPROPERTY_TOPOLOGY handlers.
+### 1. Test Data Range Fix (COMPLETED)
+Added KSDATARANGE descriptors to both topology pins:
+- Pin 0 (bridge): AUDIO/ANALOG/NONE wildcard
+- Pin 1 (speaker): AUDIO/ANALOG/NONE wildcard
 
+**Expected:** Port->Init() should succeed with valid data ranges.
+
+### 2. Verify Topology Registration (PENDING)
+After successful Port->Init():
+- Check PcRegisterSubdevice() return code
+- Verify KSCATEGORY_AUDIO interface creation
+- Check device manager for topology subdevice
+
+### 3. Register Physical Connection (PENDING)
+Connect WaveRT and Topology filters:
 ```c
-static PCPROPERTY_ITEM g_TopologyProperties[] = {
-    {
-        &KSPROPSETID_Topology,
-        KSPROPERTY_TOPOLOGY_NAME,
-        KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT,
-        PropertyHandler_TopologyName
-    }
-};
-
-static PCAUTOMATION_TABLE g_TopologyFilterAutomation = {
-    DEFINE_PCAUTOMATION_TABLE_PROP(g_TopologyProperties, NULL)
-};
+PcRegisterPhysicalConnection(DeviceObject, 
+                            waveRTPort, KSPIN_WAVE_RENDER_SINK_SYSTEM,
+                            topologyPort, KSPIN_TOPO_WAVEOUT_SOURCE);
 ```
 
-### 2. Add Filter Categories (MEDIUM PRIORITY)
-```c
-static const GUID* g_T2AudioTopologyCategories[] = {
-    &KSCATEGORY_AUDIO
-};
+### 4. Verify Audio Endpoint Creation (PENDING)
+Check if MMDevice endpoint appears in Sound Settings after topology registration.
 
-// In PCFILTER_DESCRIPTOR:
-1,
-g_T2AudioTopologyCategories
-```
-
-### 3. Add Pin Data Ranges (MEDIUM PRIORITY)
-Even for COMMUNICATION_NONE pins, add dummy data ranges:
-```c
-static KSDATARANGE_AUDIO g_TopologyPinDataRanges = {
-    {
-        sizeof(KSDATARANGE_AUDIO),
-        0,
-        0,
-        0,
-        STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO),
-        STATICGUIDOF(KSDATAFORMAT_SUBTYPE_PCM),
-        STATICGUIDOF(KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)
-    },
-    2, 48000, 48000, 16, 16, 0
-};
-```
-
-### 4. Research WDK Samples (HIGH PRIORITY)
-Find minimal working topology example in WDK (e.g., MSVAD simple topology) and compare:
-- Automation tables
-- Pin configurations
-- Filter categories
-- Property handlers
-
-### 5. Add Debug Logging to PortCls (FALLBACK)
-If configuration fixes don't work, may need to use WinDbg to trace PortCls validation:
-```
-bp portcls!CPortTopology::Init
-.reload /f portcls.sys
-```
+### 5. Add Property Handlers (DEFERRED)
+Only if endpoint still doesn't appear. Add automation table with basic topology properties.
 
 ---
 

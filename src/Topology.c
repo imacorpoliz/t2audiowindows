@@ -10,6 +10,37 @@ typedef struct _T2AUDIO_TOPOLOGY {
     PPORTTOPOLOGY Port;
 } T2AUDIO_TOPOLOGY, *PT2AUDIO_TOPOLOGY;
 
+// Data range for bridge pin (internal connection from WaveRT)
+// This is a wildcard range that accepts any audio format
+static KSDATARANGE g_TopologyBridgePinDataRange = {
+    sizeof(KSDATARANGE),
+    0,
+    0,
+    0,
+    {STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO)},
+    {STATICGUIDOF(KSDATAFORMAT_SUBTYPE_ANALOG)},
+    {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_NONE)}
+};
+
+static PKSDATARANGE g_TopologyBridgePinDataRanges[] = {
+    &g_TopologyBridgePinDataRange
+};
+
+// Data range for speaker pin (analog output to physical speaker)
+static KSDATARANGE g_TopologySpeakerPinDataRange = {
+    sizeof(KSDATARANGE),
+    0,
+    0,
+    0,
+    {STATICGUIDOF(KSDATAFORMAT_TYPE_AUDIO)},
+    {STATICGUIDOF(KSDATAFORMAT_SUBTYPE_ANALOG)},
+    {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_NONE)}
+};
+
+static PKSDATARANGE g_TopologySpeakerPinDataRanges[] = {
+    &g_TopologySpeakerPinDataRange
+};
+
 // Forward declarations
 static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor;
 
@@ -128,7 +159,10 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
     {
         1, 1, 0, NULL,  // Max 1 instance globally, per filter; min 0
         {
-            0, NULL, 0, NULL, 0, NULL,
+            0, NULL,
+            0, NULL,
+            SIZEOF_ARRAY(g_TopologyBridgePinDataRanges),
+            g_TopologyBridgePinDataRanges,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_NONE,
             NULL,  // Bridge pin has no category
@@ -140,7 +174,10 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
     {
         1, 1, 0, NULL,  // Max 1 instance globally, per filter; min 0
         {
-            0, NULL, 0, NULL, 0, NULL,
+            0, NULL,
+            0, NULL,
+            SIZEOF_ARRAY(g_TopologySpeakerPinDataRanges),
+            g_TopologySpeakerPinDataRanges,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_NONE,
             &KSCATEGORY_AUDIO,
