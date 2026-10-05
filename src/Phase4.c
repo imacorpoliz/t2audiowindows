@@ -32,6 +32,16 @@ T2AudioCreateSpeakerMdl(
         return STATUS_INVALID_PARAMETER;
     }
 
+    // Diagnostic mode: BCE transport is disabled (SpeakerDeviceId == 0).
+    // Never hand out a hardware buffer MDL in this mode.
+    if (Context->SpeakerDeviceId == 0) {
+        *Mdl = NULL;
+        *OffsetFromFirstPage = 0;
+        *ActualSize = 0;
+        KdPrint(("T2Audio: CreateSpeakerMdl blocked: diagnostic mode\n"));
+        return STATUS_NOT_SUPPORTED;
+    }
+
     offset = (ULONG)(Context->SpeakerBufferOffset & (PAGE_SIZE - 1));
     size = (ULONG)Context->SpeakerBufferSize;
     pageCount = ADDRESS_AND_SIZE_TO_SPAN_PAGES(

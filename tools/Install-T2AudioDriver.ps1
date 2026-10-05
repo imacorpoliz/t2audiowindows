@@ -6,7 +6,8 @@
 
 param(
     [switch]$SkipBackup = $false,
-    [switch]$NoReboot = $false
+    [switch]$NoReboot = $false,
+    [switch]$Force = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,8 +44,8 @@ Write-Host "     INF: $infPath" -ForegroundColor Gray
 
 # Verify driver signature
 $driverSize = (Get-Item -LiteralPath $driverPath).Length
-if ($driverSize -ne 16896) {
-    Write-Host "[WARN] Driver size mismatch: expected 16896 bytes, got $driverSize" -ForegroundColor Yellow
+if ($driverSize -ne 38416) {
+    Write-Host "[WARN] Driver size mismatch: expected 38416 bytes (signed), got $driverSize" -ForegroundColor Yellow
     $continue = Read-Host "Continue anyway? (y/N)"
     if ($continue -ne "y") {
         exit 1
@@ -71,9 +72,12 @@ Write-Host "  - System instability" -ForegroundColor White
 Write-Host ""
 
 $confirm = Read-Host "Type 'INSTALL' to continue"
-if ($confirm -ne "INSTALL") {
+if ($confirm -ne "INSTALL" -and -not $Force) {
     Write-Host "[ABORT] Installation cancelled" -ForegroundColor Yellow
     exit 0
+}
+if ($Force) {
+    Write-Host "[FORCE] Skipping confirmation prompt" -ForegroundColor Yellow
 }
 
 Write-Host ""

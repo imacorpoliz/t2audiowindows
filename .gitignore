@@ -35,6 +35,9 @@ phase2_build_log.txt
 local_artifacts/
 local_backups/
 
+# Full kernel capture logs (keep local; commit only curated excerpts)
+docs/logs/capture_*/
+
 # Windows driver signing
 *.cat.unsigned
 

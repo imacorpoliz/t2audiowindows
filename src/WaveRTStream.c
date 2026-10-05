@@ -157,6 +157,18 @@ T2AudioStreamAllocateAudioBuffer(
         return STATUS_INVALID_PARAMETER;
     }
 
+    // Diagnostic mode: BCE transport is disabled (SpeakerDeviceId == 0).
+    // Do not expose hardware buffer memory to PortCls; refuse the stream
+    // and always initialize the out parameters.
+    if (instance->DeviceContext->SpeakerDeviceId == 0) {
+        *AudioBufferMdl = NULL;
+        *ActualSize = 0;
+        *OffsetFromFirstPage = 0;
+        *CacheType = MmNonCached;
+        KdPrint(("T2Audio: AllocateAudioBuffer blocked: diagnostic mode (no hardware MDL)\n"));
+        return STATUS_NOT_SUPPORTED;
+    }
+
     status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
                                      AudioBufferMdl,
                                      OffsetFromFirstPage,
