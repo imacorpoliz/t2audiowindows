@@ -43,3 +43,8 @@ Thumbs.db
 .DS_Store
 *.swp
 *~
+
+# MSBuild output directories
+src/bin/
+src/obj/
+

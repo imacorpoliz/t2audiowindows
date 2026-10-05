@@ -1,7 +1,11 @@
 # T2AudioPort Driver Debugging Log
 
-## Problem Summary
-T2AudioMiniport.sys driver fails to load with **STATUS_INVALID_PARAMETER (0xC000000D)** error. Device Manager shows "Problem: 0x1F (CM_PROB_FAILED_ADD)" and PnP Configuration log reports "Problem Status: 0xC000000D".
+**Last Updated:** 2026-10-05 22:40 UTC
+
+## Current Problem Summary
+T2AudioMiniport.sys driver **loads successfully** through PortCls (DriverEntry and AddDevice succeed), but **fails in StartDevice** with **STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)**. Device Manager shows "Problem Code: 10 (CM_PROB_FAILED_START)".
+
+**Previous problem (FIXED):** STATUS_INVALID_PARAMETER (0xC000000D) caused by swapped arguments to PcAddAdapterDevice.
 
 ## Hardware Configuration
 - **Model**: MacBookPro16,1 (2019)
@@ -372,13 +376,77 @@ Would require:
 - WinDbg preview on another machine
 - Network connection for debugging
 
-## Known Issues Summary
+## Known Issues and Lessons Learned
 
-1. **STATUS_INVALID_PARAMETER persists** despite all parameter fixes
-2. **No KdPrint output visible** - driver may not be loading at all
-3. **System reboot required** for driver updates (pnputil /restart-device doesn't work)
-4. **MSBuild auto-signing broken** - must sign manually with signtool
-5. **No clear indication** whether DriverEntry is called
+### FIXED Issues
+1. ✅ **STATUS_INVALID_PARAMETER (0xC000000D)** - Root cause: PcAddAdapterDevice arguments swapped
+   - MaxObjects and DeviceExtensionSize were in wrong positions
+   - Fixed by correcting call order in Driver.c:36-41
+   - Verified in binary disassembly (arg4=0x10 in r9d, arg5=0x278 on stack)
+
+### Active Issues
+1. ❌ **STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)** in T2AudioMapResources
+   - Exact failure line unknown (needs granular KdPrint)
+   - Hypothesis: Insufficient memory resources from Windows (unproven)
+   - Device Manager: ProblemCode 10 (CM_PROB_FAILED_START)
+
+### Verification Lessons Learned
+1. **File hash ≠ argument verification** - Must use dumpbin /DISASM to confirm call sites
+2. **Build artifacts in packaging/ must be signed separately** - MSBuild auto-signing disabled
+3. **KdPrint requires DebugView or WinDbg** - Event Viewer does NOT show DbgPrint output
+4. **pnputil /add-driver ≠ device start** - Package can be added but device may fail to start
+5. **Device Manager "OK" ≠ working audio** - Endpoints must exist in Sound Control Panel
+6. **Reboot may be required** - If driver file is locked, pnputil cannot replace it until reboot
+
+### Build and Signing Process
+1. **MSBuild command (VERIFIED 2026-10-05):**
+   ```powershell
+   & "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
+     T2AudioMiniport.vcxproj /p:Configuration=Debug /p:Platform=x64
+   ```
+   Output: `src\bin\Debug\T2AudioMiniport.sys`
+
+2. **Signing commands (NOT RE-VERIFIED after reorganization):**
+   ```powershell
+   signtool sign /fd SHA256 /t http://timestamp.digicert.com /a `
+     /n "T2AudioPort Test Certificate" T2AudioMiniport.sys
+   
+   Inf2Cat /driver:. /os:10_X64
+   
+   signtool sign /fd SHA256 /t http://timestamp.digicert.com /a `
+     /n "T2AudioPort Test Certificate" t2audiominiport.cat
+   ```
+
+3. **Installation (VERIFIED 2026-10-05):**
+   ```powershell
+   pnputil /add-driver "C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging\T2AudioMiniport.inf" /install
+   ```
+
+4. **Device restart (VERIFIED 2026-10-05):**
+   ```powershell
+   pnputil /restart-device "PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8"
+   ```
+
+### Rollback Process (NOT TESTED)
+**WARNING:** These commands are from previous session notes and have NOT been tested after project reorganization:
+```powershell
+# Restore AppleAudio.sys from backup
+.\tools\Rollback-T2AudioDriver.ps1
+
+# Or manually:
+# 1. Stop and disable T2AudioMiniport service
+# 2. Rename C:\Windows\System32\drivers\AppleAudio.sys.disabled back to AppleAudio.sys
+# 3. Reinstall Apple Boot Camp drivers
+```
+
+### Critical Constraints (Do Not Violate)
+1. **Do NOT bypass PcAddAdapterDevice** - PortCls framework requires it
+2. **Do NOT return fake STATUS_SUCCESS** from failed operations
+3. **Do NOT use deviceList[0] fallback** for BCE Speaker selection without name matching
+4. **Do NOT assume BAR index from resource descriptor index** - Cache type matching required
+5. **Do NOT change build output hash and claim "args verified"** - Use dumpbin disassembly
+6. **Do NOT install unverified builds** - Test builds after path changes may differ in debug info
+7. **Do NOT skip granular diagnostics** - Add logging before changing strategies
 
 ## Success Criteria
 
@@ -390,17 +458,93 @@ When this driver is working, we should see:
 
 ## Timeline
 
-- **Phase 1-9**: Driver implementation complete (BceTransport, WaveRT, streaming)
-- **Phase 10**: INF creation and installation automation
-- **2026-10-05 20:56**: ✅ STATUS_INVALID_PARAMETER (0xC000000D) FIXED
-  - PcAddAdapterDevice args corrected: MaxObjects=16, DeviceExtensionSize=632
-  - Verified in binary via dumpbin: arg4=0x10 (r9d), arg5=0x278 ([rsp+20h])
-  - DriverEntry → SUCCESS, AddDevice → SUCCESS
-  - ❌ NEW BLOCKER: T2AudioMapResources failed: 0xC0000182 (STATUS_DEVICE_CONFIGURATION_ERROR)
-  - Root cause: PCI device has 0-1 memory resources, driver requires 2 BARs
-  - Device Manager: ProblemCode 10 (CM_PROB_FAILED_START)
-  - Installed package: SHA256 30867A4BC1794839E400BE83E1D64EE9CF9E86843B61819AB5F6E3B7D5088E61
-  - Full report: logs\BOOT_TEST_20261005.md
-- **Current**: Need granular KdPrint in T2AudioMapResources to pinpoint exact failure line
-- **Next**: Investigate why Windows doesn't allocate memory resources to VEN_106B&DEV_1803
-- **After**: Either fix INF to request BARs, or rewrite MapResources to work without ResourceList
+### Phase 1-9: Driver Implementation (Pre-2026-10-05)
+- BceTransport, WaveRT, streaming interfaces implemented
+- INF created, installation automation scripts written
+- Multiple test builds with various approaches
+
+### 2026-10-05 Boot Test Session
+
+**20:30 - Reboot and installation:**
+- System rebooted after previous session's driver build
+- Old driver (22,024 bytes) replaced with new build (28,168 bytes)
+- `pnputil /add-driver` executed successfully
+- Package assigned as oem16.inf
+
+**20:50 - Boot test execution (VERIFIED):**
+- ✅ DebugView kernel capture started (admin, Capture Kernel enabled, filter "T2Audio")
+- ✅ Device restarted with `pnputil /restart-device`
+- ✅ KdPrint output captured to `logs/boot_20261005_2050_capture.log` (62,587 bytes)
+- ✅ STATUS_INVALID_PARAMETER (0xC000000D) **FIXED**
+- ✅ DriverEntry → PcInitializeAdapterDriver: SUCCESS (0x00000000)
+- ✅ AddDevice → PcAddAdapterDevice: SUCCESS (0x00000000)
+- ✅ StartDevice called with valid parameters
+- ❌ **NEW BLOCKER:** T2AudioMapResources failed: 0xC0000182 (STATUS_DEVICE_CONFIGURATION_ERROR)
+
+**PcAddAdapterDevice fix details:**
+- **Problem:** Arguments 4 and 5 were swapped (MaxObjects vs DeviceExtensionSize)
+- **Fix:** Corrected call site in Driver.c:36-41
+  - arg4 (MaxObjects) = 16
+  - arg5 (DeviceExtensionSize) = 632 (PORT_CLASS_DEVICE_EXTENSION_SIZE + sizeof(T2AUDIO_DEVICE_CONTEXT))
+- **Verification:** Disassembly confirmed arg4=0x10 in r9d, arg5=0x278 at [rsp+20h]
+
+**Evidence from DebugView log (lines 9-16):**
+```
+00000009  29.03139496  System  T2Audio: PortCls driver initialized
+00000011  29.03186798  System  T2Audio: PcAddAdapterDevice returned: 0x00000000
+00000012  29.06050491  System  T2Audio: StartDevice entry
+00000013  29.06050873  System  T2Audio: All parameters valid
+00000014  29.06050873  System  T2Audio: Mapping resources
+00000015  29.06055641  System  T2Audio: MapResources failed: 0xC0000182
+```
+
+**Current installed state:**
+- Device Manager: Status=Error, ProblemCode 10 (CM_PROB_FAILED_START)
+- Driver: C:\Windows\System32\drivers\T2AudioMiniport.sys
+- SHA256: 30867A4BC1794839E400BE83E1D64EE9CF9E86843B61819AB5F6E3B7D5088E61
+- Size: 28,168 bytes
+- INF: oem16.inf, Version 1.0.0.0
+
+**21:15 - Resource investigation (ATTEMPTED, INCONCLUSIVE):**
+- Checked registry: LogConf\BasicConfigVector empty, Resources key absent
+- Checked Win32_PnPAllocatedResource: 0 entries for VEN_106B&DEV_1803
+- **HYPOTHESIS (not proven):** Windows does not allocate 2 memory BARs to device
+- **UNKNOWN:** Exact line in Device.c that returns 0xC0000182
+- **UNKNOWN:** Actual value of NumberOfEntriesOfType(CmResourceTypeMemory)
+- **UNKNOWN:** Whether ResourceList is NULL or contains wrong types
+
+**21:30 - Project reorganization:**
+- Phase1/ → docs/research/ (buffer analysis tools)
+- Phase2/ → src/ (driver sources and vcxproj)
+- Install/ → tools/ (PowerShell scripts)
+- Old directories removed: Backup/, AppleAudio_backup/
+- Git repository initialized
+- Documentation created: README.md, CURRENT_STATE.md, THIRD_PARTY_LICENSES.md
+- .gitignore configured (secrets, artifacts excluded)
+- Initial commit: d8510ea "Initial commit: T2AudioPort Windows driver"
+
+**21:45 - Build verification after reorganization:**
+- MSBuild executed successfully (0 errors, 33 warnings)
+- Output: src\bin\Debug\T2AudioMiniport.sys
+- SHA256: 085D979658C993BEA05849A3D929A4970DEAD6829C37FA4CDD613C726ECD7FB7
+- Size: 20,992 bytes (differs from verified package due to path changes)
+- **NOT INSTALLED** — verified package (30867A4B...) remains in packaging/
+
+### Next Actions (NOT YET EXECUTED)
+
+**Immediate (next session):**
+1. Add granular KdPrint in T2AudioMapResources before each return statement
+2. Log: NumberOfEntriesOfType(CmResourceTypeMemory), Bar1Physical, Bar2Physical
+3. Rebuild, sign, install, restart device, capture DebugView output
+4. Identify exact failure line and resource state
+
+**After diagnostic:**
+- If ResourceList is NULL: Investigate why StartDevice IRP lacks resources
+- If resources present but count < 2: Research AppleAudio.sys approach, check INF LogConfig needs
+- If resources present with wrong cache types: Fix cache type matching logic
+- If MmMapIoSpaceEx fails: Add error logging for physical addresses and map attempt
+
+**Do NOT execute without diagnostic:**
+- Do NOT add INF LogConfig directive without evidence it's needed
+- Do NOT rewrite MapResources for direct PCI config access without proof ResourceList is unusable
+- Do NOT bypass PortCls or return fake STATUS_SUCCESS
