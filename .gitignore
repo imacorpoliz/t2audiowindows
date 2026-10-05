@@ -1,0 +1,45 @@
+# Secrets and certificates
+*.pfx
+*.pvk
+T2AudioCert.cer
+
+# Build artifacts
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.iobj
+*.ipdb
+src/x64/
+src/Debug/
+src/Release/
+packaging/*.pdb
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+phase2_build_log.txt
+
+# Local-only directories
+local_artifacts/
+local_backups/
+
+# Windows driver signing
+*.cat.unsigned
+
+# System and IDE
+Thumbs.db
+.DS_Store
+*.swp
+*~

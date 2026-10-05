@@ -1,0 +1,34 @@
+T2Audio Phase 1 verification record
+Date: 2026-10-05
+
+Source checks:
+- DataStructures.h contains the 64-bit BufferStruct declarations.
+- T2AUDIO_BUFFER size assertion: 0x30.
+- T2AUDIO_STREAM size assertion: 0x12E4.
+- T2AUDIO_DEVICE size assertion: 0xBDEC.
+- BufferStruct devices offset assertion: 0x10.
+- Parser validates signature, version, device count, stream count, and buffer count.
+- Parser uses the verified Windows device stride 0xBDEC.
+- Ring arithmetic guards a zero-sized ring.
+- QPC interpolation clamps reverse/invalid time and uses QPC frequency.
+- Native format contract represented: 48000 Hz, 6 channels, 24-bit samples in 32-bit containers.
+
+Execution:
+- Visual Studio 2026 x64 Native Tools environment initialized successfully.
+- Build command completed successfully:
+  cl /nologo /W4 /std:c11 /TC DataStructures.h BufferStructParser.c RingBufferMath.c Phase1Test.c /Fe:Phase1Test.exe
+- Phase1Test.exe executed successfully.
+- RESULT: PASS (0 failure(s))
+
+Runtime output:
+- PASS: mock BufferStruct allocation
+- PASS: Speaker output buffer parsed
+- PASS: unknown device rejected
+- PASS: native Speaker format is 48kHz, 6ch, 24-in-32
+- PASS: ring origin
+- PASS: ring wrap-around
+- PASS: ring exact boundary
+- PASS: zero-sized ring guarded
+- PASS: QPC frequency available
+- PASS: QPC positions monotonic
+- PASS: QPC one/two second interpolation
