@@ -1,229 +1,158 @@
-# T2AudioPort Driver - Current State
+# T2AudioPort Driver - Current State (Authoritative)
 
-**Last Updated**: 2026-10-05 22:17 UTC  
-**Status**: ✅ **Phase 3 Complete - WaveRT Registered**  
-**Branch**: diagnostics
+**Last Updated**: 2026-10-06
+**Status**: Diagnostic mode — Topology + WaveRT registered, BCE transport and audio I/O disabled by design
+**Branch**: `diagnostics`
+**Last Commit**: `96451da`
+
+> This file (`docs/CURRENT_STATE.md`) is the single authoritative status document.
+> The former root `CURRENT_STATE.md` is superseded and now only points here.
 
 ---
 
 ## Executive Summary
 
-**Phase 3 SUCCESS**: WaveRT port and miniport successfully registered. Driver completes StartDevice without errors. KSCATEGORY_AUDIO interface created. BCE transport remains disabled.
+`T2AudioStartDevice` completes with `STATUS_SUCCESS`. It registers a **Topology**
+subdevice first, then a **WaveRT** subdevice (`Driver.c:122`, `Driver.c:177`).
+No user-visible audio endpoint is created, because the two filters are not wired by a
+physical connection and the device is intentionally held in diagnostic mode.
 
-**Phase 2 SUCCESS** (maintained): Resource mapping works correctly. GPR signature valid. Speaker buffer located.
+The diagnostic mode is enforced at multiple layers (see "Diagnostic-mode boundaries"
+below), so no audio path, BCE transport, or hardware command can activate.
 
-**User-visible audio endpoint NOT created** — expected for WaveRT-only driver without topology port (future work).
+**Build reproducibility caveat:** The MSBuild link step is **not deterministic** —
+two consecutive rebuilds of identical source produce different SHA256 hashes (the PE
+`TimeDateStamp` and the CodeView PDB GUID/age differ; 21 bytes in the Release image).
+Therefore a hash mismatch between a local build and an installed/package binary is
+**not by itself** evidence of different source.
 
 ---
 
-## Current Driver Status
+## Component Status
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| DriverEntry | ✅ Working | PcInitializeAdapterDriver succeeds |
-| AddDevice | ✅ Working | PcAddAdapterDevice succeeds |
-| StartDevice | ✅ Working | Returns STATUS_SUCCESS |
-| MapResources | ✅ Working | Resource[2] validated, GPR valid |
-| FindSpeakerBuffer | ✅ Working | Buffer at 0x12C000, size 0x61800 |
-| WaveRT Port | ✅ Created | PcNewPort(&CLSID_PortWaveRT) success |
-| WaveRT Miniport | ✅ Registered | Port->Init() and PcRegisterSubdevice() success |
-| KSCATEGORY_AUDIO | ✅ Registered | Interface in DeviceClasses registry |
-| Topology Port | ❌ Not implemented | Required for user-visible endpoint |
-| Audio Endpoint | ❌ Not created | Requires topology port |
-| BCE Transport | 🚫 Disabled | SpeakerDeviceId = 0 (by design) |
-| Audio Playback | ❌ Not tested | No endpoint available |
+| DriverEntry | Working | `PcInitializeAdapterDriver` succeeds |
+| AddDevice | Working | `PcAddAdapterDevice` succeeds |
+| StartDevice | Working | Returns `STATUS_SUCCESS` |
+| MapResources | Working | 3 memory resources; Resource[2] selected as config |
+| FindSpeakerBuffer | Working | Speaker buffer `0x12c000`, size `0x61800` |
+| Topology Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Topology", ...)` |
+| WaveRT Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Wave", ...)` |
+| Audio Endpoint | Not created | No physical connection between filters (by design) |
+| BCE Transport | Disabled | `SpeakerDeviceId = 0`; name matching not implemented |
+| Audio I/O (StartIo/StopIo) | Blocked | Return `STATUS_NOT_SUPPORTED` while `SpeakerDeviceId == 0` |
+| Audio Playback | Not implemented | Out of scope |
 
 ---
 
-## Hardware Resources (Confirmed)
-
-| Windows Resource | Physical Address | Size | Purpose |
-|------------------|------------------|------|---------|
-| Resource[0] | 0xC1000000 | 4 MB | Audio buffers (kaiT2en BAR0) |
-| Resource[2] | 0xC1670000 | 64 KB | **Config memory** (kaiT2en BAR4) ✅ |
-| Resource[1] | 0xC1680000 | 512 KB | Unknown (not used) |
-
-**Key finding**: Windows resource index ≠ PCI BAR slot index due to 64-bit BAR pairing.
-
-**Note on BAR identification**: Resource[2] selection validated **experimentally** (GPR signature test). Mapping to physical PCI BAR4 is hypothesis based on kaiT2en reference but not independently verified through PCI config space read.
-
----
-
-## GPR Registers (Valid)
-
-From Resource[2] + 0xC000:
-
-| Register | Value | Expected | Status |
-|----------|-------|----------|--------|
-| Version | 0x00000003 | ≥ 2 | ✅ Valid |
-| Signature | 0x19870423 | 0x19870423 | ✅ Match |
-| Buffer Offset | 0x00004000 | Variable | ✅ Valid |
-
-**BufferStruct location**: Resource[2] + 0x4000 (16 KB offset)
-
----
-
-## Speaker Buffer Metadata
+## Installed / Package Binary (Part 1 evidence)
 
 | Property | Value |
 |----------|-------|
-| Device Name | "Speaker" |
-| Device Index | 1 (out of 5 total devices) |
-| Output Streams | 1 |
-| Buffers per Stream | 1 |
-| Buffer Offset (in BAR0) | 0x12C000 (1,228,800 bytes) |
-| Buffer Size | 0x61800 (399,360 bytes ≈ 390 KB) |
-| Physical Address | 0xC112C000 |
+| System file | `C:\Windows\System32\drivers\T2AudioMiniport.sys` |
+| SHA256 | `62C1EE88…` |
+| Size | 38,416 bytes |
+| INF | `oem16.inf` |
+| `packaging/` | `T2AudioMiniport.sys` / `.inf` / `t2audiominiport.cat` — byte-identical to the installed files |
+| Capture | `docs/logs/capture_20261006_023822/` (43 `T2Audio:` lines, device restart, DbgView exit 0) |
+
+Sanitized excerpt of the capture: `docs/logs/EXCERPT_20261006_023822.md`.
 
 ---
 
-## Installed Driver
+## Diagnostic-mode boundaries (Part 4, static verification)
 
-**File**: C:\Windows\System32\drivers\T2AudioMiniport.sys  
-**SHA256**: 220B956584C9223B90A48DD219FBD0CABB2EA5F5D1D4FB291CE2C7830DEF0C31  
-**Size**: 33,288 bytes (signed)  
-**INF**: oem16.inf  
-**Date**: 2026-10-05 22:06 UTC
+The following gates keep the driver in diagnostic mode. All verified by static reading
+of the current source:
 
-**Changes from previous version**:
-- Added Resource[2] test before Resource[1]
-- Automatic selection of correct config resource
-- Detailed logging of all resources and GPR values
+1. `T2AudioMapResources` sets `Context->SpeakerDeviceId = 0` unconditionally
+   (`Device.c:220`) — the `BufferStruct` contract has no device-id field.
+2. `T2AudioStartDevice` also sets `context->SpeakerDeviceId = 0` (`Driver.c:190`).
+3. `T2AudioFindSpeakerDeviceId` returns `STATUS_NOT_IMPLEMENTED` — BCE name matching via
+   `GET_PROPERTY` is not implemented (`BceTransport.c:222-227`). No device id is ever derived.
+4. `T2AudioCreateSpeakerMdl` zeroes outputs and returns `STATUS_NOT_SUPPORTED` when
+   `SpeakerDeviceId == 0` (`Phase4.c:37-43`).
+5. `T2AudioStartIo` (`Phase4.c:119`) and `T2AudioStopIo` (`Phase4.c:168`) return
+   `STATUS_NOT_SUPPORTED` under the same condition.
+6. `T2AudioStreamAllocateAudioBuffer` returns `STATUS_NOT_SUPPORTED` (outputs
+   initialized) in diagnostic mode (`WaveRTStream.c:143`).
+7. `T2AudioStreamSetState` validates `KSSTATE_STOP..KSSTATE_RUN`; it only calls
+   `StartIo`/`StopIo` on RUN/STOP, which are blocked above (`WaveRTStream.c:75`).
+8. `T2AudioMiniportNewStream` rejects capture and any pin other than 0
+   (`WaveRTMiniport.c:219`).
+9. There is **no** `PcRegisterPhysicalConnection` / `IPort::NewConnection` anywhere in
+   `src/` — the WaveRT and Topology filters are not wired together.
 
----
-
-## Log Evidence
-
-From `diagnostic_20261005_220710_SUCCESS.log` (lines 16-31):
-
-```
-T2Audio: Testing Resource[2] as config memory
-T2Audio: Resource[2] Physical=0xC1670000 Length=0x10000
-T2Audio: Resource[2] GPR test: version=0x00000003 signature=0x19870423 bufferOffset=0x00004000
-T2Audio: FOUND valid signature in Resource[2]! Using Resource[2] as config.
-T2Audio: Using config memory: Physical=0xC1670000 Length=0x10000
-T2Audio: BAR2 mapped at FFFFF384E967F000
-T2Audio: GPR read: version=0x00000003 signature=0x19870423 bufferOffset=0x00004000
-T2Audio: BufferStruct at offset 0x4000
-T2Audio: BufferStruct: Signature=0x19870423 Version=3 NumDevices=5
-T2Audio: Device[0]: Name='Bridge Loopback' (match=0) NumOut=1
-T2Audio: Device[1]: Name='Speaker' (match=7) NumOut=1
-T2Audio: Speaker stream[0]: NumBuffers=1
-T2Audio: Speaker buffer[0]: Address=0x12c000 Size=0x61800
-T2Audio: FindSpeaker SUCCESS: buffer located
-T2Audio: MapResources SUCCESS: buffer=0x12c000 size=0x61800
-```
+No BCE transport, no audio path, and no physical-connection registration is active.
 
 ---
 
-## Next Steps
+## Pin scheme
 
-### Phase 3: Enable Audio Endpoint (NOT STARTED)
+The WaveRT / Topology pin, node, and connection layout is documented in
+`docs/WAVERT_TOPOLOGY_PINS.md` (descriptive only; no implementation change).
 
-1. Remove test mode flag in StartDevice
-2. Uncomment WaveRT miniport creation
-3. Register subdevice with PortCls
-4. Verify audio endpoint appears in Windows Sound settings
-5. Test basic playback (generate test tone)
+---
 
-**Prerequisites**:
-- Current MapResources logic (working) ✅
-- WaveRT miniport implementation (exists, disabled)
-- Property handlers for format/position (exists)
+## Packaging consolidation (Part 3)
 
-**Risk**: Medium. Endpoint creation is standard PortCls, but format negotiation may need tuning.
+- `packaging/` is the single canonical package directory.
+- Duplicate binaries removed from `tools/` (`T2AudioMiniport.sys`, `.inf`, `t2audiominiport.cat`)
+  and the unused `src/Driver_WaveRTFirst_BACKUP.c` (was tracked, not in the project).
+- `tools/Install-T2AudioDriver.ps1`, `tools/Rollback-T2AudioDriver.ps1`,
+  `tools/PreInstall-Check.ps1` now resolve paths relative to `$PSScriptRoot`
+  (`..\packaging`, `..\Backup`).
+- `packaging/t2audio.cdf` uses relative paths.
+- `tools/INSTALL_SCRIPTS_README.md` updated accordingly.
 
-### Phase 4: Audio Playback Testing
+---
 
-1. Configure sample rate (48 kHz), bit depth (24-bit), channels (6)
-2. Implement GetPosition for stream position reporting
-3. Test playback with Windows Media Player or test app
-4. Verify data reaches Speaker buffer in BAR0
+## C++ conversion (Part 2)
 
-**Prerequisites**:
-- Audio endpoint created ✅ (after Phase 3)
-- Hardware DMA working (unknown, needs testing)
-- T2 chip DSP initialized (unknown, likely needed)
+`Driver.c` and `Device.c` are compiled as C++ (`CompileAsCpp` per file, Debug|x64 and
+Release|x64). `DriverEntry`/`T2AudioAddDevice` are wrapped in `extern "C"`; vtable calls
+use direct virtual dispatch; `IResourceList` methods are called directly. C4133 is
+eliminated in both configurations. Remaining warnings are non-blocking (C4152 vtable
+function/data pointer conversion, C4189 unused locals, C4996 deprecated pool API,
+C4100 unused params, C4115 from WDK headers).
 
-### Phase 5: DSP and Synchronization
+---
 
-1. Research T2 DSP initialization sequence from kaiT2en/AppleAudio
-2. Implement sample rate configuration
-3. Implement volume control (if needed)
-4. Implement start/stop/pause commands
+## Build
 
-**Prerequisites**:
-- Audio plays but may have issues (distortion, timing)
-- Understanding of T2 DSP register layout
+- Toolchain: MSBuild 18.10.1, WDK `10.0.28000.0`, VS 18 Community.
+- Command (from `src\`):
+  `MSBuild.exe T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild`
+- Output: `src\bin\Release\T2AudioMiniport.sys` (~17,920 bytes).
+- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~30,720 bytes).
+- Only Debug builds emit `KdPrint` output (`DBG` is not defined in Release).
+- Builds are non-reproducible (see Executive Summary); do not compare hashes across rebuilds.
 
 ---
 
 ## Known Limitations
 
-1. **Test mode enabled**: StartDevice returns success but doesn't create audio endpoint
-2. **No volume control**: Not implemented yet
-3. **No power management**: Device always on
-4. **No hotplug handling**: Driver assumes device present at boot
-5. **Single format**: Hardcoded to 48kHz/24-bit/6-channel
+1. No user-visible audio endpoint (no physical connection between filters).
+2. BCE transport disabled; speaker device id not discovered.
+3. Audio I/O blocked in diagnostic mode.
+4. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
+5. No volume control, power management, or hotplug handling.
+6. `C4152` vtable warnings not resolved (unrelated to C4133, which is fixed).
 
 ---
 
-## Build Configuration
+## Git
 
-**Project**: C:\Users\othysa\Desktop\mbp\T2AudioPort\src\T2AudioMiniport.vcxproj  
-**Toolchain**: MSBuild 18.10.1, WDK 10.0.28000.0  
-**Platform**: x64 Debug  
-**Signing**: Manual with SHA256, DigiCert timestamp  
-**Certificate**: CN=T2AudioPort Test Certificate (SHA1: CA2DE95D...)
-
----
-
-## Git Repository
-
-**URL**: https://github.com/imacorpoliz/t2audiowindows  
-**Branch**: diagnostics  
-**Remote**: origin (verified)
-
-**Last commit**: a355fcf (2026-10-05 22:09 UTC)  
-**Working tree**: Clean (all changes committed and pushed)
+- Remote: `origin` — `https://github.com/imacorpoliz/t2audiowindows`
+- Branch: `diagnostics`
+- Do not force-push. Never commit secrets, PFX/PVK, full kernel logs, or Apple binaries.
+  Full kernel logs stay local; only sanitized excerpts go to Git.
 
 ---
 
-## References
+## Device
 
-- **kaiT2en**: https://github.com/kaitek666/kaiT2en (Linux T2 audio driver)
-  - Buffer mapping: modules/t2bce_audio/audio.c:100-104
-  - BAR0 = buffers, BAR4 = config, GPR at +0xC000
-- **AppleAudio.sys**: Original Windows driver (disabled, reference only)
-- **DEBUGGING_LOG.md**: Historical debugging record
-- **MAPRESOURCES_ROOT_CAUSE.md**: Initial diagnostic session (FAIL_K identified)
-
----
-
-## Device Information
-
-**Model**: MacBookPro16,1 (2019)  
-**OS**: Windows 11  
-**PCI Device**: PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8  
-**Friendly Name**: Apple T2 Audio Device (6-channel Native Driver)  
-**Current Status**: Error (expected until WaveRT miniport enabled)
-
-**Boot Configuration**:
-```
-testsigning=Yes
-nointegritychecks=Yes
-loadoptions=DISABLE_INTEGRITY_CHECKS
-```
-
----
-
-## Critical Success Factors
-
-✅ Resource mapping works  
-✅ GPR signature valid  
-✅ Speaker buffer located  
-⏳ Audio endpoint creation (next)  
-⏳ Playback testing (future)  
-⏳ DSP initialization (future)
-
-**Blocker removed**: STATUS_DEVICE_CONFIGURATION_ERROR resolved by using correct resource.
+- Model: MacBookPro16,1 (2019), Windows 11
+- Instance: `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8`
+- Boot config: `testsigning=Yes`, `nointegritychecks=Yes`, `loadoptions=DISABLE_INTEGRITY_CHECKS`

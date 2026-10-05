@@ -21,8 +21,9 @@ if (-not $isAdmin) {
 }
 Write-Host "[OK] Running as Administrator" -ForegroundColor Green
 
-# Find backup directory
-$backupDir = "C:\Users\$env:USERNAME\Desktop\mbp\T2AudioPort\Backup"
+# Find backup directory (project-root relative)
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$backupDir = Join-Path $projectRoot "Backup"
 if (-not (Test-Path -LiteralPath $backupDir)) {
     Write-Host "[ERROR] Backup directory not found: $backupDir" -ForegroundColor Red
     Write-Host "        Cannot proceed without backup" -ForegroundColor Red

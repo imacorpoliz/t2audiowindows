@@ -8,7 +8,7 @@
 
 ## Read These Files First
 
-1. **CURRENT_STATE.md** — Authoritative project status (verified facts, current blocker, next steps)
+1. **docs/CURRENT_STATE.md** — Authoritative project status (verified facts, current blocker, next steps)
 2. **README.md** — Project overview, structure, build instructions
 3. **docs/DEBUGGING_LOG.md** — Session history, timeline, lessons learned
 4. **docs/logs/BOOT_TEST_20261005.md** — Full boot test report with evidence

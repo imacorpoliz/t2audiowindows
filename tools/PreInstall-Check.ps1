@@ -63,8 +63,9 @@ if (-not (Test-Path -LiteralPath $appleAudioPath)) {
     Write-Host "[OK] AppleAudio.sys found" -ForegroundColor Green
 }
 
-# Create backup directory
-$backupDir = "C:\Users\$env:USERNAME\Desktop\mbp\T2AudioPort\Backup"
+# Create backup directory (project-root relative)
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$backupDir = Join-Path $projectRoot "Backup"
 if (-not (Test-Path -LiteralPath $backupDir)) {
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 }

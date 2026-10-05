@@ -24,10 +24,11 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# Verify installation files exist
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$driverPath = Join-Path $scriptDir "T2AudioMiniport.sys"
-$infPath = Join-Path $scriptDir "T2AudioMiniport.inf"
+# Verify installation files exist (canonical package lives in ..\packaging)
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$packageDir = Join-Path $projectRoot "packaging"
+$driverPath = Join-Path $packageDir "T2AudioMiniport.sys"
+$infPath = Join-Path $packageDir "T2AudioMiniport.inf"
 
 if (-not (Test-Path -LiteralPath $driverPath)) {
     Write-Host "[FAIL] Driver not found: $driverPath" -ForegroundColor Red

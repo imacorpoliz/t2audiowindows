@@ -81,6 +81,10 @@ typedef struct _T2AUDIO_STREAM_CONTEXT {
 typedef struct _T2AUDIO_MINIPORT T2AUDIO_MINIPORT, *PT2AUDIO_MINIPORT;
 typedef struct _T2AUDIO_WAVERT_STREAM T2AUDIO_WAVERT_STREAM, *PT2AUDIO_WAVERT_STREAM;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 DRIVER_INITIALIZE DriverEntry;
 DRIVER_ADD_DEVICE T2AudioAddDevice;
 
@@ -157,5 +161,9 @@ NTSTATUS T2AudioGetDeviceList(
 NTSTATUS T2AudioFindSpeakerDeviceId(
     _In_ PT2AUDIO_DEVICE_CONTEXT Context,
     _Out_ PULONG64 DeviceId);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

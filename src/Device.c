@@ -42,14 +42,14 @@ T2AudioMapResources(
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
     
-    memoryResourceCount = ResourceList->lpVtbl->NumberOfEntriesOfType(
-            (INTERFACE *)ResourceList, CmResourceTypeMemory);
+    memoryResourceCount = ResourceList->NumberOfEntriesOfType(
+            CmResourceTypeMemory);
     KdPrint(("T2Audio: Memory resource count: %u\n", memoryResourceCount));
     
     // Log all memory resources for BAR correspondence analysis
     for (i = 0; i < memoryResourceCount && i < 6; ++i) {
-        descriptor = ResourceList->lpVtbl->FindTranslatedEntry(
-            (INTERFACE *)ResourceList, CmResourceTypeMemory, i);
+        descriptor = ResourceList->FindTranslatedEntry(
+            CmResourceTypeMemory, i);
         if (descriptor != NULL && descriptor->Type == CmResourceTypeMemory) {
             KdPrint(("T2Audio: Resource[%u] Translated: Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
                      i, descriptor->u.Memory.Start.QuadPart, 
@@ -63,8 +63,8 @@ T2AudioMapResources(
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
-    descriptor = ResourceList->lpVtbl->FindTranslatedEntry(
-        (INTERFACE *)ResourceList, CmResourceTypeMemory, 0);
+    descriptor = ResourceList->FindTranslatedEntry(
+        CmResourceTypeMemory, 0);
     if (descriptor == NULL) {
         KdPrint(("T2Audio: MapResources FAIL_C: Memory resource 0 descriptor is NULL\n"));
         return STATUS_DEVICE_CONFIGURATION_ERROR;
@@ -96,8 +96,8 @@ T2AudioMapResources(
     
     if (memoryResourceCount >= 3) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR testDescriptor;
-        testDescriptor = ResourceList->lpVtbl->FindTranslatedEntry(
-            (INTERFACE *)ResourceList, CmResourceTypeMemory, 2);
+        testDescriptor = ResourceList->FindTranslatedEntry(
+            CmResourceTypeMemory, 2);
         
         if (testDescriptor != NULL && testDescriptor->Type == CmResourceTypeMemory) {
             SIZE_T testSize = testDescriptor->u.Memory.Length;
@@ -134,8 +134,8 @@ T2AudioMapResources(
     // If Resource[2] test failed, fall back to Resource[1]
     KdPrint(("T2Audio: Resource[2] test failed or unavailable, trying Resource[1]\n"));
     
-    descriptor = ResourceList->lpVtbl->FindTranslatedEntry(
-        (INTERFACE *)ResourceList, CmResourceTypeMemory, 1);
+    descriptor = ResourceList->FindTranslatedEntry(
+        CmResourceTypeMemory, 1);
     if (descriptor == NULL) {
         KdPrint(("T2Audio: MapResources FAIL_F: Memory resource 1 descriptor is NULL\n"));
         status = STATUS_DEVICE_CONFIGURATION_ERROR;

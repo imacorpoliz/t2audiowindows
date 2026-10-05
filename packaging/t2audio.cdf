@@ -1,10 +1,10 @@
 [CatalogHeader]
 Name=t2audiominiport.cat
-ResultDir=C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging
+ResultDir=.
 PublicVersion=0x0000001
 CatalogVersion=2
 HashAlgorithms=SHA256
 
 [CatalogFiles]
-<HASH>C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging\T2AudioMiniport.sys=C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging\T2AudioMiniport.sys
-<HASH>C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging\T2AudioMiniport.inf=C:\Users\othysa\Desktop\mbp\T2AudioPort\packaging\T2AudioMiniport.inf
+<HASH>T2AudioMiniport.sys=T2AudioMiniport.sys
+<HASH>T2AudioMiniport.inf=T2AudioMiniport.inf

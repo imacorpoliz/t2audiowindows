@@ -5,15 +5,24 @@
 ## Contents
 
 ```
-Install/
-├── T2AudioMiniport.sys          - Driver binary (16896 bytes)
+packaging/                        - Canonical signed driver package (single source of truth)
+├── T2AudioMiniport.sys          - Driver binary (38416 bytes, signed)
 ├── T2AudioMiniport.inf          - Driver installation information
+├── t2audiominiport.cat          - Signed catalog
+└── t2audio.cdf                  - Catalog definition (makecat input)
+
+tools/                            - Installation and diagnostics scripts
 ├── PreInstall-Check.ps1         - Safety check and backup script
-├── Install-T2AudioDriver.ps1    - Main installation script
+├── Install-T2AudioDriver.ps1    - Main installation script (reads ..\packaging)
 ├── PostInstall-Validate.ps1     - Validation and testing script
 ├── Rollback-T2AudioDriver.ps1   - Emergency rollback script
-└── README.md                    - This file
+├── Capture-T2AudioLog.ps1       - Kernel debug log capture
+└── README.md                    - Script documentation
 ```
+
+> `packaging/` is the ONLY canonical location for the driver binaries. The
+> scripts resolve it as `$PSScriptRoot\..\packaging`; there are no duplicate
+> copies under `tools/`.
 
 ## Quick Start
 
@@ -29,7 +38,7 @@ Install/
 
 1. **Run Pre-Installation Check:**
    ```powershell
-   cd C:\Users\<your-username>\Desktop\mbp\T2AudioPort\Install
+   cd C:\Users\<your-username>\Desktop\mbp\T2AudioPort\tools
    .\PreInstall-Check.ps1
    ```
    This will:
@@ -273,4 +282,4 @@ For issues, questions, or contributions:
 
 **Last Updated:** 2026-10-05  
 **Driver Version:** 1.0.0  
-**Build:** 16896 bytes, x64, Debug configuration
+**Build:** 38416 bytes, x64 (signed package in `packaging/`)
