@@ -12,6 +12,15 @@
 #define T2AUDIO_MAX_BUFFERS 100u
 #define T2AUDIO_GPR_OFFSET ((SIZE_T)0xC000)
 
+// Pin indices. The WaveRT filter exposes a render streaming pin (0) and a
+// bridge pin (1). The topology filter exposes a bridge input pin (0) and a
+// speaker output pin (1). The bridge pins are wired together with
+// PcRegisterPhysicalConnection.
+#define T2AUDIO_WAVE_PIN_RENDER_SINK 0u
+#define T2AUDIO_WAVE_PIN_BRIDGE      1u
+#define T2AUDIO_TOPO_PIN_BRIDGE      0u
+#define T2AUDIO_TOPO_PIN_SPEAKER     1u
+
 #pragma pack(push, 4)
 typedef struct _T2AUDIO_BUFFER_ENTRY {
     SIZE_T Address;

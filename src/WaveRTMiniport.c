@@ -17,9 +17,13 @@ static const GUID g_T2AudioCategoryAudio = {
     0x6994ad04, 0x93ef, 0x11d0,
     { 0xa3, 0xcc, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
 };
-static const GUID g_T2AudioNodeSpeaker = {
-    0xdff21ce1, 0xf70f, 0x11d0,
-    { 0xb9, 0x17, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
+static const GUID g_T2AudioSubtypeAnalog = {
+    0x6dba3190, 0x67bd, 0x11cf,
+    { 0xa0, 0xf7, 0x00, 0x20, 0xaf, 0xd1, 0x56, 0xe4 }
+};
+static const GUID g_T2AudioSpecifierNone = {
+    0x0f6417d6, 0xc318, 0x11d0,
+    { 0xa4, 0x3f, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
 };
 
 typedef struct _T2AUDIO_MINIPORT {
@@ -96,11 +100,29 @@ static PKSDATARANGE g_T2AudioSpeakerRanges[] = {
     (PKSDATARANGE)&g_T2AudioSpeakerRange
 };
 
+// Bridge pin data range: analog, no specifier. This must match the topology
+// bridge pin range so that PcRegisterPhysicalConnection can wire the two
+// filters together.
+static KSDATARANGE g_T2AudioBridgeRange = {
+    sizeof(KSDATARANGE),
+    0,
+    0,
+    0,
+    STATIC_KSDATAFORMAT_TYPE_AUDIO,
+    STATIC_KSDATAFORMAT_SUBTYPE_ANALOG,
+    STATIC_KSDATAFORMAT_SPECIFIER_NONE
+};
+
+static PKSDATARANGE g_T2AudioBridgeRanges[] = {
+    &g_T2AudioBridgeRange
+};
+
 static PCPIN_DESCRIPTOR g_T2AudioPins[] = {
+    // Pin 0: render streaming pin (sink). The audio engine opens this pin.
     {
         1,
         1,
-        1,
+        0,
         NULL,
         {
             0,
@@ -112,10 +134,34 @@ static PCPIN_DESCRIPTOR g_T2AudioPins[] = {
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_SINK,
             &g_T2AudioCategoryAudio,
-            &g_T2AudioNodeSpeaker,
+            NULL,
+            0
+        }
+    },
+    // Pin 1: bridge pin to the topology filter (physical connection).
+    {
+        0,
+        0,
+        0,
+        NULL,
+        {
+            0,
+            NULL,
+            0,
+            NULL,
+            SIZEOF_ARRAY(g_T2AudioBridgeRanges),
+            g_T2AudioBridgeRanges,
+            KSPIN_DATAFLOW_OUT,
+            KSPIN_COMMUNICATION_NONE,
+            &g_T2AudioCategoryAudio,
+            NULL,
             0
         }
     }
+};
+
+static PCCONNECTION_DESCRIPTOR g_T2AudioConnections[] = {
+    { PCFILTER_NODE, T2AUDIO_WAVE_PIN_RENDER_SINK, PCFILTER_NODE, T2AUDIO_WAVE_PIN_BRIDGE }
 };
 
 static PCFILTER_DESCRIPTOR g_T2AudioFilterDescriptor = {
@@ -127,8 +173,8 @@ static PCFILTER_DESCRIPTOR g_T2AudioFilterDescriptor = {
     0,
     0,
     NULL,
-    0,
-    NULL,
+    SIZEOF_ARRAY(g_T2AudioConnections),
+    g_T2AudioConnections,
     0,
     NULL
 };
@@ -157,35 +203,57 @@ T2AudioMiniportDataRangeIntersection(
         PVOID ResultantFormat,
     _Out_ PULONG ResultantFormatLength)
 {
-    KSDATAFORMAT_WAVEFORMATEX format;
-
     UNREFERENCED_PARAMETER(Miniport);
     UNREFERENCED_PARAMETER(DataRange);
     UNREFERENCED_PARAMETER(MatchingDataRange);
 
-    if (PinId != 0 || ResultantFormatLength == NULL) {
+    if (ResultantFormatLength == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    *ResultantFormatLength = sizeof(format);
-    if (OutputBufferLength < sizeof(format) || ResultantFormat == NULL) {
-        return STATUS_BUFFER_TOO_SMALL;
+    if (PinId == T2AUDIO_WAVE_PIN_RENDER_SINK) {
+        KSDATAFORMAT_WAVEFORMATEX format;
+
+        *ResultantFormatLength = sizeof(format);
+        if (OutputBufferLength < sizeof(format) || ResultantFormat == NULL) {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        RtlZeroMemory(&format, sizeof(format));
+        format.DataFormat.FormatSize = sizeof(format);
+        format.DataFormat.MajorFormat = g_T2AudioTypeAudio;
+        format.DataFormat.SubFormat = g_T2AudioSubtypePcm;
+        format.DataFormat.Specifier = g_T2AudioSpecifierWaveformex;
+        format.WaveFormatEx.wFormatTag = WAVE_FORMAT_PCM;
+        format.WaveFormatEx.nChannels = 6;
+        format.WaveFormatEx.nSamplesPerSec = 48000;
+        format.WaveFormatEx.wBitsPerSample = 32;
+        format.WaveFormatEx.nBlockAlign = 24;
+        format.WaveFormatEx.nAvgBytesPerSec = 48000 * 24;
+
+        RtlCopyMemory(ResultantFormat, &format, sizeof(format));
+        return STATUS_SUCCESS;
     }
 
-    RtlZeroMemory(&format, sizeof(format));
-    format.DataFormat.FormatSize = sizeof(format);
-    format.DataFormat.MajorFormat = g_T2AudioTypeAudio;
-    format.DataFormat.SubFormat = g_T2AudioSubtypePcm;
-    format.DataFormat.Specifier = g_T2AudioSpecifierWaveformex;
-    format.WaveFormatEx.wFormatTag = WAVE_FORMAT_PCM;
-    format.WaveFormatEx.nChannels = 6;
-    format.WaveFormatEx.nSamplesPerSec = 48000;
-    format.WaveFormatEx.wBitsPerSample = 32;
-    format.WaveFormatEx.nBlockAlign = 24;
-    format.WaveFormatEx.nAvgBytesPerSec = 48000 * 24;
+    if (PinId == T2AUDIO_WAVE_PIN_BRIDGE) {
+        KSDATAFORMAT format;
 
-    RtlCopyMemory(ResultantFormat, &format, sizeof(format));
-    return STATUS_SUCCESS;
+        *ResultantFormatLength = sizeof(format);
+        if (OutputBufferLength < sizeof(format) || ResultantFormat == NULL) {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        RtlZeroMemory(&format, sizeof(format));
+        format.FormatSize = sizeof(format);
+        format.MajorFormat = g_T2AudioTypeAudio;
+        format.SubFormat = g_T2AudioSubtypeAnalog;
+        format.Specifier = g_T2AudioSpecifierNone;
+
+        RtlCopyMemory(ResultantFormat, &format, sizeof(format));
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_INVALID_PARAMETER;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -216,7 +284,7 @@ T2AudioMiniportNewStream(
     PT2AUDIO_MINIPORT instance = CONTAINING_RECORD(
         Miniport, T2AUDIO_MINIPORT, Interface);
 
-    if (Stream == NULL || Capture || Pin != 0) {
+    if (Stream == NULL || Capture || Pin != T2AUDIO_WAVE_PIN_RENDER_SINK) {
         return STATUS_INVALID_PARAMETER;
     }
     return T2AudioCreateStream(instance->DeviceContext, PortStream,

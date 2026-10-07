@@ -129,8 +129,8 @@ T2AudioStartDevice(
     }
     
     topologyMiniport->Release();
-    topologyPort->Release();
-    
+    topologyMiniport = NULL;
+
     // Phase 3: Create WaveRT port (connects to topology)
     PPORT portBase = NULL;
     PPORTWAVERT port = NULL;
@@ -140,6 +140,7 @@ T2AudioStartDevice(
     status = PcNewPort(&portBase, CLSID_PortWaveRT);
     if (!NT_SUCCESS(status)) {
         KdPrint(("T2Audio: PcNewPort failed: 0x%08X\n", status));
+        topologyPort->Release();
         T2AudioUnmapResources(context);
         return status;
     }
@@ -148,6 +149,7 @@ T2AudioStartDevice(
     if (!NT_SUCCESS(status)) {
         KdPrint(("T2Audio: QueryInterface IPortWaveRT failed: 0x%08X\n", status));
         portBase->Release();
+        topologyPort->Release();
         T2AudioUnmapResources(context);
         return status;
     }
@@ -158,6 +160,7 @@ T2AudioStartDevice(
     if (!NT_SUCCESS(status)) {
         KdPrint(("T2Audio: CreateMiniport failed: 0x%08X\n", status));
         port->Release();
+        topologyPort->Release();
         T2AudioUnmapResources(context);
         return status;
     }
@@ -169,6 +172,7 @@ T2AudioStartDevice(
         KdPrint(("T2Audio: Port Init failed: 0x%08X\n", status));
         miniport->Release();
         port->Release();
+        topologyPort->Release();
         T2AudioUnmapResources(context);
         return status;
     }
@@ -179,16 +183,35 @@ T2AudioStartDevice(
         KdPrint(("T2Audio: PcRegisterSubdevice failed: 0x%08X\n", status));
         miniport->Release();
         port->Release();
+        topologyPort->Release();
         T2AudioUnmapResources(context);
         return status;
     }
     
     miniport->Release();
+    miniport = NULL;
+
+    // Wire the WaveRT bridge pin to the topology bridge pin. This is what
+    // makes the audio stack expose a speaker endpoint. Both port objects are
+    // still referenced at this point (topologyPort and port).
+    KdPrint(("T2Audio: Registering physical connection (Wave bridge -> Topology bridge)\n"));
+    status = PcRegisterPhysicalConnection(DeviceObject,
+                                          (PUNKNOWN)port, T2AUDIO_WAVE_PIN_BRIDGE,
+                                          (PUNKNOWN)topologyPort, T2AUDIO_TOPO_PIN_BRIDGE);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: PcRegisterPhysicalConnection failed: 0x%08X\n", status));
+        port->Release();
+        topologyPort->Release();
+        T2AudioUnmapResources(context);
+        return status;
+    }
+
     port->Release();
-    
+    topologyPort->Release();
+
     context->HardwareReady = TRUE;
     context->SpeakerDeviceId = 0; // BCE transport disabled
-    
-    KdPrint(("T2Audio: StartDevice SUCCESS - Topology + WaveRT registered (topology FIRST), BCE disabled\n"));
+
+    KdPrint(("T2Audio: StartDevice SUCCESS - Topology + WaveRT registered and physically connected, BCE disabled\n"));
     return STATUS_SUCCESS;
 }

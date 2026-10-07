@@ -161,9 +161,9 @@ static const IMiniportTopologyVtbl g_T2AudioTopologyVtbl = {
 
 // Pin definitions: Pin 0 = WaveRT bridge, Pin 1 = Speaker output
 static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
-    // Pin 0: Input from WaveRT (bridge pin - no category, internal connection)
+    // Pin 0: bridge input from the WaveRT filter (physical connection).
     {
-        1, 1, 0, NULL,  // Max 1 instance globally, per filter; min 0
+        0, 0, 0, NULL,
         {
             0, NULL,
             0, NULL,
@@ -171,14 +171,14 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
             g_TopologyBridgePinDataRanges,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_NONE,
-            NULL,  // Bridge pin has no category
-            NULL,  // Bridge pin has no name
+            &KSCATEGORY_AUDIO,
+            NULL,
             0
         }
     },
-    // Pin 1: Output to speaker (physical connector)
+    // Pin 1: speaker output (physical connector).
     {
-        1, 1, 0, NULL,  // Max 1 instance globally, per filter; min 0
+        0, 0, 0, NULL,
         {
             0, NULL,
             0, NULL,
@@ -186,27 +186,16 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
             g_TopologySpeakerPinDataRanges,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_NONE,
-            &KSCATEGORY_AUDIO,
             &KSNODETYPE_SPEAKER,
+            NULL,
             0
         }
     }
 };
 
-// Node 0: Speaker node
-static PCNODE_DESCRIPTOR g_T2AudioTopologyNodes[] = {
-    {
-        0,
-        NULL,
-        &KSNODETYPE_SPEAKER,
-        NULL
-    }
-};
-
-// Connections: Pin 0 -> Node 0 (speaker) -> Pin 1
+// Connections: bridge pin 0 -> speaker pin 1 (no intermediate nodes).
 static PCCONNECTION_DESCRIPTOR g_T2AudioTopologyConnections[] = {
-    { PCFILTER_NODE, 0, 0, 0 },  // Filter Pin 0 -> Node 0 input
-    { 0, 0, PCFILTER_NODE, 1 }   // Node 0 output -> Filter Pin 1
+    { PCFILTER_NODE, T2AUDIO_TOPO_PIN_BRIDGE, PCFILTER_NODE, T2AUDIO_TOPO_PIN_SPEAKER }
 };
 
 static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor = {
@@ -216,8 +205,8 @@ static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor = {
     SIZEOF_ARRAY(g_T2AudioTopologyPins),
     g_T2AudioTopologyPins,
     sizeof(PCNODE_DESCRIPTOR),
-    SIZEOF_ARRAY(g_T2AudioTopologyNodes),
-    g_T2AudioTopologyNodes,
+    0,
+    NULL,
     SIZEOF_ARRAY(g_T2AudioTopologyConnections),
     g_T2AudioTopologyConnections,
     0,

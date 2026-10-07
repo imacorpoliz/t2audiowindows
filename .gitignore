@@ -1,7 +1,7 @@
 # Secrets and certificates
 *.pfx
 *.pvk
-T2AudioCert.cer
+*.cer
 
 # Build artifacts
 *.obj

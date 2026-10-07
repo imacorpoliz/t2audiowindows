@@ -1,9 +1,9 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
-**Last Updated**: 2026-10-06
-**Status**: Diagnostic mode — Topology + WaveRT registered, BCE transport and audio I/O disabled by design
+**Last Updated**: 2026-10-07
+**Status**: Diagnostic mode — Topology + WaveRT registered and wired, BCE transport and audio I/O disabled by design
 **Branch**: `diagnostics`
-**Last Commit**: `96451da`
+**Last Commit**: `c6875d1`
 
 > This file (`docs/CURRENT_STATE.md`) is the single authoritative status document.
 > The former root `CURRENT_STATE.md` is superseded and now only points here.
@@ -13,9 +13,9 @@
 ## Executive Summary
 
 `T2AudioStartDevice` completes with `STATUS_SUCCESS`. It registers a **Topology**
-subdevice first, then a **WaveRT** subdevice (`Driver.c:122`, `Driver.c:177`).
-No user-visible audio endpoint is created, because the two filters are not wired by a
-physical connection and the device is intentionally held in diagnostic mode.
+subdevice, then a **WaveRT** subdevice, and finally wires their bridge pins with
+`PcRegisterPhysicalConnection` (render-endpoint structure). Audio **playback** remains
+disabled by design (diagnostic mode), so the endpoint is not yet usable.
 
 The diagnostic mode is enforced at multiple layers (see "Diagnostic-mode boundaries"
 below), so no audio path, BCE transport, or hardware command can activate.
@@ -39,25 +39,30 @@ Therefore a hash mismatch between a local build and an installed/package binary 
 | FindSpeakerBuffer | Working | Speaker buffer `0x12c000`, size `0x61800` |
 | Topology Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Topology", ...)` |
 | WaveRT Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Wave", ...)` |
-| Audio Endpoint | Not created | No physical connection between filters (by design) |
+| Audio Endpoint | Structure registered | Bridge pins physically connected; playback still blocked, not yet verified on hardware |
 | BCE Transport | Disabled | `SpeakerDeviceId = 0`; name matching not implemented |
 | Audio I/O (StartIo/StopIo) | Blocked | Return `STATUS_NOT_SUPPORTED` while `SpeakerDeviceId == 0` |
 | Audio Playback | Not implemented | Out of scope |
 
 ---
 
-## Installed / Package Binary (Part 1 evidence)
+## Current Driver State on the Test Machine
+
+The original Apple audio driver was restored on 2026-10-06 with
+`tools/Restore-AppleAudioDriver.ps1` (Brigadier, Boot Camp `061-62383`):
 
 | Property | Value |
 |----------|-------|
-| System file | `C:\Windows\System32\drivers\T2AudioMiniport.sys` |
-| SHA256 | `62C1EE88…` |
-| Size | 38,416 bytes |
-| INF | `oem16.inf` |
-| `packaging/` | `T2AudioMiniport.sys` / `.inf` / `t2audiominiport.cat` — byte-identical to the installed files |
-| Capture | `docs/logs/capture_20261006_023822/` (43 `T2Audio:` lines, device restart, DbgView exit 0) |
+| Device | `PCI\VEN_106B&DEV_1803...` -> "Apple Audio Device", Class MEDIA, Status OK |
+| Driver | `C:\Windows\System32\drivers\AppleAudio.sys` (112,512 bytes, Apple Boot Camp) |
+| Package | original `AppleAudio.inf` published as `oem16.inf` |
+| Custom driver | `T2AudioMiniport` uninstalled; not present on the machine |
 
-Sanitized excerpt of the capture: `docs/logs/EXCERPT_20261006_023822.md`.
+The earlier custom-driver capture (Part 1 evidence) remains in
+`docs/logs/capture_20261006_023822/` (43 `T2Audio:` lines); sanitized excerpt at
+`docs/logs/EXCERPT_20261006_023822.md`.
+
+Re-installing the custom driver and running a hardware test requires user approval.
 
 ---
 
@@ -79,19 +84,22 @@ of the current source:
    initialized) in diagnostic mode (`WaveRTStream.c:143`).
 7. `T2AudioStreamSetState` validates `KSSTATE_STOP..KSSTATE_RUN`; it only calls
    `StartIo`/`StopIo` on RUN/STOP, which are blocked above (`WaveRTStream.c:75`).
-8. `T2AudioMiniportNewStream` rejects capture and any pin other than 0
-   (`WaveRTMiniport.c:219`).
-9. There is **no** `PcRegisterPhysicalConnection` / `IPort::NewConnection` anywhere in
-   `src/` — the WaveRT and Topology filters are not wired together.
+8. `T2AudioMiniportNewStream` rejects capture and any pin other than the render
+   sink (`WaveRTMiniport.c:276`).
 
-No BCE transport, no audio path, and no physical-connection registration is active.
+The WaveRT and Topology filters **are** now wired together via
+`PcRegisterPhysicalConnection` (`Driver.c:198`), so the physical connection is no
+longer a diagnostic gate. Playback stays off because the stream gates above
+(items 4-8) still block all audio I/O. No BCE transport and no audio path are active.
 
 ---
 
 ## Pin scheme
 
 The WaveRT / Topology pin, node, and connection layout is documented in
-`docs/WAVERT_TOPOLOGY_PINS.md` (descriptive only; no implementation change).
+`docs/WAVERT_TOPOLOGY_PINS.md`. It now describes the **implemented** structure: a
+WaveRT render sink pin (PCM) plus a WaveRT bridge pin, a Topology bridge pin plus a
+speaker pin (no nodes), and the physical connection between the two bridge pins.
 
 ---
 
@@ -124,8 +132,8 @@ C4100 unused params, C4115 from WDK headers).
 - Toolchain: MSBuild 18.10.1, WDK `10.0.28000.0`, VS 18 Community.
 - Command (from `src\`):
   `MSBuild.exe T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild`
-- Output: `src\bin\Release\T2AudioMiniport.sys` (~17,920 bytes).
-- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~30,720 bytes).
+- Output: `src\bin\Release\T2AudioMiniport.sys` (~18,432 bytes).
+- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~32,256 bytes).
 - Only Debug builds emit `KdPrint` output (`DBG` is not defined in Release).
 - Builds are non-reproducible (see Executive Summary); do not compare hashes across rebuilds.
 
@@ -133,7 +141,8 @@ C4100 unused params, C4115 from WDK headers).
 
 ## Known Limitations
 
-1. No user-visible audio endpoint (no physical connection between filters).
+1. Endpoint structure is registered (WaveRT and Topology filters wired) but not yet
+   verified on hardware; playback remains disabled in diagnostic mode.
 2. BCE transport disabled; speaker device id not discovered.
 3. Audio I/O blocked in diagnostic mode.
 4. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).

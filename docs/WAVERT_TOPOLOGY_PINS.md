@@ -1,80 +1,72 @@
-# WaveRT / Topology Pin Scheme (Documentation Only)
+# WaveRT / Topology Pin Scheme and Physical Connection
 
-**Last Updated**: 2026-10-06
-**Status**: Describes the *current* static pin/connection layout. No code changes accompany this document.
+**Last Updated**: 2026-10-07
+**Status**: Endpoint structure implemented (bridge pins + physical connection). Hardware playback still disabled.
 **Branch**: diagnostics
 
-This document records the pin, node, and connection descriptors as implemented in
-`src/WaveRTMiniport.c` and `src/Topology.c`. It is a description of the existing
-diagnostic-mode driver, **not** a design proposal or a change request.
+This document records the pin, node, and connection descriptors in
+`src/WaveRTMiniport.c` and `src/Topology.c`, and the physical connection wired in
+`src/Driver.c`. The layout follows the Microsoft `sysvad` WaveRT + topology model.
 
 ---
 
 ## 1. WaveRT filter (`src/WaveRTMiniport.c`)
 
-Single-pin filter. Descriptor `g_T2AudioFilterDescriptor` (WaveRTMiniport.c:121).
+Two-pin filter. Descriptor `g_T2AudioFilterDescriptor`.
 
-| Pin | DataFlow | Communication | Category | Node type | Data ranges |
-|-----|----------|---------------|----------|-----------|-------------|
-| 0 | `KSPIN_DATAFLOW_IN` | `KSPIN_COMMUNICATION_SINK` | `KSCATEGORY_AUDIO` (`g_T2AudioCategoryAudio`) | `KSNODETYPE_SPEAKER` (`g_T2AudioNodeSpeaker`) | `g_T2AudioSpeakerRange` |
+| Pin | DataFlow | Communication | Category | Data ranges |
+|-----|----------|---------------|----------|-------------|
+| 0 (`T2AUDIO_WAVE_PIN_RENDER_SINK`) | `KSPIN_DATAFLOW_IN` | `KSPIN_COMMUNICATION_SINK` | `KSCATEGORY_AUDIO` | `g_T2AudioSpeakerRange` |
+| 1 (`T2AUDIO_WAVE_PIN_BRIDGE`) | `KSPIN_DATAFLOW_OUT` | `KSPIN_COMMUNICATION_NONE` | `KSCATEGORY_AUDIO` | `g_T2AudioBridgeRange` |
 
-- Pin instance counts: `MaxGlobal=1, MaxFilter=1, Min=1` (WaveRTMiniport.c:100-103).
-- Node count: 0; connection count: 0 (WaveRTMiniport.c:127-133).
-- Data range (`KSDATARANGE_AUDIO`, WaveRTMiniport.c:78-93):
-  - MajorFormat `KSDATAFORMAT_TYPE_AUDIO`
-  - SubFormat `KSDATAFORMAT_SUBTYPE_PCM`
-  - Specifier `KSDATAFORMAT_SPECIFIER_WAVEFORMATEX`
-  - Channels 6, bits/sample 32, container 32, valid bits (min/max) 32, sample rate 48000..48000.
-- `DataRangeIntersection` (WaveRTMiniport.c:149) only answers `PinId == 0`; it returns a
-  `KSDATAFORMAT_WAVEFORMATEX` with `WAVE_FORMAT_PCM`, 6 ch, 48000 Hz, 32-bit,
-  `nBlockAlign=24`, `nAvgBytesPerSec=48000*24` (WaveRTMiniport.c:175-187).
+- Pin 0 is the render streaming pin the audio engine opens. Instance counts `Max=1, MaxFilter=1, Min=0`.
+- Pin 1 is the bridge pin. Instance counts `0, 0, 0` (bridge pins are never instantiated as streams).
+- Node count: 0. Connections: `{ PCFILTER_NODE, 0, PCFILTER_NODE, 1 }` (streaming pin -> bridge pin).
+- Streaming data range (`KSDATARANGE_AUDIO`): `TYPE_AUDIO` / `SUBTYPE_PCM` / `SPECIFIER_WAVEFORMATEX`,
+  6 channels, 32 bits/sample, container 32, valid bits 32, 48000..48000 Hz.
+- Bridge data range (`KSDATARANGE`): `TYPE_AUDIO` / `SUBTYPE_ANALOG` / `SPECIFIER_NONE`.
+- `DataRangeIntersection` answers pin 0 with a `KSDATAFORMAT_WAVEFORMATEX`
+  (`WAVE_FORMAT_PCM`, 6 ch, 48000 Hz, 32-bit, `nBlockAlign=24`, `nAvgBytesPerSec=48000*24`)
+  and pin 1 with a `KSDATAFORMAT` (`TYPE_AUDIO` / `SUBTYPE_ANALOG` / `SPECIFIER_NONE`).
+- `NewStream` accepts only pin 0 (`T2AUDIO_WAVE_PIN_RENDER_SINK`) and rejects capture.
 
 ## 2. Topology filter (`src/Topology.c`)
 
-Two-pin, one-node filter. Descriptor `g_T2AudioTopologyFilterDescriptor` (Topology.c:212).
+Two-pin, no-node filter. Descriptor `g_T2AudioTopologyFilterDescriptor`.
 
-| Pin | DataFlow | Communication | Category | Node type | Data ranges |
-|-----|----------|---------------|----------|-----------|-------------|
-| 0 (bridge, input from WaveRT) | `KSPIN_DATAFLOW_IN` | `KSPIN_COMMUNICATION_NONE` | `NULL` (none) | `NULL` (none) | `g_TopologyBridgePinDataRange` |
-| 1 (speaker output) | `KSPIN_DATAFLOW_OUT` | `KSPIN_COMMUNICATION_NONE` | `KSCATEGORY_AUDIO` | `KSNODETYPE_SPEAKER` | `g_TopologySpeakerPinDataRange` |
+| Pin | DataFlow | Communication | Category | Data ranges |
+|-----|----------|---------------|----------|-------------|
+| 0 (`T2AUDIO_TOPO_PIN_BRIDGE`) | `KSPIN_DATAFLOW_IN` | `KSPIN_COMMUNICATION_NONE` | `KSCATEGORY_AUDIO` | `g_TopologyBridgePinDataRange` |
+| 1 (`T2AUDIO_TOPO_PIN_SPEAKER`) | `KSPIN_DATAFLOW_OUT` | `KSPIN_COMMUNICATION_NONE` | `KSNODETYPE_SPEAKER` | `g_TopologySpeakerPinDataRange` |
 
-- Pin instance counts: `MaxGlobal=1, MaxFilter=1, Min=0` (Topology.c:166, 181).
-- Node 0: `KSNODETYPE_SPEAKER` (Topology.c:197-204).
-- Connections (Topology.c:207-210):
-  - `{ PCFILTER_NODE, 0, 0, 0 }` — filter Pin 0 -> Node 0 input
-  - `{ 0, 0, PCFILTER_NODE, 1 }` — Node 0 output -> filter Pin 1
-- Both topology data ranges use MajorFormat `KSDATAFORMAT_TYPE_AUDIO`,
-  SubFormat `KSDATAFORMAT_SUBTYPE_ANALOG`, Specifier `KSDATAFORMAT_SPECIFIER_NONE`
-  (Topology.c:15-26, 33-44).
-- `DataRangeIntersection` always returns `STATUS_NOT_IMPLEMENTED` (Topology.c:112-133);
-  topology exposes no negotiable format.
+- Both pins use instance counts `0, 0, 0`.
+- Node count: 0. Connections: `{ PCFILTER_NODE, 0, PCFILTER_NODE, 1 }` (bridge pin -> speaker pin).
+- Both topology data ranges use `TYPE_AUDIO` / `SUBTYPE_ANALOG` / `SPECIFIER_NONE`.
+- `DataRangeIntersection` returns `STATUS_NOT_IMPLEMENTED` (topology exposes no negotiable format).
 
-## 3. Format roles (why the two subtypes differ)
+This matches the `sysvad` speaker topology convention: the bridge pin carries
+`KSCATEGORY_AUDIO`, and the physical speaker connector pin carries
+`KSNODETYPE_SPEAKER` (no intermediate node).
 
-The WaveRT pin advertises **PCM/WAVEFORMATEX** because it is the streaming pin that
-KS consumes (render stream). The Topology pins advertise **ANALOG/NONE** because they
-model the internal bridge and the physical speaker endpoint, not a KS data stream.
+## 3. Physical connection (`src/Driver.c`)
 
-This difference is **by role and is expected** — it is not a mismatch defect. The
-bridge pin (Topology Pin 0) is declared `KSPIN_COMMUNICATION_NONE` with no category,
-matching the PortCls convention for a bridge pin that would be wired to another filter
-by a physical connection.
+`T2AudioStartDevice` registers both subdevices and then wires their bridge pins:
 
-## 4. Physical connections (current state)
+```c
+PcRegisterPhysicalConnection(DeviceObject,
+                             (PUNKNOWN)port,         T2AUDIO_WAVE_PIN_BRIDGE,   // From: Wave bridge
+                             (PUNKNOWN)topologyPort, T2AUDIO_TOPO_PIN_BRIDGE);  // To:   Topology bridge
+```
 
-There is **no** `PcRegisterPhysicalConnection` / `IPort::NewConnection` call anywhere in
-`src/` (verified by search). `T2AudioStartDevice` registers only two subdevices:
+- Registered after `PcRegisterSubdevice(..., L"Topology", ...)` and `PcRegisterSubdevice(..., L"Wave", ...)`.
+- Both port objects are kept referenced until the connection is registered, then released.
+- On any WaveRT-path failure the topology port is also released (no leak).
 
-- `PcRegisterSubdevice(DeviceObject, L"Topology", topologyPort)` (Driver.c:122)
-- `PcRegisterSubdevice(DeviceObject, L"Wave", port)` (Driver.c:177)
+This is the step that lets PortCls build the render endpoint
+(Wave streaming pin -> Wave bridge -> Topology bridge -> speaker connector).
 
-Consequently the WaveRT and Topology filters are registered independently and are not
-wired together. This is the direct reason **no user-visible audio endpoint is created**
-and is consistent with the diagnostic-mode scope (BCE transport and audio I/O remain
-disabled). Wiring the two filters via a physical connection is explicitly out of scope
-for the current task.
+## 4. Scope note
 
-## 5. Scope note
-
-This document is descriptive only. Per the current session constraints, no pin,
-connection, endpoint, BCE, or audio-path functionality is to be added or enabled.
+The endpoint **structure** is now complete. Audio **playback** remains disabled by
+design: `AllocateAudioBuffer` still returns `STATUS_NOT_SUPPORTED` while
+`SpeakerDeviceId == 0` (BCE transport not implemented). See `docs/CURRENT_STATE.md`.
