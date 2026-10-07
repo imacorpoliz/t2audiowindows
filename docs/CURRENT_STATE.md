@@ -3,7 +3,7 @@
 **Last Updated**: 2026-10-07
 **Status**: Diagnostic mode — Topology + WaveRT registered and wired, BCE transport and audio I/O disabled by design
 **Branch**: `diagnostics`
-**Last Commit**: `4e2788e`
+**Last Commit**: `6f60e53`
 
 > This file (`docs/CURRENT_STATE.md`) is the single authoritative status document.
 > The former root `CURRENT_STATE.md` is superseded and now only points here.
