@@ -1,4 +1,5 @@
 #include "T2AudioMiniport.h"
+#include "T2AudioBufferLogic.h"
 
 typedef struct _T2AUDIO_WAVERT_STREAM {
     IMiniportWaveRTStream Interface;
@@ -10,7 +11,43 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG BytesPerFrame;
     ULONG64 AnchorQpc;
     ULONG64 AnchorFrames;
+    PMDL AudioBufferMdl;
+    ULONG AudioBufferSize;
+    BOOLEAN HardwareBuffer;
+    BOOLEAN HardwareStarted;
 } T2AUDIO_WAVERT_STREAM;
+
+// Release the buffer currently held by the stream (if any). `expected` is the
+// MDL passed to FreeAudioBuffer; pass NULL to release unconditionally (stream
+// teardown). A foreign or unknown MDL is ignored and never routed to an
+// allocator. The WaveRT port stream outlives the miniport stream (PortCls owns
+// the miniport stream), so freeing here is safe.
+static VOID
+T2AudioStreamReleaseBuffer(
+    _Inout_ PT2AUDIO_WAVERT_STREAM instance,
+    _In_opt_ PMDL expected)
+{
+    ULONG action = T2AudioDecideBufferRelease(
+        instance->AudioBufferMdl != NULL,
+        instance->HardwareBuffer,
+        (expected == NULL) || (expected == instance->AudioBufferMdl));
+
+    if (action == T2AUDIO_RELEASE_HARDWARE) {
+        T2AudioFreeSpeakerMdl(instance->DeviceContext);
+    } else if (action == T2AUDIO_RELEASE_SYSTEM) {
+        if (instance->PortStream != NULL) {
+            instance->PortStream->lpVtbl->FreePagesFromMdl(
+                (PVOID)instance->PortStream, instance->AudioBufferMdl);
+        }
+    } else {
+        // Nothing held, or a foreign/already-released MDL: leave state intact.
+        return;
+    }
+
+    instance->AudioBufferMdl = NULL;
+    instance->AudioBufferSize = 0;
+    instance->HardwareBuffer = FALSE;
+}
 
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioStreamQueryInterface(
@@ -50,6 +87,9 @@ T2AudioStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
     LONG references = InterlockedDecrement(&stream->ReferenceCount);
 
     if (references == 0) {
+        // Defensive: PortCls normally calls FreeAudioBuffer first, but release
+        // any buffer still held so a failed/partial lifecycle cannot leak it.
+        T2AudioStreamReleaseBuffer(stream, NULL);
         ExFreePoolWithTag(stream, '2TAS');
     }
     return (ULONG)references;
@@ -82,23 +122,46 @@ T2AudioStreamSetState(
     if (State < KSSTATE_STOP || State > KSSTATE_RUN) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (State == KSSTATE_RUN && instance->State != KSSTATE_RUN) {
-        NTSTATUS status = T2AudioStartIo(instance->DeviceContext);
-        if (!NT_SUCCESS(status)) {
-            return status;
+    if (State == KSSTATE_RUN) {
+        // (Re)start hardware I/O only if it is not already running.
+        if (!instance->HardwareStarted) {
+            NTSTATUS status;
+
+            // A stream may only run once a buffer has been allocated.
+            if (instance->AudioBufferMdl == NULL) {
+                return STATUS_INVALID_DEVICE_STATE;
+            }
+            // Hardware playback must use the hardware (MMIO) buffer. If a BCE
+            // device id appeared after a system buffer was allocated, refuse to
+            // start hardware I/O with the wrong buffer.
+            if (instance->DeviceContext->SpeakerDeviceId != 0 &&
+                !instance->HardwareBuffer) {
+                return STATUS_INVALID_DEVICE_STATE;
+            }
+            status = T2AudioStartIo(instance->DeviceContext);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            instance->HardwareStarted = TRUE;
         }
-    } else if (State == KSSTATE_STOP && instance->State != KSSTATE_STOP) {
-        NTSTATUS status = T2AudioStopIo(instance->DeviceContext);
-        if (!NT_SUCCESS(status)) {
-            return status;
+        if (instance->State != KSSTATE_RUN) {
+            LARGE_INTEGER qpcFreq;
+            instance->AnchorQpc = KeQueryPerformanceCounter(&qpcFreq).QuadPart;
+            instance->AnchorFrames = 0;
+        }
+    } else {
+        // PAUSE / ACQUIRE / STOP: stop hardware I/O only if it was actually
+        // started. This avoids issuing a STOP that was never paired with a
+        // successful start (e.g. a RUN that failed in diagnostic mode).
+        if (instance->HardwareStarted) {
+            NTSTATUS status = T2AudioStopIo(instance->DeviceContext);
+            if (!NT_SUCCESS(status)) {
+                return status;
+            }
+            instance->HardwareStarted = FALSE;
         }
     }
     instance->State = State;
-    if (State == KSSTATE_RUN) {
-        LARGE_INTEGER qpcFreq;
-        instance->AnchorQpc = KeQueryPerformanceCounter(&qpcFreq).QuadPart;
-        instance->AnchorFrames = 0;
-    }
     return STATUS_SUCCESS;
 }
 
@@ -111,12 +174,14 @@ T2AudioStreamGetPosition(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
     LARGE_INTEGER qpc, qpcFreq;
     ULONG64 elapsedTicks, elapsedFrames, playOffset;
+    ULONG bufferSize;
 
     if (Position == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (instance->State != KSSTATE_RUN) {
+    bufferSize = instance->AudioBufferSize;
+    if (instance->State != KSSTATE_RUN || bufferSize == 0) {
         Position->PlayOffset = 0;
         Position->WriteOffset = 0;
         return STATUS_SUCCESS;
@@ -129,12 +194,11 @@ T2AudioStreamGetPosition(
     elapsedFrames = (elapsedTicks * instance->SampleRate) / qpcFreq.QuadPart;
 
     playOffset = (instance->AnchorFrames + elapsedFrames) * instance->BytesPerFrame;
-    playOffset %= instance->DeviceContext->SpeakerBufferSize;
+    playOffset %= bufferSize;
 
     Position->PlayOffset = playOffset;
     // WriteOffset is ahead of PlayOffset by a reasonable FIFO size (512 frames = ~10.6ms at 48kHz)
-    Position->WriteOffset = (playOffset + 512 * instance->BytesPerFrame) %
-                            instance->DeviceContext->SpeakerBufferSize;
+    Position->WriteOffset = (playOffset + 512 * instance->BytesPerFrame) % bufferSize;
 
     return STATUS_SUCCESS;
 }
@@ -150,6 +214,7 @@ T2AudioStreamAllocateAudioBuffer(
 {
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    ULONG alignedSize;
     NTSTATUS status;
 
     if (AudioBufferMdl == NULL || ActualSize == NULL ||
@@ -157,28 +222,91 @@ T2AudioStreamAllocateAudioBuffer(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Diagnostic mode: BCE transport is disabled (SpeakerDeviceId == 0).
-    // Do not expose hardware buffer memory to PortCls; refuse the stream
-    // and always initialize the out parameters.
-    if (instance->DeviceContext->SpeakerDeviceId == 0) {
-        *AudioBufferMdl = NULL;
-        *ActualSize = 0;
+    *AudioBufferMdl = NULL;
+    *ActualSize = 0;
+    *OffsetFromFirstPage = 0;
+    *CacheType = MmCached;
+
+    if (RequestedSize == 0 || instance->BytesPerFrame == 0 ||
+        RequestedSize < instance->BytesPerFrame) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // WaveRT requires the actual buffer to be at least the requested size.
+    // Round up to a whole number of frames, guarding against overflow.
+    if (!T2AudioAlignSizeUpToFrame(RequestedSize, instance->BytesPerFrame,
+                                   &alignedSize)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Only one buffer may be outstanding per stream.
+    if (instance->AudioBufferMdl != NULL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    if (instance->DeviceContext->SpeakerDeviceId != 0) {
+        // BCE is ready: expose the BAR1 speaker buffer as a zero-copy MMIO
+        // WaveRT buffer (matches AppleAudio.sys). The hardware buffer has a
+        // fixed size, so it must be able to satisfy the request.
+        status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
+                                         AudioBufferMdl,
+                                         OffsetFromFirstPage,
+                                         ActualSize);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+        if (!T2AudioHardwareBufferSatisfies(RequestedSize, *ActualSize,
+                                            instance->BytesPerFrame)) {
+            // The hardware buffer cannot satisfy this request (too small or
+            // not frame-aligned). Release it and fail rather than report a
+            // buffer smaller than the client asked for.
+            T2AudioFreeSpeakerMdl(instance->DeviceContext);
+            *AudioBufferMdl = NULL;
+            *ActualSize = 0;
+            *OffsetFromFirstPage = 0;
+            return STATUS_UNSUCCESSFUL;
+        }
+        *CacheType = MmWriteCombined;
+        instance->HardwareBuffer = TRUE;
+    } else {
+        // No BCE device id yet (diagnostic mode): allocate an ordinary
+        // system-memory cyclic buffer through the WaveRT port so the endpoint
+        // stays testable without touching device memory. Audio I/O is still
+        // gated by T2AudioStartIo/StopIo, so nothing reaches the hardware.
+        PHYSICAL_ADDRESS highAddress;
+        PMDL mdl;
+        ULONG byteCount;
+
+        if (instance->PortStream == NULL) {
+            return STATUS_INVALID_DEVICE_STATE;
+        }
+
+        highAddress.QuadPart = (LONGLONG)-1;
+        mdl = instance->PortStream->lpVtbl->AllocatePagesForMdl(
+                  (PVOID)instance->PortStream, highAddress, alignedSize);
+        if (mdl == NULL) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        byteCount = MmGetMdlByteCount(mdl);
+        if (byteCount < alignedSize) {
+            // The allocator returned less than requested (it may allocate
+            // fewer pages under pressure); do not hand out a short buffer.
+            instance->PortStream->lpVtbl->FreePagesFromMdl(
+                (PVOID)instance->PortStream, mdl);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        *AudioBufferMdl = mdl;
+        *ActualSize = alignedSize;
         *OffsetFromFirstPage = 0;
-        *CacheType = MmNonCached;
-        KdPrint(("T2Audio: AllocateAudioBuffer blocked: diagnostic mode (no hardware MDL)\n"));
-        return STATUS_NOT_SUPPORTED;
+        *CacheType = MmCached;
+        instance->HardwareBuffer = FALSE;
     }
 
-    status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
-                                     AudioBufferMdl,
-                                     OffsetFromFirstPage,
-                                     ActualSize);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
+    instance->AudioBufferMdl = *AudioBufferMdl;
+    instance->AudioBufferSize = *ActualSize;
 
-    *CacheType = MmWriteCombined;
-    KdPrint(("T2Audio: AllocateAudioBuffer: MDL=%p size=%u offset=%u\n",
+    KdPrint(("T2Audio: AllocateAudioBuffer: %s MDL=%p size=%u offset=%u\n",
+             instance->HardwareBuffer ? "MMIO" : "system",
              *AudioBufferMdl, *ActualSize, *OffsetFromFirstPage));
     return STATUS_SUCCESS;
 }
@@ -193,9 +321,10 @@ T2AudioStreamFreeAudioBuffer(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
 
     UNREFERENCED_PARAMETER(BufferSize);
-    UNREFERENCED_PARAMETER(AudioBufferMdl);
-    
-    T2AudioFreeSpeakerMdl(instance->DeviceContext);
+
+    // Releases only the MDL this stream handed out; a NULL, foreign, or
+    // already-released MDL is ignored (see T2AudioStreamReleaseBuffer).
+    T2AudioStreamReleaseBuffer(instance, AudioBufferMdl);
     KdPrint(("T2Audio: FreeAudioBuffer\n"));
 }
 

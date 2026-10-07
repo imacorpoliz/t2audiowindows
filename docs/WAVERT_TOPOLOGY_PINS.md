@@ -67,6 +67,8 @@ This is the step that lets PortCls build the render endpoint
 
 ## 4. Scope note
 
-The endpoint **structure** is now complete. Audio **playback** remains disabled by
-design: `AllocateAudioBuffer` still returns `STATUS_NOT_SUPPORTED` while
-`SpeakerDeviceId == 0` (BCE transport not implemented). See `docs/CURRENT_STATE.md`.
+The endpoint **structure** is now complete and the WaveRT buffer contract is
+implemented. Audio **playback** remains disabled by design: while
+`SpeakerDeviceId == 0` (BCE transport not implemented) `AllocateAudioBuffer` serves a
+host-side system-memory buffer instead of device memory, and `StartIo`/`StopIo` still
+return `STATUS_NOT_SUPPORTED`. See `docs/CURRENT_STATE.md`.

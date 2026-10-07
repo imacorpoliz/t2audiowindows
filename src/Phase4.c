@@ -42,6 +42,15 @@ T2AudioCreateSpeakerMdl(
         return STATUS_NOT_SUPPORTED;
     }
 
+    // Only one hardware buffer MDL may be outstanding at a time; a second
+    // allocation would overwrite (and leak) the first.
+    if (Context->SpeakerBufferMdl != NULL) {
+        *Mdl = NULL;
+        *OffsetFromFirstPage = 0;
+        *ActualSize = 0;
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
     offset = (ULONG)(Context->SpeakerBufferOffset & (PAGE_SIZE - 1));
     size = (ULONG)Context->SpeakerBufferSize;
     pageCount = ADDRESS_AND_SIZE_TO_SPAN_PAGES(

@@ -3,7 +3,7 @@
 **Last Updated**: 2026-10-07
 **Status**: Diagnostic mode — Topology + WaveRT registered and wired, BCE transport and audio I/O disabled by design
 **Branch**: `diagnostics`
-**Last Commit**: `c6875d1`
+**Last Commit**: `c647f9a`
 
 > This file (`docs/CURRENT_STATE.md`) is the single authoritative status document.
 > The former root `CURRENT_STATE.md` is superseded and now only points here.
@@ -19,6 +19,15 @@ disabled by design (diagnostic mode), so the endpoint is not yet usable.
 
 The diagnostic mode is enforced at multiple layers (see "Diagnostic-mode boundaries"
 below), so no audio path, BCE transport, or hardware command can activate.
+
+The **WaveRT buffer contract** is now implemented. In diagnostic mode
+(`SpeakerDeviceId == 0`) the stream is served a host-side system-memory cyclic buffer
+through `IPortWaveRTStream::AllocatePagesForMdl`; the zero-copy MMIO path
+(`T2AudioCreateSpeakerMdl`, `MmWriteCombined`) activates only once a BCE speaker device
+id exists. In diagnostic mode the hardware audio buffer is never handed to PortCls
+(BAR1 is still mapped at init). Both paths are **compiled and statically checked but
+not yet exercised at runtime**; the pure size/validation/release-decision helpers are
+covered by a host-side unit test (`tests/T2AudioBufferLogicTest.c`, 20 assertions).
 
 **Build reproducibility caveat:** The MSBuild link step is **not deterministic** —
 two consecutive rebuilds of identical source produce different SHA256 hashes (the PE
@@ -80,17 +89,34 @@ of the current source:
    `SpeakerDeviceId == 0` (`Phase4.c:37-43`).
 5. `T2AudioStartIo` (`Phase4.c:119`) and `T2AudioStopIo` (`Phase4.c:168`) return
    `STATUS_NOT_SUPPORTED` under the same condition.
-6. `T2AudioStreamAllocateAudioBuffer` returns `STATUS_NOT_SUPPORTED` (outputs
-   initialized) in diagnostic mode (`WaveRTStream.c:143`).
-7. `T2AudioStreamSetState` validates `KSSTATE_STOP..KSSTATE_RUN`; it only calls
-   `StartIo`/`StopIo` on RUN/STOP, which are blocked above (`WaveRTStream.c:75`).
+6. `T2AudioStreamAllocateAudioBuffer` no longer refuses the stream. In diagnostic
+   mode (`SpeakerDeviceId == 0`) it allocates an ordinary system-memory cyclic buffer
+   via `IPortWaveRTStream::AllocatePagesForMdl` (`MmCached`), verifying the allocated
+   byte count and rounding up to a whole frame so `ActualSize >= RequestedSize`. The
+   zero-copy MMIO path (`T2AudioCreateSpeakerMdl`, `MmWriteCombined`) is only taken
+   once a BCE speaker device id exists and only if the fixed hardware buffer can
+   satisfy the request. In diagnostic mode the hardware buffer is never handed to
+   PortCls (BAR1 is still mapped at init). Buffer release is centralized in
+   `T2AudioStreamReleaseBuffer`: `T2AudioStreamFreeAudioBuffer` releases only the MDL
+   it handed out (a NULL, foreign, or already-released MDL is ignored), and
+   `T2AudioStreamRelease` releases any buffer still held at teardown as a defensive
+   backstop (safe because the WaveRT port stream outlives the miniport stream).
+7. `T2AudioStreamSetState` validates `KSSTATE_STOP..KSSTATE_RUN`. It tracks whether
+   hardware I/O actually started (`HardwareStarted`): RUN starts I/O only if not
+   already running (and requires a buffer, and refuses hardware I/O when a system
+   buffer is paired with a non-zero device id); PAUSE/ACQUIRE/STOP stop I/O only if it
+   was started, so a failed/blocked RUN is never paired with a spurious STOP
+   (`WaveRTStream.c:75`). The underlying `StartIo`/`StopIo` are still blocked (items 4,
+   5).
 8. `T2AudioMiniportNewStream` rejects capture and any pin other than the render
    sink (`WaveRTMiniport.c:276`).
 
 The WaveRT and Topology filters **are** now wired together via
 `PcRegisterPhysicalConnection` (`Driver.c:198`), so the physical connection is no
-longer a diagnostic gate. Playback stays off because the stream gates above
-(items 4-8) still block all audio I/O. No BCE transport and no audio path are active.
+longer a diagnostic gate. The WaveRT buffer is a host-side system buffer (item 6).
+Playback stays off because the audio-I/O gates (items 4, 5, 7) still block
+`StartIo`/`StopIo`, so no audio reaches the hardware. No BCE transport and no audio
+path are active.
 
 ---
 
@@ -132,8 +158,11 @@ C4100 unused params, C4115 from WDK headers).
 - Toolchain: MSBuild 18.10.1, WDK `10.0.28000.0`, VS 18 Community.
 - Command (from `src\`):
   `MSBuild.exe T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild`
-- Output: `src\bin\Release\T2AudioMiniport.sys` (~18,432 bytes).
-- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~32,256 bytes).
+- Output: `src\bin\Release\T2AudioMiniport.sys` (~18,944 bytes).
+- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~33,280 bytes).
+- Host unit test (pure buffer helpers):
+  `cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c`
+  then run `tests\T2AudioBufferLogicTest.exe` (all assertions pass).
 - Only Debug builds emit `KdPrint` output (`DBG` is not defined in Release).
 - Builds are non-reproducible (see Executive Summary); do not compare hashes across rebuilds.
 
@@ -143,11 +172,16 @@ C4100 unused params, C4115 from WDK headers).
 
 1. Endpoint structure is registered (WaveRT and Topology filters wired) but not yet
    verified on hardware; playback remains disabled in diagnostic mode.
-2. BCE transport disabled; speaker device id not discovered.
-3. Audio I/O blocked in diagnostic mode.
-4. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
-5. No volume control, power management, or hotplug handling.
-6. `C4152` vtable warnings not resolved (unrelated to C4133, which is fixed).
+2. WaveRT buffer contract is implemented (size/overflow checks, byte-count
+   verification, ownership-safe free, teardown cleanup, state tracking) and its pure
+   helpers are unit-tested on the host, but the kernel paths (allocator, MMIO, I/O)
+   have not been exercised at runtime — only builds and static checks have run. The
+   zero-copy MMIO path is unverified until BCE transport works.
+3. BCE transport disabled; speaker device id not discovered.
+4. Audio I/O blocked in diagnostic mode.
+5. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
+6. No volume control, power management, or hotplug handling.
+7. `C4152` vtable warnings not resolved (unrelated to C4133, which is fixed).
 
 ---
 
