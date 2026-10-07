@@ -218,6 +218,8 @@ MapConfigResource:
     // The current BufferStruct contract has no device-id field. Commands stay
     // disabled until the BCE device enumeration is connected to this context.
     Context->SpeakerDeviceId = 0;
+    Context->BceSpeakerDeviceId = 0;
+    Context->BceProbed = FALSE;
     Context->HardwareReady = TRUE;
     KdPrint(("T2Audio: MapResources SUCCESS: buffer=0x%Ix size=0x%Ix\n",
              Context->SpeakerBufferOffset, Context->SpeakerBufferSize));

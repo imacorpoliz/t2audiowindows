@@ -25,8 +25,10 @@
 // AppleUSBVHCI device name (from user-mode testing)
 #define APPLE_USBVHCI_DEVICE_NAME L"\\Device\\AppleUSBVHCI"
 
-// IOCTL code (from user-mode testing: 0x222018)
-#define IOCTL_APPLE_BCE_SEND_MESSAGE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x2806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// IOCTL code (from user-mode testing: 0x222018). CTL_CODE(FILE_DEVICE_UNKNOWN,
+// 0x0806, METHOD_BUFFERED, FILE_ANY_ACCESS) == 0x222018.
+#define IOCTL_APPLE_BCE_SEND_MESSAGE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+C_ASSERT(IOCTL_APPLE_BCE_SEND_MESSAGE == 0x222018);
 
 #pragma pack(push, 1)
 typedef struct _T2AUDIO_MSG_HEADER {
@@ -135,7 +137,15 @@ T2AudioSendBceMessage(
     }
 
     if (NT_SUCCESS(status) && ReplySize != NULL) {
-        *ReplySize = (ULONG)iosb.Information;
+        // The lower driver must never report more bytes than we provided; a
+        // larger Information would make callers read past the reply buffer.
+        if (iosb.Information > ReplyBufferSize) {
+            KdPrint(("T2Audio: BCE reply overran buffer: %Iu > %u\n",
+                     iosb.Information, ReplyBufferSize));
+            *ReplySize = ReplyBufferSize;
+        } else {
+            *ReplySize = (ULONG)iosb.Information;
+        }
     }
 
     return status;
@@ -157,10 +167,12 @@ T2AudioGetDeviceUid(
     T2AUDIO_MSG_BASE *base;
     UCHAR *payload;
     ULONG replySize;
-    ULONG message;
-    ULONG64 dataSize;
+    ULONG64 obj;
+    ULONG element;
+    ULONG scope;
+    ULONG selector;
     ULONG64 dataOffset;
-    ULONG64 copySize;
+    ULONG64 dataSize;
     NTSTATUS status;
 
     PAGED_CODE();
@@ -194,37 +206,32 @@ T2AudioGetDeviceUid(
         return status;
     }
 
-    if (replySize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
-        KdPrint(("T2Audio: GET_PROPERTY reply too small: %u\n", replySize));
+    if (!T2AudioBceParsePropertyResponse(replyBuffer, replySize,
+                                         T2AUDIO_MSG_GET_PROPERTY_RESPONSE,
+                                         &obj, &element, &scope, &selector,
+                                         &dataOffset, &dataSize)) {
+        KdPrint(("T2Audio: GET_PROPERTY reply invalid: size=%u\n", replySize));
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    message = T2AudioBceReadU32(replyBuffer + T2AUDIO_BCE_HEADER_SIZE);
-    if (message != T2AUDIO_MSG_GET_PROPERTY_RESPONSE) {
-        KdPrint(("T2Audio: unexpected GET_PROPERTY reply message: %u\n", message));
+    // The reply must echo the property we asked for on the same device.
+    if (obj != DeviceId || element != 0 ||
+        scope != T2AUDIO_PROP_SCOPE_GLOBAL || selector != T2AUDIO_PROP_UID) {
+        KdPrint(("T2Audio: GET_PROPERTY reply mismatch: obj=0x%I64X el=%u "
+                 "scope=0x%08X sel=0x%08X\n",
+                 obj, element, scope, selector));
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    // data_size lives at base + obj(8) + element(4) + scope(4) + selector(4).
-    dataSize = T2AudioBceReadU64(
-        replyBuffer + T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE + 20);
-
-    if (!T2AudioBcePropertyDataOffset(replySize, dataSize,
-                                      &dataOffset, &copySize)) {
-        KdPrint(("T2Audio: GET_PROPERTY reply inconsistent: size=%u data=%I64u\n",
-                 replySize, dataSize));
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    if (copySize > UidBufferSize) {
+    if (dataSize > UidBufferSize) {
         // UID longer than we accept: treat as a non-matching device.
         KdPrint(("T2Audio: device 0x%I64X UID too long: %I64u\n",
-                 DeviceId, copySize));
+                 DeviceId, dataSize));
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    RtlCopyMemory(UidBuffer, replyBuffer + dataOffset, (SIZE_T)copySize);
-    *UidLength = (ULONG)copySize;
+    RtlCopyMemory(UidBuffer, replyBuffer + dataOffset, (SIZE_T)dataSize);
+    *UidLength = (ULONG)dataSize;
     return STATUS_SUCCESS;
 }
 
@@ -238,12 +245,8 @@ T2AudioGetDeviceList(
     UCHAR replyBuffer[512];
     T2AUDIO_MSG_HEADER *header;
     T2AUDIO_MSG_BASE *base;
-    UCHAR *payload;
     ULONG replySize;
-    ULONG message;
     ULONG outCount;
-    ULONG64 count;
-    ULONG i;
     NTSTATUS status;
 
     PAGED_CODE();
@@ -275,33 +278,11 @@ T2AudioGetDeviceList(
         return status;
     }
 
-    if (replySize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE +
-                    T2AUDIO_BCE_U64_SIZE) {
-        KdPrint(("T2Audio: GET_DEVICE_LIST reply too small: %u\n", replySize));
+    if (!T2AudioBceParseDeviceListResponse(replyBuffer, replySize,
+                                           T2AUDIO_MSG_GET_DEVICE_LIST_RESPONSE,
+                                           DeviceList, MaxDevices, &outCount)) {
+        KdPrint(("T2Audio: GET_DEVICE_LIST reply invalid: size=%u\n", replySize));
         return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    message = T2AudioBceReadU32(replyBuffer + T2AUDIO_BCE_HEADER_SIZE);
-    if (message != T2AUDIO_MSG_GET_DEVICE_LIST_RESPONSE) {
-        KdPrint(("T2Audio: unexpected GET_DEVICE_LIST reply message: %u\n", message));
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    // Payload: count (u64) followed by count device ids (u64). Validate that
-    // the advertised count actually fits within the bytes returned before
-    // reading any array element.
-    payload = replyBuffer + T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
-    count = T2AudioBceReadU64(payload);
-
-    if (!T2AudioBceDeviceListCount(replySize, count, MaxDevices, &outCount)) {
-        KdPrint(("T2Audio: GET_DEVICE_LIST reply inconsistent: size=%u count=%I64u\n",
-                 replySize, count));
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    for (i = 0; i < outCount; i++) {
-        DeviceList[i] = T2AudioBceReadU64(
-            payload + T2AUDIO_BCE_U64_SIZE + (SIZE_T)i * T2AUDIO_BCE_U64_SIZE);
     }
 
     *DeviceCount = outCount;
@@ -363,4 +344,71 @@ T2AudioFindSpeakerDeviceId(
 
     KdPrint(("T2Audio: no speaker BCE device found among %u\n", deviceCount));
     return STATUS_DEVICE_NOT_READY;
+}
+
+// Diagnostic-only discovery. Opens the BCE transport, enumerates devices and
+// logs each UID, and records the speaker id in Context->BceSpeakerDeviceId.
+// It deliberately does NOT touch Context->SpeakerDeviceId, so the audio path
+// (MMIO buffer, START_IO) stays disabled. The transport is closed again so no
+// long-lived reference is held while the audio path is unwired.
+NTSTATUS
+T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG64 deviceList[32];
+    ULONG deviceCount;
+    ULONG i;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    if (Context == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Context->BceSpeakerDeviceId = 0;
+    Context->BceProbed = FALSE;
+
+    status = T2AudioOpenBceTransport();
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: BCE probe: transport unavailable: 0x%08X\n", status));
+        return status;
+    }
+
+    status = T2AudioGetDeviceList(deviceList, ARRAYSIZE(deviceList), &deviceCount);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: BCE probe: device list failed: 0x%08X\n", status));
+        T2AudioCloseBceTransport();
+        return status;
+    }
+
+    KdPrint(("T2Audio: BCE probe: %u device(s)\n", deviceCount));
+
+    for (i = 0; i < deviceCount; i++) {
+        CHAR uid[T2AUDIO_MAX_UID_LENGTH + 1];
+        ULONG uidLength = 0;
+
+        status = T2AudioGetDeviceUid(deviceList[i], uid,
+                                     T2AUDIO_MAX_UID_LENGTH, &uidLength);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("T2Audio: BCE probe: device 0x%I64X uid failed: 0x%08X\n",
+                     deviceList[i], status));
+            continue;
+        }
+
+        KdPrint(("T2Audio: BCE probe: device 0x%I64X uid=\"%.*s\" (%u bytes)\n",
+                 deviceList[i], (int)uidLength, uid, uidLength));
+
+        if (Context->BceSpeakerDeviceId == 0 &&
+            T2AudioBceUidIsSpeaker(uid, uidLength)) {
+            Context->BceSpeakerDeviceId = deviceList[i];
+        }
+    }
+
+    Context->BceProbed = TRUE;
+    KdPrint(("T2Audio: BCE probe done; speaker id 0x%I64X "
+             "(diagnostic only, audio path stays disabled)\n",
+             Context->BceSpeakerDeviceId));
+
+    T2AudioCloseBceTransport();
+    return STATUS_SUCCESS;
 }

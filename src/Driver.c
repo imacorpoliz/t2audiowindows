@@ -211,6 +211,12 @@ T2AudioStartDevice(
 
     context->HardwareReady = TRUE;
     context->SpeakerDeviceId = 0; // BCE transport disabled
+    context->BceSpeakerDeviceId = 0;
+    context->BceProbed = FALSE;
+
+    // Diagnostic-only BCE discovery: enumerate devices and log their UIDs. This
+    // never sets SpeakerDeviceId, so the audio path stays disabled.
+    (VOID)T2AudioProbeBceDevices(context);
 
     KdPrint(("T2Audio: StartDevice SUCCESS - Topology + WaveRT registered and physically connected, BCE disabled\n"));
     return STATUS_SUCCESS;

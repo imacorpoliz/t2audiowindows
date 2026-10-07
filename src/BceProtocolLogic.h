@@ -27,6 +27,11 @@
 // selector(4)+data_size(8).
 #define T2AUDIO_BCE_PROP_FIXED_SIZE  28u
 
+// Offset of the type byte within the header, and the two type values.
+#define T2AUDIO_BCE_TYPE_OFFSET      4u
+#define T2AUDIO_BCE_MSG_COMMAND      1u
+#define T2AUDIO_BCE_MSG_RESPONSE     2u
+
 // Alignment-free little-endian scalar accessors.
 static __inline unsigned long long
 T2AudioBceReadU64(const unsigned char *p)
@@ -99,6 +104,60 @@ T2AudioBceDeviceListCount(unsigned long long ReplySize,
     return 1;
 }
 
+// Parse and validate a complete GET_DEVICE_LIST response. Requires the
+// response type byte to be RESPONSE, the protocol status to be zero, the
+// message id to equal ExpectedMessage, and the advertised count to fit within
+// ReplySize. On success copies up to MaxDevices ids into OutIds (which may be
+// 0 only when the count is 0) and writes the copied count to *OutCount.
+static __inline int
+T2AudioBceParseDeviceListResponse(const unsigned char *Reply,
+                                  unsigned long long ReplySize,
+                                  unsigned long ExpectedMessage,
+                                  unsigned long long *OutIds,
+                                  unsigned long MaxDevices,
+                                  unsigned long *OutCount)
+{
+    unsigned long long base =
+        T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+    unsigned long long count;
+    unsigned long out;
+    unsigned long i;
+
+    if (Reply == 0 || OutCount == 0) {
+        return 0;
+    }
+    if (ReplySize < base + T2AUDIO_BCE_U64_SIZE) {
+        return 0;
+    }
+    if (Reply[T2AUDIO_BCE_TYPE_OFFSET] != T2AUDIO_BCE_MSG_RESPONSE) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE) != ExpectedMessage) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE +
+                          T2AUDIO_BCE_U32_SIZE) != 0) {
+        return 0;
+    }
+
+    count = T2AudioBceReadU64(Reply + base);
+    if (!T2AudioBceDeviceListCount(ReplySize, count, MaxDevices, &out)) {
+        return 0;
+    }
+    if (out != 0 && OutIds == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < out; i++) {
+        OutIds[i] = T2AudioBceReadU64(
+            Reply + base + T2AUDIO_BCE_U64_SIZE +
+            (unsigned long long)i * T2AUDIO_BCE_U64_SIZE);
+    }
+
+    *OutCount = out;
+    return 1;
+}
+
 // Validate a GET_PROPERTY response and locate its data. Returns 1 and writes
 // the byte offset of the data (and its size via *OutDataSize) when the fixed
 // prefix plus DataSize fits within ReplySize, otherwise 0.
@@ -124,6 +183,60 @@ T2AudioBcePropertyDataOffset(unsigned long long ReplySize,
 
     *OutOffset = fixed;
     *OutDataSize = DataSize;
+    return 1;
+}
+
+// Parse and validate a complete GET_PROPERTY response. Requires the response
+// type byte to be RESPONSE, the protocol status to be zero, the message id to
+// equal ExpectedMessage, and the fixed prefix (obj/element/scope/selector/
+// data_size) plus the advertised data to fit within ReplySize. On success
+// writes every parsed field. The caller is expected to verify that the echoed
+// obj/scope/selector match what it requested.
+static __inline int
+T2AudioBceParsePropertyResponse(const unsigned char *Reply,
+                                unsigned long long ReplySize,
+                                unsigned long ExpectedMessage,
+                                unsigned long long *OutObj,
+                                unsigned long *OutElement,
+                                unsigned long *OutScope,
+                                unsigned long *OutSelector,
+                                unsigned long long *OutDataOffset,
+                                unsigned long long *OutDataSize)
+{
+    unsigned long long base =
+        T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+    unsigned long long fixed = base + T2AUDIO_BCE_PROP_FIXED_SIZE;
+    unsigned long long dataSize;
+
+    if (Reply == 0 || OutObj == 0 || OutElement == 0 || OutScope == 0 ||
+        OutSelector == 0 || OutDataOffset == 0 || OutDataSize == 0) {
+        return 0;
+    }
+    if (ReplySize < fixed) {
+        return 0;
+    }
+    if (Reply[T2AUDIO_BCE_TYPE_OFFSET] != T2AUDIO_BCE_MSG_RESPONSE) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE) != ExpectedMessage) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE +
+                          T2AUDIO_BCE_U32_SIZE) != 0) {
+        return 0;
+    }
+
+    *OutObj = T2AudioBceReadU64(Reply + base);
+    *OutElement = T2AudioBceReadU32(Reply + base + 8);
+    *OutScope = T2AudioBceReadU32(Reply + base + 12);
+    *OutSelector = T2AudioBceReadU32(Reply + base + 16);
+    dataSize = T2AudioBceReadU64(Reply + base + 20);
+
+    if (!T2AudioBcePropertyDataOffset(ReplySize, dataSize,
+                                      OutDataOffset, OutDataSize)) {
+        return 0;
+    }
+
     return 1;
 }
 

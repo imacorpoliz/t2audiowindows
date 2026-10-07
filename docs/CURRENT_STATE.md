@@ -30,16 +30,29 @@ not yet exercised at runtime**; the pure size/validation/release-decision helper
 covered by a host-side unit test (`tests/T2AudioBufferLogicTest.c`, 20 assertions).
 
 The **BCE protocol parsing** is now hardened and the speaker-discovery logic is
-implemented. `T2AudioGetDeviceList` validates the reply message id and confirms the
-advertised device count actually fits within the bytes returned before reading any id
-(`BceProtocolLogic.h:T2AudioBceDeviceListCount`). `T2AudioFindSpeakerDeviceId` now walks
-the device list and matches the speaker by UID — `GET_PROPERTY(GLOBAL, UID, element 0)`
-per device, exact case-sensitive compare against `"Speaker"` — instead of guessing
-`deviceList[0]`. The pure byte-access/length/UID helpers live in
+implemented. Replies are validated as a whole before any field is read: the response
+type byte must be RESPONSE, the protocol status must be zero, the message id must match
+the request, and the advertised count/data size must fit within the bytes actually
+returned (`BceProtocolLogic.h:T2AudioBceParseDeviceListResponse` /
+`T2AudioBceParsePropertyResponse`). The reply length reported by the transport is
+clamped to the supplied buffer so a larger `Information` value cannot cause an
+out-of-bounds read. The BCE IOCTL constant is fixed to the verified `0x222018`
+(`CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0806, ...)`, previously mis-coded as `0x22A018`) and is
+guarded by a `C_ASSERT`. `T2AudioFindSpeakerDeviceId` walks the device list and matches
+the speaker by UID — `GET_PROPERTY(GLOBAL, UID, element 0)` per device, exact
+case-sensitive compare against `"Speaker"` — instead of guessing `deviceList[0]`, and
+verifies that the reply echoes the requested device/scope/selector.
+
+A **diagnostic-only discovery probe** (`T2AudioProbeBceDevices`) is called at the end of
+`T2AudioStartDevice`. It opens the BCE transport, enumerates devices, logs each UID, and
+records the speaker id in a **separate** field (`Context->BceSpeakerDeviceId`); it then
+closes the transport. It never touches `Context->SpeakerDeviceId`, so the audio path
+(MMIO buffer, `StartIo`/`StopIo`) stays disabled. `Driver.c`/`Device.c` continue to
+hard-code `SpeakerDeviceId = 0`. The pure byte-access/length/UID/parser helpers live in
 `src/BceProtocolLogic.h` and are covered by a host-side unit test
-(`tests/BceProtocolLogicTest.c`, 25 assertions). The BCE transport itself is **still not
-wired in**: `Driver.c`/`Device.c` continue to hard-code `SpeakerDeviceId = 0`, so the
-endpoint stays in diagnostic mode until BCE is enabled and validated on hardware.
+(`tests/BceProtocolLogicTest.c`, 38 assertions). The probe and the discovery logic are
+**not yet exercised against real BCE replies** — that requires installing the driver and
+rebooting.
 
 **Build reproducibility caveat:** The MSBuild link step is **not deterministic** —
 two consecutive rebuilds of identical source produce different SHA256 hashes (the PE
@@ -61,7 +74,7 @@ Therefore a hash mismatch between a local build and an installed/package binary 
 | Topology Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Topology", ...)` |
 | WaveRT Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Wave", ...)` |
 | Audio Endpoint | Structure registered | Bridge pins physically connected; playback still blocked, not yet verified on hardware |
-| BCE Transport | Disabled | Name/UID matching implemented; `SpeakerDeviceId` still hard-coded to 0, so never invoked |
+| BCE Transport | Diagnostic probe only | Reply parsing hardened; IOCTL fixed to `0x222018`; `T2AudioProbeBceDevices` logs devices/UIDs and records `BceSpeakerDeviceId`; `SpeakerDeviceId` still 0, audio path stays off |
 | Audio I/O (StartIo/StopIo) | Blocked | Return `STATUS_NOT_SUPPORTED` while `SpeakerDeviceId == 0` |
 | Audio Playback | Not implemented | Out of scope |
 
@@ -97,10 +110,12 @@ of the current source:
 2. `T2AudioStartDevice` also sets `context->SpeakerDeviceId = 0` (`Driver.c:190`).
 3. `T2AudioFindSpeakerDeviceId` is now implemented (`BceTransport.c`) — it enumerates the
    BCE device list and matches the speaker by UID (`GET_PROPERTY(GLOBAL, UID)`, exact
-   `"Speaker"` compare) — but it is **never called**: `Driver.c:190` and `Device.c:220`
-   still hard-code `SpeakerDeviceId = 0`, so no device id is ever derived. The BCE
-   transport is not wired in. Reply parsing rejects a mismatched message id and a device
-   count that exceeds the returned bytes (`BceProtocolLogic.h`).
+   `"Speaker"` compare). `T2AudioProbeBceDevices` calls it from `T2AudioStartDevice` for
+   diagnostics, but only records the result in `Context->BceSpeakerDeviceId` and closes
+   the transport. `Driver.c:190` and `Device.c:220` still hard-code `SpeakerDeviceId = 0`,
+   so no device id is ever derived for the audio path. Reply parsing rejects a mismatched
+   message id, a non-zero protocol status, a non-response type, and a count/data size that
+   exceeds the returned bytes (`BceProtocolLogic.h`).
 4. `T2AudioCreateSpeakerMdl` zeroes outputs and returns `STATUS_NOT_SUPPORTED` when
    `SpeakerDeviceId == 0` (`Phase4.c:37-43`).
 5. `T2AudioStartIo` (`Phase4.c:119`) and `T2AudioStopIo` (`Phase4.c:168`) return
@@ -174,8 +189,8 @@ C4100 unused params, C4115 from WDK headers).
 - Toolchain: MSBuild 18.10.1, WDK `10.0.28000.0`, VS 18 Community.
 - Command (from `src\`):
   `MSBuild.exe T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild`
-- Output: `src\bin\Release\T2AudioMiniport.sys` (~18,944 bytes).
-- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~33,280 bytes).
+- Output: `src\bin\Release\T2AudioMiniport.sys` (~22,528 bytes).
+- Debug output: `src\bin\Debug\T2AudioMiniport.sys` (~38,912 bytes).
 - Host unit test (pure buffer helpers):
   `cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c`
   then run `tests\T2AudioBufferLogicTest.exe` (all assertions pass).
@@ -196,9 +211,11 @@ C4100 unused params, C4115 from WDK headers).
    helpers are unit-tested on the host, but the kernel paths (allocator, MMIO, I/O)
    have not been exercised at runtime — only builds and static checks have run. The
    zero-copy MMIO path is unverified until BCE transport works.
-3. BCE transport disabled and not wired in; speaker device id not discovered. Discovery
-   logic (device-list + UID match) is implemented and host-tested but not called, so it
-   is unverified against real BCE replies.
+3. BCE transport is not wired into the audio path; the speaker device id is discovered
+   only diagnostically (`Context->BceSpeakerDeviceId`) and `SpeakerDeviceId` stays 0.
+   The discovery probe and reply parsers are implemented and host-tested (38 assertions),
+   but they have not been exercised against real BCE replies — that needs a driver
+   install + reboot.
 4. Audio I/O blocked in diagnostic mode.
 5. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
 6. No volume control, power management, or hotplug handling.

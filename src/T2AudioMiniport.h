@@ -74,6 +74,8 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 SpeakerDeviceId;
     PMDL SpeakerBufferMdl;
     BOOLEAN HardwareReady;
+    ULONG64 BceSpeakerDeviceId;
+    BOOLEAN BceProbed;
 } T2AUDIO_DEVICE_CONTEXT, *PT2AUDIO_DEVICE_CONTEXT;
 
 typedef struct _T2AUDIO_STREAM_CONTEXT {
@@ -170,6 +172,8 @@ NTSTATUS T2AudioGetDeviceList(
 NTSTATUS T2AudioFindSpeakerDeviceId(
     _In_ PT2AUDIO_DEVICE_CONTEXT Context,
     _Out_ PULONG64 DeviceId);
+
+NTSTATUS T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 #ifdef __cplusplus
 }
