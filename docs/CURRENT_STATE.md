@@ -29,6 +29,18 @@ id exists. In diagnostic mode the hardware audio buffer is never handed to PortC
 not yet exercised at runtime**; the pure size/validation/release-decision helpers are
 covered by a host-side unit test (`tests/T2AudioBufferLogicTest.c`, 20 assertions).
 
+The **BCE protocol parsing** is now hardened and the speaker-discovery logic is
+implemented. `T2AudioGetDeviceList` validates the reply message id and confirms the
+advertised device count actually fits within the bytes returned before reading any id
+(`BceProtocolLogic.h:T2AudioBceDeviceListCount`). `T2AudioFindSpeakerDeviceId` now walks
+the device list and matches the speaker by UID — `GET_PROPERTY(GLOBAL, UID, element 0)`
+per device, exact case-sensitive compare against `"Speaker"` — instead of guessing
+`deviceList[0]`. The pure byte-access/length/UID helpers live in
+`src/BceProtocolLogic.h` and are covered by a host-side unit test
+(`tests/BceProtocolLogicTest.c`, 25 assertions). The BCE transport itself is **still not
+wired in**: `Driver.c`/`Device.c` continue to hard-code `SpeakerDeviceId = 0`, so the
+endpoint stays in diagnostic mode until BCE is enabled and validated on hardware.
+
 **Build reproducibility caveat:** The MSBuild link step is **not deterministic** —
 two consecutive rebuilds of identical source produce different SHA256 hashes (the PE
 `TimeDateStamp` and the CodeView PDB GUID/age differ; 21 bytes in the Release image).
@@ -49,7 +61,7 @@ Therefore a hash mismatch between a local build and an installed/package binary 
 | Topology Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Topology", ...)` |
 | WaveRT Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Wave", ...)` |
 | Audio Endpoint | Structure registered | Bridge pins physically connected; playback still blocked, not yet verified on hardware |
-| BCE Transport | Disabled | `SpeakerDeviceId = 0`; name matching not implemented |
+| BCE Transport | Disabled | Name/UID matching implemented; `SpeakerDeviceId` still hard-coded to 0, so never invoked |
 | Audio I/O (StartIo/StopIo) | Blocked | Return `STATUS_NOT_SUPPORTED` while `SpeakerDeviceId == 0` |
 | Audio Playback | Not implemented | Out of scope |
 
@@ -83,8 +95,12 @@ of the current source:
 1. `T2AudioMapResources` sets `Context->SpeakerDeviceId = 0` unconditionally
    (`Device.c:220`) — the `BufferStruct` contract has no device-id field.
 2. `T2AudioStartDevice` also sets `context->SpeakerDeviceId = 0` (`Driver.c:190`).
-3. `T2AudioFindSpeakerDeviceId` returns `STATUS_NOT_IMPLEMENTED` — BCE name matching via
-   `GET_PROPERTY` is not implemented (`BceTransport.c:222-227`). No device id is ever derived.
+3. `T2AudioFindSpeakerDeviceId` is now implemented (`BceTransport.c`) — it enumerates the
+   BCE device list and matches the speaker by UID (`GET_PROPERTY(GLOBAL, UID)`, exact
+   `"Speaker"` compare) — but it is **never called**: `Driver.c:190` and `Device.c:220`
+   still hard-code `SpeakerDeviceId = 0`, so no device id is ever derived. The BCE
+   transport is not wired in. Reply parsing rejects a mismatched message id and a device
+   count that exceeds the returned bytes (`BceProtocolLogic.h`).
 4. `T2AudioCreateSpeakerMdl` zeroes outputs and returns `STATUS_NOT_SUPPORTED` when
    `SpeakerDeviceId == 0` (`Phase4.c:37-43`).
 5. `T2AudioStartIo` (`Phase4.c:119`) and `T2AudioStopIo` (`Phase4.c:168`) return
@@ -163,6 +179,9 @@ C4100 unused params, C4115 from WDK headers).
 - Host unit test (pure buffer helpers):
   `cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c`
   then run `tests\T2AudioBufferLogicTest.exe` (all assertions pass).
+- Host unit test (pure BCE protocol helpers):
+  `cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe tests\BceProtocolLogicTest.c`
+  then run `tests\BceProtocolLogicTest.exe` (all assertions pass).
 - Only Debug builds emit `KdPrint` output (`DBG` is not defined in Release).
 - Builds are non-reproducible (see Executive Summary); do not compare hashes across rebuilds.
 
@@ -177,7 +196,9 @@ C4100 unused params, C4115 from WDK headers).
    helpers are unit-tested on the host, but the kernel paths (allocator, MMIO, I/O)
    have not been exercised at runtime — only builds and static checks have run. The
    zero-copy MMIO path is unverified until BCE transport works.
-3. BCE transport disabled; speaker device id not discovered.
+3. BCE transport disabled and not wired in; speaker device id not discovered. Discovery
+   logic (device-list + UID match) is implemented and host-tested but not called, so it
+   is unverified against real BCE replies.
 4. Audio I/O blocked in diagnostic mode.
 5. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
 6. No volume control, power management, or hotplug handling.
