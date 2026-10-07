@@ -3,7 +3,7 @@
 **Last Updated**: 2026-10-07
 **Status**: Diagnostic mode — Topology + WaveRT registered and wired; BCE speaker discovery validated on hardware (Speaker `0x39`); audio I/O disabled by design
 **Branch**: `diagnostics`
-**Last Commit**: `6f60e53`
+**Last Commit**: `e4f34fc`
 
 > This file (`docs/CURRENT_STATE.md`) is the single authoritative status document.
 > The former root `CURRENT_STATE.md` is superseded and now only points here.
