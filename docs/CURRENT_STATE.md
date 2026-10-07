@@ -1,7 +1,7 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-07
-**Status**: Diagnostic mode — Topology + WaveRT registered and wired, BCE transport and audio I/O disabled by design
+**Status**: Diagnostic mode — Topology + WaveRT registered and wired; BCE speaker discovery validated on hardware (Speaker `0x39`); audio I/O disabled by design
 **Branch**: `diagnostics`
 **Last Commit**: `6f60e53`
 
@@ -50,9 +50,17 @@ closes the transport. It never touches `Context->SpeakerDeviceId`, so the audio 
 (MMIO buffer, `StartIo`/`StopIo`) stays disabled. `Driver.c`/`Device.c` continue to
 hard-code `SpeakerDeviceId = 0`. The pure byte-access/length/UID/parser helpers live in
 `src/BceProtocolLogic.h` and are covered by a host-side unit test
-(`tests/BceProtocolLogicTest.c`, 38 assertions). The probe and the discovery logic are
-**not yet exercised against real BCE replies** — that requires installing the driver and
-rebooting.
+(`tests/BceProtocolLogicTest.c`, 38 assertions).
+
+The probe and the discovery logic were **validated on real hardware on 2026-10-07**
+(Debug build installed as `oem157.inf`, device Status `Started`; capture
+`docs/logs/capture_20261007_165851/`). The BCE transport opened over
+`\Device\AppleUSBVHCI`, enumerated 5 devices, and read each UID:
+`0x21 "Digital Mic"`, `0x25 "Codec Output"`, **`0x39 "Speaker"`**, `0x43 "Codec Input"`,
+`0x47 "Bridge Loopback"`. The speaker id resolved to **`0x39`**, which matches the
+hard-coded resource-table path (`Device[1] Name='Speaker'`, buffer `0x12c000`, size
+`0x61800`) — the two independent discovery methods agree. The audio path still stays
+disabled (`SpeakerDeviceId == 0`).
 
 **Build reproducibility caveat:** The MSBuild link step is **not deterministic** —
 two consecutive rebuilds of identical source produce different SHA256 hashes (the PE
@@ -74,7 +82,7 @@ Therefore a hash mismatch between a local build and an installed/package binary 
 | Topology Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Topology", ...)` |
 | WaveRT Port/Miniport | Registered | `PcRegisterSubdevice(..., L"Wave", ...)` |
 | Audio Endpoint | Structure registered | Bridge pins physically connected; playback still blocked, not yet verified on hardware |
-| BCE Transport | Diagnostic probe only | Reply parsing hardened; IOCTL fixed to `0x222018`; `T2AudioProbeBceDevices` logs devices/UIDs and records `BceSpeakerDeviceId`; `SpeakerDeviceId` still 0, audio path stays off |
+| BCE Transport | Validated on hardware (read-only) | Reply parsing hardened; IOCTL `0x222018`; probe opened transport, read 5 UIDs, resolved Speaker `0x39`; `SpeakerDeviceId` still 0, audio path stays off |
 | Audio I/O (StartIo/StopIo) | Blocked | Return `STATUS_NOT_SUPPORTED` while `SpeakerDeviceId == 0` |
 | Audio Playback | Not implemented | Out of scope |
 
@@ -82,21 +90,26 @@ Therefore a hash mismatch between a local build and an installed/package binary 
 
 ## Current Driver State on the Test Machine
 
-The original Apple audio driver was restored on 2026-10-06 with
-`tools/Restore-AppleAudioDriver.ps1` (Brigadier, Boot Camp `061-62383`):
+On **2026-10-07** the signed Debug build was installed for the BCE hardware test
+(no reboot — `pnputil /add-driver /install` + `/scan-devices` rebound the device in
+place):
 
 | Property | Value |
 |----------|-------|
-| Device | `PCI\VEN_106B&DEV_1803...` -> "Apple Audio Device", Class MEDIA, Status OK |
-| Driver | `C:\Windows\System32\drivers\AppleAudio.sys` (112,512 bytes, Apple Boot Camp) |
-| Package | original `AppleAudio.inf` published as `oem16.inf` |
-| Custom driver | `T2AudioMiniport` uninstalled; not present on the machine |
+| Device | `PCI\VEN_106B&DEV_1803...` -> "Apple T2 Audio Device (6-channel Native Driver)", Class MEDIA, Status `Started`, Problem `CM_PROB_NONE` |
+| Driver | `T2AudioMiniport.sys` (signed Debug, 40,368 bytes) |
+| Package | `packaging/T2AudioMiniport.inf` (DriverVer `10/07/2026,1.0.1.0`) published as `oem157.inf` |
+| Capture | `docs/logs/capture_20261007_165851/` (54 `T2Audio:` lines) |
+
+The original Apple driver had been restored on 2026-10-06 with
+`tools/Restore-AppleAudioDriver.ps1` (Brigadier, Boot Camp `061-62383`), where
+`AppleAudio.sys` (112,512 bytes) was published as `oem16.inf`. `oem16.inf` is still
+present in the driver store; re-bind the Apple driver with
+`tools/Restore-AppleAudioDriver.ps1` (or `pnputil /update-driver`) to revert.
 
 The earlier custom-driver capture (Part 1 evidence) remains in
 `docs/logs/capture_20261006_023822/` (43 `T2Audio:` lines); sanitized excerpt at
 `docs/logs/EXCERPT_20261006_023822.md`.
-
-Re-installing the custom driver and running a hardware test requires user approval.
 
 ---
 
@@ -213,9 +226,10 @@ C4100 unused params, C4115 from WDK headers).
    zero-copy MMIO path is unverified until BCE transport works.
 3. BCE transport is not wired into the audio path; the speaker device id is discovered
    only diagnostically (`Context->BceSpeakerDeviceId`) and `SpeakerDeviceId` stays 0.
-   The discovery probe and reply parsers are implemented and host-tested (38 assertions),
-   but they have not been exercised against real BCE replies — that needs a driver
-   install + reboot.
+   The discovery probe and reply parsers are host-tested (38 assertions) and were
+   exercised against real BCE replies on hardware (2026-10-07): the transport opened,
+   five devices were enumerated, and Speaker resolved to `0x39`, agreeing with the
+   resource-table path. Wiring `SpeakerDeviceId` into the audio path is the next step.
 4. Audio I/O blocked in diagnostic mode.
 5. Single fixed format: 48 kHz / 6 channel / 32-bit container (24-byte frame).
 6. No volume control, power management, or hotplug handling.
