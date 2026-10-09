@@ -76,6 +76,38 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     BOOLEAN HardwareReady;
     ULONG64 BceSpeakerDeviceId;
     BOOLEAN BceProbed;
+    BOOLEAN ForceSystemBuffer;
+    ULONG MdlVariant;
+    // Test-session gates. Both are read from the VOLATILE registry key
+    // HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\TestSession, which
+    // is wiped on every reboot (including after a bugcheck). The driver refuses
+    // to start at all (no BAR mapping, no BCE, no audio) unless TestModeEnabled
+    // is set, and the copy DPC never writes device memory unless
+    // MmioCopyEnabled is set. On a normal boot neither is present.
+    BOOLEAN TestModeEnabled;
+    BOOLEAN MmioCopyEnabled;
+    // Whether SetState may actually issue START_IO/STOP_IO (session
+    // EnableBceIo=1). Off by default, so stage 4 can wire the speaker and hold
+    // the BCE transport open WITHOUT sending any command - that isolates the
+    // send itself from the stream/transport setup. The send is also refused
+    // above PASSIVE_LEVEL regardless of this flag (see T2AudioSendBceMessage).
+    BOOLEAN BceIoEnabled;
+    // Set once SET_REMOTE_ACCESS(ON) has been acknowledged by the T2. The T2
+    // must be told to hand audio control to the host before any START_IO, so
+    // T2AudioStartIo refuses to run until this is set (kaiT2en issues the
+    // handshake at init; see BceTransport.c:T2AudioSetRemoteAccess).
+    BOOLEAN BceRemoteAccess;
+    // Diagnostic stage selected by the test session (DiagStage). Higher stages
+    // include lower ones:
+    //   1 = RAM only       - no BAR mapping, no BCE, system-memory buffer only
+    //   2 = BAR metadata   - map BARs and locate the speaker buffer
+    //   3 = BCE discovery  - open the transport and resolve the speaker
+    //   4 = hardware I/O   - wire the speaker (and hold the transport open);
+    //                        START_IO/STOP_IO only if EnableBceIo=1
+    //   5 = MMIO copy      - the copy DPC writes PCM into BAR1
+    // It is read only when TestModeEnabled is set, so a normal boot never maps
+    // device memory regardless of this value.
+    ULONG DiagStage;
 } T2AUDIO_DEVICE_CONTEXT, *PT2AUDIO_DEVICE_CONTEXT;
 
 typedef struct _T2AUDIO_STREAM_CONTEXT {
@@ -125,6 +157,10 @@ NTSTATUS T2AudioFindSpeakerBuffer(
 NTSTATUS T2AudioValidateSixChannelFormat(
     _In_ PKSDATAFORMAT DataFormat);
 
+VOID T2AudioLogFormat(
+    _In_z_ PCSTR Tag,
+    _In_opt_ PKSDATAFORMAT DataFormat);
+
 NTSTATUS T2AudioCreateStream(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
     _In_ PPORTWAVERTSTREAM PortStream,
@@ -157,6 +193,7 @@ NTSTATUS T2AudioBuildIoCommand(
 NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 
+VOID T2AudioInitializeBceTransport(VOID);
 NTSTATUS T2AudioOpenBceTransport(VOID);
 VOID T2AudioCloseBceTransport(VOID);
 NTSTATUS T2AudioSendBceMessage(
@@ -169,6 +206,7 @@ NTSTATUS T2AudioGetDeviceList(
     _Out_writes_(MaxDevices) ULONG64 *DeviceList,
     _In_ ULONG MaxDevices,
     _Out_ PULONG DeviceCount);
+NTSTATUS T2AudioSetRemoteAccess(_In_ BOOLEAN Enable);
 NTSTATUS T2AudioFindSpeakerDeviceId(
     _In_ PT2AUDIO_DEVICE_CONTEXT Context,
     _Out_ PULONG64 DeviceId);

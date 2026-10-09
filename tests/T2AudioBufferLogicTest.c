@@ -80,11 +80,73 @@ static void test_release_decision(void)
           T2AudioDecideBufferRelease(0, 0, 0) == T2AUDIO_RELEASE_NONE);
 }
 
+static void test_hardware_io_decision(void)
+{
+    printf("T2AudioDecideHardwareIo\n");
+
+    check("device path, not started -> start",
+          T2AudioDecideHardwareIo(0, 1, 0) == 1);
+    check("ForceSystemBuffer -> never start",
+          T2AudioDecideHardwareIo(1, 1, 0) == 0);
+    check("no speaker wired -> never start",
+          T2AudioDecideHardwareIo(0, 0, 0) == 0);
+    check("already started -> no double start",
+          T2AudioDecideHardwareIo(0, 1, 1) == 0);
+    check("forced + already started -> no start",
+          T2AudioDecideHardwareIo(1, 1, 1) == 0);
+
+    printf("T2AudioDecideStopHardwareIo\n");
+    check("started -> stop",
+          T2AudioDecideStopHardwareIo(1) == 1);
+    check("never started -> no stop (no unmatched STOP_IO)",
+          T2AudioDecideStopHardwareIo(0) == 0);
+
+    printf("T2AudioShouldStartCopyTimer\n");
+    check("buffer + size, idle -> start",
+          T2AudioShouldStartCopyTimer(1, 4096, 0) == 1);
+    check("already active -> no restart",
+          T2AudioShouldStartCopyTimer(1, 4096, 1) == 0);
+    check("no system buffer -> no timer",
+          T2AudioShouldStartCopyTimer(0, 4096, 0) == 0);
+    check("zero copy size -> no timer",
+          T2AudioShouldStartCopyTimer(1, 0, 0) == 0);
+}
+
+static void test_device_table_fits(void)
+{
+    // Mirrors the kernel metadata layout: 0x10-byte header, 0xBDEC-byte stride,
+    // max 20 devices, mapped BAR up to 4 MB.
+    const unsigned long long hdr = 0x10ull;
+    const unsigned long long stride = 0xBDECull;
+    const unsigned long long maxd = 20ull;
+    const unsigned long long one = hdr + stride;
+
+    printf("T2AudioDeviceTableFits\n");
+
+    check("0 devices, exactly header -> fits",
+          T2AudioDeviceTableFits(0, maxd, hdr, stride, hdr));
+    check("1 device, exactly one entry -> fits",
+          T2AudioDeviceTableFits(1, maxd, hdr, stride, one));
+    check("1 device, one byte short -> fail",
+          !T2AudioDeviceTableFits(1, maxd, hdr, stride, one - 1));
+    check("20 devices in 4 MB -> fits",
+          T2AudioDeviceTableFits(20, maxd, hdr, stride, 0x400000ull));
+    check("21 devices exceeds max -> fail",
+          !T2AudioDeviceTableFits(21, maxd, hdr, stride, 0x400000ull));
+    check("corrupt count (0xFFFFFFFF) -> fail",
+          !T2AudioDeviceTableFits(0xFFFFFFFFull, maxd, hdr, stride, 0x400000ull));
+    check("huge count cannot overflow into fit",
+          !T2AudioDeviceTableFits(0xFFFFFFFFFFFFFFFFull, maxd, hdr, stride,
+                                  0xFFFFFFFFFFFFFFFFull));
+}
+
 int main(void)
 {
     test_align();
     test_hardware_satisfies();
     test_release_decision();
+    test_hardware_io_decision();
+    test_device_table_fits();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

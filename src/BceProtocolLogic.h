@@ -240,6 +240,43 @@ T2AudioBceParsePropertyResponse(const unsigned char *Reply,
     return 1;
 }
 
+// Validate a simple command response (START_IO / STOP_IO and similar), whose
+// payload is just the base. Requires: ReplySize covers header+base, tag ==
+// "Audt", type == RESPONSE, device_id echoes ExpectedDeviceId, the message id
+// equals ExpectedMessage, and the protocol status is zero. Returns 1 on success.
+static __inline int
+T2AudioBceParseCommandResponse(const unsigned char *Reply,
+                               unsigned long long ReplySize,
+                               unsigned long ExpectedMessage,
+                               unsigned long long ExpectedDeviceId)
+{
+    if (Reply == 0) {
+        return 0;
+    }
+    if (ReplySize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
+        return 0;
+    }
+    if (Reply[0] != 'A' || Reply[1] != 'u' ||
+        Reply[2] != 'd' || Reply[3] != 't') {
+        return 0;
+    }
+    if (Reply[T2AUDIO_BCE_TYPE_OFFSET] != T2AUDIO_BCE_MSG_RESPONSE) {
+        return 0;
+    }
+    // device_id sits immediately after the 4-byte tag and the type byte.
+    if (T2AudioBceReadU64(Reply + 5) != ExpectedDeviceId) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE) != ExpectedMessage) {
+        return 0;
+    }
+    if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE +
+                          T2AUDIO_BCE_U32_SIZE) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
 // Exact, case-sensitive match of a device UID against "Speaker", as kaiT2en
 // does with strcmp() against the BufferStruct device name.
 static __inline int

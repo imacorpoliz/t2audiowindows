@@ -192,6 +192,37 @@ T2AudioMiniportGetDescription(
     return STATUS_SUCCESS;
 }
 
+VOID
+T2AudioLogFormat(
+    _In_z_ PCSTR Tag,
+    _In_opt_ PKSDATAFORMAT DataFormat)
+{
+    if (DataFormat == NULL) {
+        KdPrint(("T2Audio: %s format=<NULL>\n", Tag));
+        return;
+    }
+
+    if (DataFormat->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX)) {
+        PKSDATAFORMAT_WAVEFORMATEX wf = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
+        KdPrint(("T2Audio: %s size=%u major=%08X sub=%08X spec=%08X wtag=%u ch=%u rate=%u bits=%u block=%u\n",
+                 Tag, DataFormat->FormatSize,
+                 DataFormat->MajorFormat.Data1,
+                 DataFormat->SubFormat.Data1,
+                 DataFormat->Specifier.Data1,
+                 wf->WaveFormatEx.wFormatTag,
+                 wf->WaveFormatEx.nChannels,
+                 wf->WaveFormatEx.nSamplesPerSec,
+                 wf->WaveFormatEx.wBitsPerSample,
+                 wf->WaveFormatEx.nBlockAlign));
+    } else {
+        KdPrint(("T2Audio: %s size=%u major=%08X sub=%08X spec=%08X\n",
+                 Tag, DataFormat->FormatSize,
+                 DataFormat->MajorFormat.Data1,
+                 DataFormat->SubFormat.Data1,
+                 DataFormat->Specifier.Data1));
+    }
+}
+
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioMiniportDataRangeIntersection(
     _In_ PMINIPORT Miniport,
@@ -206,6 +237,9 @@ T2AudioMiniportDataRangeIntersection(
     UNREFERENCED_PARAMETER(Miniport);
     UNREFERENCED_PARAMETER(DataRange);
     UNREFERENCED_PARAMETER(MatchingDataRange);
+
+    KdPrint(("T2Audio: DataRangeIntersection pin=%u outLen=%u\n",
+             PinId, OutputBufferLength));
 
     if (ResultantFormatLength == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -283,12 +317,19 @@ T2AudioMiniportNewStream(
 {
     PT2AUDIO_MINIPORT instance = CONTAINING_RECORD(
         Miniport, T2AUDIO_MINIPORT, Interface);
+    NTSTATUS status;
+
+    KdPrint(("T2Audio: NewStream pin=%u capture=%u\n", Pin, Capture ? 1u : 0u));
+    T2AudioLogFormat("NewStream req", DataFormat);
 
     if (Stream == NULL || Capture || Pin != T2AUDIO_WAVE_PIN_RENDER_SINK) {
+        KdPrint(("T2Audio: NewStream rejected: bad pin/capture\n"));
         return STATUS_INVALID_PARAMETER;
     }
-    return T2AudioCreateStream(instance->DeviceContext, PortStream,
-                               DataFormat, Stream);
+    status = T2AudioCreateStream(instance->DeviceContext, PortStream,
+                                 DataFormat, Stream);
+    KdPrint(("T2Audio: NewStream status=0x%08X\n", status));
+    return status;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -327,21 +368,40 @@ T2AudioValidateSixChannelFormat(_In_ PKSDATAFORMAT DataFormat)
     PKSDATAFORMAT_WAVEFORMATEX waveFormat;
 
     if (DataFormat == NULL ||
-        DataFormat->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX) ||
-        !IsEqualGUIDAligned(&DataFormat->MajorFormat,
-                            &g_T2AudioTypeAudio) ||
-        !IsEqualGUIDAligned(&DataFormat->SubFormat,
-                            &g_T2AudioSubtypePcm) ||
-        !IsEqualGUIDAligned(&DataFormat->Specifier,
-                            &g_T2AudioSpecifierWaveformex)) {
+        DataFormat->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX)) {
+        KdPrint(("T2Audio: Validate: bad size/null\n"));
         return STATUS_INVALID_PARAMETER;
     }
 
     waveFormat = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
+
+    if (!IsEqualGUIDAligned(&DataFormat->MajorFormat,
+                            &g_T2AudioTypeAudio)) {
+        KdPrint(("T2Audio: Validate: major=%08X != audio\n",
+                 DataFormat->MajorFormat.Data1));
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!IsEqualGUIDAligned(&DataFormat->SubFormat,
+                            &g_T2AudioSubtypePcm)) {
+        KdPrint(("T2Audio: Validate: sub=%08X != PCM(00000001)\n",
+                 DataFormat->SubFormat.Data1));
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!IsEqualGUIDAligned(&DataFormat->Specifier,
+                            &g_T2AudioSpecifierWaveformex)) {
+        KdPrint(("T2Audio: Validate: spec=%08X != WFEX(05589F81)\n",
+                 DataFormat->Specifier.Data1));
+        return STATUS_INVALID_PARAMETER;
+    }
     if (waveFormat->WaveFormatEx.nChannels != 6 ||
         waveFormat->WaveFormatEx.nSamplesPerSec != 48000 ||
         waveFormat->WaveFormatEx.wBitsPerSample != 32 ||
         waveFormat->WaveFormatEx.nBlockAlign != 24) {
+        KdPrint(("T2Audio: Validate: wfx ch=%u rate=%u bits=%u block=%u != 6/48000/32/24\n",
+                 waveFormat->WaveFormatEx.nChannels,
+                 waveFormat->WaveFormatEx.nSamplesPerSec,
+                 waveFormat->WaveFormatEx.wBitsPerSample,
+                 waveFormat->WaveFormatEx.nBlockAlign));
         return STATUS_INVALID_PARAMETER;
     }
     return STATUS_SUCCESS;

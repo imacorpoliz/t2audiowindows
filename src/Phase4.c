@@ -1,4 +1,5 @@
 #include "T2AudioMiniport.h"
+#include "BceProtocolLogic.h"
 
 #pragma pack(push, 1)
 typedef struct _T2AUDIO_MESSAGE_HEADER {
@@ -24,6 +25,9 @@ T2AudioCreateSpeakerMdl(
     ULONG size;
     ULONG pageCount;
     ULONG index;
+    ULONG actual;
+    BOOLEAN ioSpace;
+    BOOLEAN pagesLocked;
     PMDL mdl;
 
     if (Context == NULL || Mdl == NULL || OffsetFromFirstPage == NULL ||
@@ -32,13 +36,13 @@ T2AudioCreateSpeakerMdl(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Diagnostic mode: BCE transport is disabled (SpeakerDeviceId == 0).
-    // Never hand out a hardware buffer MDL in this mode.
+    // No speaker device id (BCE unavailable): never hand out a hardware buffer
+    // MDL. The stream falls back to a system-memory buffer instead.
     if (Context->SpeakerDeviceId == 0) {
         *Mdl = NULL;
         *OffsetFromFirstPage = 0;
         *ActualSize = 0;
-        KdPrint(("T2Audio: CreateSpeakerMdl blocked: diagnostic mode\n"));
+        KdPrint(("T2Audio: CreateSpeakerMdl blocked: no speaker device id\n"));
         return STATUS_NOT_SUPPORTED;
     }
 
@@ -55,6 +59,37 @@ T2AudioCreateSpeakerMdl(
     size = (ULONG)Context->SpeakerBufferSize;
     pageCount = ADDRESS_AND_SIZE_TO_SPAN_PAGES(
         (PVOID)(ULONG_PTR)Context->SpeakerBufferOffset, size);
+
+    // Diagnostic matrix selected by HKLM ...\Parameters\MdlVariant (DWORD):
+    //   0 = baseline: MDL_IO_SPACE, ActualSize == raw size
+    //   1 = no MDL_IO_SPACE
+    //   2 = MDL_IO_SPACE | MDL_PAGES_LOCKED
+    //   3 = no MDL_IO_SPACE | page-align ActualSize down (MDL count matches)
+    //   4 = no MDL_IO_SPACE, ActualSize == raw size (cache set in stream)
+    actual = size;
+    ioSpace = TRUE;
+    pagesLocked = FALSE;
+    switch (Context->MdlVariant) {
+    case 1:
+    case 4:
+        ioSpace = FALSE;
+        break;
+    case 2:
+        pagesLocked = TRUE;
+        break;
+    case 3:
+        ioSpace = FALSE;
+        actual = (size / PAGE_SIZE) * PAGE_SIZE;
+        if (actual == 0) {
+            actual = size;
+        }
+        break;
+    default:
+        break;
+    }
+
+    pageCount = ADDRESS_AND_SIZE_TO_SPAN_PAGES(
+        (PVOID)(ULONG_PTR)(Context->SpeakerBufferOffset - offset), actual);
     mdl = IoAllocateMdl((PVOID)(ULONG_PTR)(Context->SpeakerBufferOffset - offset),
                         pageCount * PAGE_SIZE,
                         FALSE, FALSE, NULL);
@@ -62,7 +97,12 @@ T2AudioCreateSpeakerMdl(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    mdl->MdlFlags |= MDL_IO_SPACE;
+    if (ioSpace) {
+        mdl->MdlFlags |= MDL_IO_SPACE;
+    }
+    if (pagesLocked) {
+        mdl->MdlFlags |= MDL_PAGES_LOCKED;
+    }
     for (index = 0; index < pageCount; ++index) {
         MmGetMdlPfnArray(mdl)[index] =
             (PFN_NUMBER)((Context->Bar1Physical.QuadPart +
@@ -70,10 +110,15 @@ T2AudioCreateSpeakerMdl(
                           index * PAGE_SIZE) >> PAGE_SHIFT);
     }
 
+    KdPrint(("T2Audio: CreateSpeakerMdl variant=%u ioSpace=%u locked=%u "
+             "actual=%u pages=%u\n",
+             Context->MdlVariant, ioSpace ? 1u : 0u, pagesLocked ? 1u : 0u,
+             actual, pageCount));
+
     Context->SpeakerBufferMdl = mdl;
     *Mdl = mdl;
     *OffsetFromFirstPage = offset;
-    *ActualSize = size;
+    *ActualSize = actual;
     return STATUS_SUCCESS;
 }
 
@@ -103,6 +148,7 @@ T2AudioBuildIoCommand(
     }
     RtlZeroMemory(Buffer, sizeof(*header) + sizeof(*base));
     header = (T2AUDIO_MESSAGE_HEADER *)Buffer;
+    RtlCopyMemory(header->Tag, "Audt", 4);
     header->Type = 1;
     header->DeviceId = DeviceId;
     base = (T2AUDIO_MESSAGE_BASE *)(Buffer + sizeof(*header));
@@ -119,10 +165,17 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     SIZE_T length;
     ULONG replySize;
     NTSTATUS status;
-    T2AUDIO_MESSAGE_BASE *replyBase;
 
     if (Context == NULL || !Context->HardwareReady) {
         return STATUS_DEVICE_NOT_READY;
+    }
+
+    KdPrint(("T2Audio: START_IO entry irql=%u speaker=0x%I64X\n",
+             (ULONG)KeGetCurrentIrql(), Context->SpeakerDeviceId));
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
+        KdPrint(("T2Audio: START_IO refused at IRQL %u (needs PASSIVE)\n",
+                 (ULONG)KeGetCurrentIrql()));
+        return STATUS_INVALID_DEVICE_STATE;
     }
 
     if (Context->SpeakerDeviceId == 0) {
@@ -130,6 +183,18 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_NOT_SUPPORTED;
     }
 
+    // The T2 must be in host-controlled mode first. START_IO without the
+    // SET_REMOTE_ACCESS handshake is what the reference driver never does; we
+    // refuse rather than risk an undefined firmware/lower-driver state.
+    if (!Context->BceRemoteAccess) {
+        KdPrint(("T2Audio: START_IO blocked: remote access not acquired\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    // KNOWN BSOD: on this build, sending START_IO has twice produced a 0x7E
+    // in ks!DispatchDeviceIoControl through AppleUSBVHCI/ksthunk. Keep this
+    // path in the published reproducer; the manual agent refuses -BceIo so it
+    // cannot be triggered accidentally through the normal test workflow.
     status = T2AudioBuildIoCommand(0, Context->SpeakerDeviceId,
                                    message, sizeof(message), &length);
     if (!NT_SUCCESS(status)) {
@@ -143,17 +208,10 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return status;
     }
 
-    // Validate response size and structure
-    if (replySize < sizeof(T2AUDIO_MESSAGE_HEADER) + sizeof(T2AUDIO_MESSAGE_BASE)) {
-        KdPrint(("T2Audio: START_IO response too short: %u bytes\n", replySize));
+    if (!T2AudioBceParseCommandResponse(reply, replySize, 0,
+                                        Context->SpeakerDeviceId)) {
+        KdPrint(("T2Audio: START_IO response invalid (size=%u)\n", replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;
-    }
-
-    // Check BCE response status
-    replyBase = (T2AUDIO_MESSAGE_BASE *)(reply + sizeof(T2AUDIO_MESSAGE_HEADER));
-    if (replyBase->Status != 0) {
-        KdPrint(("T2Audio: START_IO failed with T2 status: 0x%08X\n", replyBase->Status));
-        return STATUS_UNSUCCESSFUL;
     }
 
     KdPrint(("T2Audio: START_IO sent to device 0x%I64X\n", Context->SpeakerDeviceId));
@@ -168,10 +226,17 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     SIZE_T length;
     ULONG replySize;
     NTSTATUS status;
-    T2AUDIO_MESSAGE_BASE *replyBase;
 
     if (Context == NULL || !Context->HardwareReady) {
         return STATUS_DEVICE_NOT_READY;
+    }
+
+    KdPrint(("T2Audio: STOP_IO entry irql=%u speaker=0x%I64X\n",
+             (ULONG)KeGetCurrentIrql(), Context->SpeakerDeviceId));
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
+        KdPrint(("T2Audio: STOP_IO refused at IRQL %u (needs PASSIVE)\n",
+                 (ULONG)KeGetCurrentIrql()));
+        return STATUS_INVALID_DEVICE_STATE;
     }
 
     if (Context->SpeakerDeviceId == 0) {
@@ -192,17 +257,12 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return status;
     }
 
-    // Validate response size and structure
-    if (replySize < sizeof(T2AUDIO_MESSAGE_HEADER) + sizeof(T2AUDIO_MESSAGE_BASE)) {
-        KdPrint(("T2Audio: STOP_IO response too short: %u bytes\n", replySize));
+    // Validate the whole reply: tag, response type, echoed device id, message id
+    // and protocol status. A malformed or mismatched reply is a protocol error.
+    if (!T2AudioBceParseCommandResponse(reply, replySize, 2,
+                                        Context->SpeakerDeviceId)) {
+        KdPrint(("T2Audio: STOP_IO response invalid (size=%u)\n", replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;
-    }
-
-    // Check BCE response status
-    replyBase = (T2AUDIO_MESSAGE_BASE *)(reply + sizeof(T2AUDIO_MESSAGE_HEADER));
-    if (replyBase->Status != 0) {
-        KdPrint(("T2Audio: STOP_IO failed with T2 status: 0x%08X\n", replyBase->Status));
-        return STATUS_UNSUCCESSFUL;
     }
 
     KdPrint(("T2Audio: STOP_IO sent to device 0x%I64X\n", Context->SpeakerDeviceId));

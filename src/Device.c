@@ -1,22 +1,58 @@
 #include "T2AudioMiniport.h"
+#include "T2AudioBufferLogic.h"
 
 VOID
 T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
+    PVOID bar1;
+    SIZE_T bar1Size;
+    PVOID bar2;
+    SIZE_T bar2Size;
+
     PAGED_CODE();
+
+    if (Context == NULL) {
+        return;
+    }
+
+    // Stop all further device access before tearing anything down. HardwareReady
+    // gates the copy DPC and the I/O paths, so clearing it first stops a tick
+    // from starting a write into a mapping that is about to disappear. This
+    // function is idempotent: a second call finds everything already cleared.
+    Context->HardwareReady = FALSE;
+
+    // Backstop against a copy DPC that is already executing past its
+    // HardwareReady check: drain queued DPCs on all processors before the
+    // mapping pointers below are cleared and unmapped. In the normal PnP flow no
+    // stream (and therefore no copy DPC) exists while this runs - PortCls tears
+    // streams down before the device is stopped - so this only guards the
+    // invariant should that ordering ever be broken.
+    KeFlushQueuedDpcs();
+
+    T2AudioCloseBceTransport();
     T2AudioFreeSpeakerMdl(Context);
-    if (Context->Bar1Mapped != NULL) {
-        MmUnmapIoSpace(Context->Bar1Mapped, Context->Bar1Size);
-    }
-    if (Context->Bar2Mapped != NULL) {
-        MmUnmapIoSpace(Context->Bar2Mapped, Context->Bar2Size);
-    }
+
+    // Snapshot then clear the mappings before unmapping, so a concurrent reader
+    // that re-checks the context sees NULL rather than a freed pointer.
+    bar1 = Context->Bar1Mapped;
+    bar1Size = Context->Bar1Size;
+    bar2 = Context->Bar2Mapped;
+    bar2Size = Context->Bar2Size;
+
     Context->Bar1Mapped = NULL;
     Context->Bar2Mapped = NULL;
     Context->Bar1Size = 0;
     Context->Bar2Size = 0;
     Context->BufferStruct = NULL;
-    Context->HardwareReady = FALSE;
+    Context->SpeakerBufferOffset = 0;
+    Context->SpeakerBufferSize = 0;
+
+    if (bar1 != NULL) {
+        MmUnmapIoSpace(bar1, bar1Size);
+    }
+    if (bar2 != NULL) {
+        MmUnmapIoSpace(bar2, bar2Size);
+    }
 }
 
 NTSTATUS
@@ -81,74 +117,90 @@ T2AudioMapResources(
     KdPrint(("T2Audio: Resource[0] Physical=0x%I64X Length=0x%IX\n",
              Context->Bar1Physical.QuadPart, Context->Bar1Size));
     
+    // The T2 audio engine reads PCM straight out of this region, so the copy
+    // DPC must be able to write it. Mapping it PAGE_READONLY made the first
+    // RtlCopyMemory in T2AudioStreamCopyTick fault with
+    // 0xBE ATTEMPTED_WRITE_TO_READONLY_MEMORY. PAGE_NOCACHE keeps the writes
+    // immediately visible to the engine (no write-combining buffers to flush).
     Context->Bar1Mapped = MmMapIoSpaceEx(descriptor->u.Memory.Start,
                                          Context->Bar1Size,
-                                         PAGE_READONLY | PAGE_WRITECOMBINE);
+                                         PAGE_READWRITE | PAGE_NOCACHE);
     if (Context->Bar1Mapped == NULL) {
         KdPrint(("T2Audio: MapResources FAIL_E: MmMapIoSpaceEx failed for Resource[0]\n"));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     KdPrint(("T2Audio: Resource[0] mapped at %p\n", Context->Bar1Mapped));
 
-    // TEST: Try Resource[2] as config memory (64 KB at 0xC1670000)
-    // Hypothesis: Resource[2] might be actual config BAR, not Resource[1]
-    // Resource[2] is physically between buffers and Resource[1]
-    
-    if (memoryResourceCount >= 3) {
-        PCM_PARTIAL_RESOURCE_DESCRIPTOR testDescriptor;
-        testDescriptor = ResourceList->FindTranslatedEntry(
-            CmResourceTypeMemory, 2);
-        
-        if (testDescriptor != NULL && testDescriptor->Type == CmResourceTypeMemory) {
-            SIZE_T testSize = testDescriptor->u.Memory.Length;
-            KdPrint(("T2Audio: Testing Resource[2] as config memory\n"));
-            KdPrint(("T2Audio: Resource[2] Physical=0x%I64X Length=0x%IX\n",
-                     testDescriptor->u.Memory.Start.QuadPart, testSize));
-            
-            if (testSize > T2AUDIO_GPR_OFFSET + sizeof(ULONG) * 3) {
-                PVOID testMapped = MmMapIoSpaceEx(testDescriptor->u.Memory.Start,
-                                                   testSize,
-                                                   PAGE_READONLY | PAGE_NOCACHE);
-                if (testMapped != NULL) {
-                    PUCHAR testGpr = (PUCHAR)testMapped + T2AUDIO_GPR_OFFSET;
-                    ULONG testVersion = READ_REGISTER_ULONG((PULONG)(testGpr + 0));
-                    ULONG testSignature = READ_REGISTER_ULONG((PULONG)(testGpr + 4));
-                    ULONG testBufferOffset = READ_REGISTER_ULONG((PULONG)(testGpr + 8));
-                    
-                    KdPrint(("T2Audio: Resource[2] GPR test: version=0x%08X signature=0x%08X bufferOffset=0x%08X\n",
-                             testVersion, testSignature, testBufferOffset));
-                    
-                    MmUnmapIoSpace(testMapped, testSize);
-                    
-                    if (testSignature == T2AUDIO_SIG) {
-                        KdPrint(("T2Audio: FOUND valid signature in Resource[2]! Using Resource[2] as config.\n"));
-                        // Switch to Resource[2] for actual mapping
-                        descriptor = testDescriptor;
-                        goto MapConfigResource;
-                    }
-                }
-            }
+    // Log every memory resource with both its translated and raw (BAR) address.
+    // Windows does not guarantee that the translated resource order matches PCI
+    // BAR order (the Touch ID transport hit exactly this on the same T2), so the
+    // raw addresses are recorded for cross-checking against !pci.
+    for (i = 0; i < memoryResourceCount; ++i) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR translated;
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR raw;
+
+        translated = ResourceList->FindTranslatedEntry(CmResourceTypeMemory, i);
+        raw = ResourceList->FindUntranslatedEntry(CmResourceTypeMemory, i);
+        if (translated != NULL && translated->Type == CmResourceTypeMemory) {
+            KdPrint(("T2Audio: Resource[%u] translated: Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+                     i, translated->u.Memory.Start.QuadPart,
+                     translated->u.Memory.Length, translated->Flags));
+        }
+        if (raw != NULL && raw->Type == CmResourceTypeMemory) {
+            KdPrint(("T2Audio: Resource[%u] raw(BAR): Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+                     i, raw->u.Memory.Start.QuadPart,
+                     raw->u.Memory.Length, raw->Flags));
         }
     }
-    
-    // If Resource[2] test failed, fall back to Resource[1]
-    KdPrint(("T2Audio: Resource[2] test failed or unavailable, trying Resource[1]\n"));
-    
-    descriptor = ResourceList->FindTranslatedEntry(
-        CmResourceTypeMemory, 1);
-    if (descriptor == NULL) {
-        KdPrint(("T2Audio: MapResources FAIL_F: Memory resource 1 descriptor is NULL\n"));
-        status = STATUS_DEVICE_CONFIGURATION_ERROR;
-        goto Exit;
+
+    // Locate the config BAR by content rather than by index: the T2 audio config
+    // window exposes its GPR block at T2AUDIO_GPR_OFFSET carrying the
+    // driver/version signature. Probe every memory resource and use the first
+    // one that reports the signature. The previous hard-coded Resource[2]/[1]
+    // order silently failed if the enumeration order ever changed.
+    descriptor = NULL;
+    for (i = 0; i < memoryResourceCount; ++i) {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR candidate;
+        PVOID mapped;
+        SIZE_T size;
+
+        candidate = ResourceList->FindTranslatedEntry(CmResourceTypeMemory, i);
+        if (candidate == NULL || candidate->Type != CmResourceTypeMemory) {
+            continue;
+        }
+        size = candidate->u.Memory.Length;
+        if (size <= T2AUDIO_GPR_OFFSET + sizeof(ULONG) * 3) {
+            continue;
+        }
+
+        mapped = MmMapIoSpaceEx(candidate->u.Memory.Start, size,
+                                PAGE_READONLY | PAGE_NOCACHE);
+        if (mapped == NULL) {
+            continue;
+        }
+
+        gpr = (PUCHAR)mapped + T2AUDIO_GPR_OFFSET;
+        version = READ_REGISTER_ULONG((PULONG)(gpr + 0));
+        signature = READ_REGISTER_ULONG((PULONG)(gpr + 4));
+        bufferOffset = READ_REGISTER_ULONG((PULONG)(gpr + 8));
+        MmUnmapIoSpace(mapped, size);
+
+        KdPrint(("T2Audio: Resource[%u] GPR probe: version=0x%08X signature=0x%08X bufferOffset=0x%08X\n",
+                 i, version, signature, bufferOffset));
+
+        if (version >= 2 && signature == T2AUDIO_SIG) {
+            KdPrint(("T2Audio: Resource[%u] is the config BAR (GPR signature match)\n", i));
+            descriptor = candidate;
+            break;
+        }
     }
-    if (descriptor->Type != CmResourceTypeMemory) {
-        KdPrint(("T2Audio: MapResources FAIL_G: Resource 1 type is %u (expected %u)\n",
-                 descriptor->Type, CmResourceTypeMemory));
+
+    if (descriptor == NULL) {
+        KdPrint(("T2Audio: MapResources FAIL_F: no memory resource exposes the GPR signature\n"));
         status = STATUS_DEVICE_CONFIGURATION_ERROR;
         goto Exit;
     }
 
-MapConfigResource:
     Context->Bar2Size = descriptor->u.Memory.Length;
     KdPrint(("T2Audio: Using config memory: Physical=0x%I64X Length=0x%IX\n",
              descriptor->u.Memory.Start.QuadPart, Context->Bar2Size));
@@ -205,7 +257,25 @@ MapConfigResource:
     Context->BufferStruct = (T2AUDIO_BUFFER_STRUCT *)
         ((PUCHAR)Context->Bar1Mapped + bufferOffset);
     KdPrint(("T2Audio: BufferStruct at offset 0x%X\n", bufferOffset));
-    
+
+    // FAIL_M only proved the fixed header fits. Before FindSpeakerBuffer walks
+    // the table, prove the entire header + NumDevices entries fit inside the
+    // mapped BAR, so a corrupt device count cannot make the driver read past
+    // the mapping (and fault). FindSpeakerBuffer repeats the count-vs-max check
+    // but has no way to know how much of the BAR is actually mapped.
+    if (!T2AudioDeviceTableFits(
+            Context->BufferStruct->NumDevices,
+            T2AUDIO_MAX_DEVICES,
+            FIELD_OFFSET(T2AUDIO_BUFFER_STRUCT, Devices),
+            sizeof(T2AUDIO_DEVICE_METADATA),
+            (unsigned long long)(Context->Bar1Size - bufferOffset))) {
+        KdPrint(("T2Audio: MapResources FAIL_M2: device table NumDevices=%u does not fit in 0x%IX bytes\n",
+                 Context->BufferStruct->NumDevices,
+                 Context->Bar1Size - bufferOffset));
+        status = STATUS_DEVICE_CONFIGURATION_ERROR;
+        goto Exit;
+    }
+
     status = T2AudioFindSpeakerBuffer(Context->BufferStruct,
                                       Context->Bar1Size,
                                       &Context->SpeakerBufferOffset,
@@ -215,8 +285,9 @@ MapConfigResource:
         goto Exit;
     }
 
-    // The current BufferStruct contract has no device-id field. Commands stay
-    // disabled until the BCE device enumeration is connected to this context.
+    // The BufferStruct contract has no device-id field; the speaker device id
+    // is discovered later via the BCE device list (T2AudioProbeBceDevices,
+    // called from T2AudioStartDevice).
     Context->SpeakerDeviceId = 0;
     Context->BceSpeakerDeviceId = 0;
     Context->BceProbed = FALSE;

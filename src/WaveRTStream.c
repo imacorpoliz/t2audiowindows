@@ -1,6 +1,11 @@
 #include "T2AudioMiniport.h"
 #include "T2AudioBufferLogic.h"
 
+// How often the system-memory WaveRT buffer is mirrored into the BAR1 hardware
+// buffer, in milliseconds (KeSetTimerEx period). The hardware buffer holds
+// ~347 ms of audio at 48 kHz/6ch/24-bit, so a few ms keeps the mirror fresh.
+#define T2AUDIO_COPY_PERIOD_MS 2
+
 typedef struct _T2AUDIO_WAVERT_STREAM {
     IMiniportWaveRTStream Interface;
     LONG ReferenceCount;
@@ -14,8 +19,48 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     PMDL AudioBufferMdl;
     ULONG AudioBufferSize;
     BOOLEAN HardwareBuffer;
-    BOOLEAN HardwareStarted;
+    // TRUE only after this stream successfully issued START_IO. A forced
+    // system-buffer (software) stream keeps this FALSE, so leaving RUN never
+    // sends an unmatched STOP_IO.
+    BOOLEAN HardwareIoStarted;
+    PVOID SystemBufferVa;
+    ULONG SourceSize;
+    ULONG CopySize;
+    KTIMER CopyTimer;
+    KDPC CopyDpc;
+    BOOLEAN TimerActive;
+    // Memory-mapped position register handed to the WaveRT port. The audio
+    // engine reads it directly to learn how far the "hardware" has played; the
+    // copy DPC advances it at the sample rate. Value is the play cursor in bytes.
+    volatile ULONG PositionRegister;
+    ULONG GetPositionCalls;
+    ULONG GetPositionRegCalls;
+    ULONG CopyTickCalls;
 } T2AUDIO_WAVERT_STREAM;
+
+static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
+
+// Byte play cursor derived from QPC, anchored when the stream entered RUN.
+// Used both to answer GetPosition and to advance the memory-mapped position
+// register the audio engine polls. Returns 0 when the stream is not running.
+static ULONG
+T2AudioStreamPlayPositionBytes(_In_ PT2AUDIO_WAVERT_STREAM instance)
+{
+    LARGE_INTEGER qpc, qpcFreq;
+    ULONG64 elapsedTicks, elapsedFrames, playOffset;
+    ULONG bufferSize = instance->AudioBufferSize;
+
+    if (instance->State != KSSTATE_RUN || bufferSize == 0 ||
+        instance->BytesPerFrame == 0 || instance->SampleRate == 0) {
+        return 0;
+    }
+
+    qpc = KeQueryPerformanceCounter(&qpcFreq);
+    elapsedTicks = (ULONG64)qpc.QuadPart - instance->AnchorQpc;
+    elapsedFrames = (elapsedTicks * instance->SampleRate) / (ULONG64)qpcFreq.QuadPart;
+    playOffset = (instance->AnchorFrames + elapsedFrames) * instance->BytesPerFrame;
+    return (ULONG)(playOffset % bufferSize);
+}
 
 // Release the buffer currently held by the stream (if any). `expected` is the
 // MDL passed to FreeAudioBuffer; pass NULL to release unconditionally (stream
@@ -32,21 +77,31 @@ T2AudioStreamReleaseBuffer(
         instance->HardwareBuffer,
         (expected == NULL) || (expected == instance->AudioBufferMdl));
 
+    // A foreign, unknown, or already-released MDL is not ours to release. Leave
+    // the stream completely untouched - including its copy timer - so a bogus
+    // FreeAudioBuffer cannot stop a live stream.
+    if (action == T2AUDIO_RELEASE_NONE) {
+        return;
+    }
+
+    // Stop mirroring before the source or destination can go away.
+    T2AudioStreamStopCopyTimer(instance);
+
     if (action == T2AUDIO_RELEASE_HARDWARE) {
         T2AudioFreeSpeakerMdl(instance->DeviceContext);
-    } else if (action == T2AUDIO_RELEASE_SYSTEM) {
+    } else { // T2AUDIO_RELEASE_SYSTEM
         if (instance->PortStream != NULL) {
             instance->PortStream->lpVtbl->FreePagesFromMdl(
                 (PVOID)instance->PortStream, instance->AudioBufferMdl);
         }
-    } else {
-        // Nothing held, or a foreign/already-released MDL: leave state intact.
-        return;
     }
 
     instance->AudioBufferMdl = NULL;
     instance->AudioBufferSize = 0;
     instance->HardwareBuffer = FALSE;
+    instance->SystemBufferVa = NULL;
+    instance->SourceSize = 0;
+    instance->CopySize = 0;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -95,6 +150,104 @@ T2AudioStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
     return (ULONG)references;
 }
 
+// Periodic DPC that mirrors the system-memory WaveRT buffer into the BAR1
+// hardware buffer. PortCls refuses to expose BAR memory to user mode, so the
+// client writes into ordinary system RAM and this copy delivers the samples to
+// the hardware buffer the T2 audio engine reads from.
+static VOID
+T2AudioStreamCopyTick(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    PT2AUDIO_WAVERT_STREAM instance = (PT2AUDIO_WAVERT_STREAM)DeferredContext;
+    PT2AUDIO_DEVICE_CONTEXT context;
+    PUCHAR destination;
+    PUCHAR source;
+    ULONG sourceSize;
+    ULONG remaining;
+    ULONG sourceOffset;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    if (instance == NULL) {
+        return;
+    }
+    context = instance->DeviceContext;
+    instance->CopyTickCalls++;
+
+    // Mirror the system buffer into the BAR1 hardware buffer, but ONLY when the
+    // current test session explicitly enabled device-memory writes
+    // (MmioCopyEnabled, set from the volatile TestSession key). On a normal boot
+    // the key is absent, so this copy never runs and the driver cannot corrupt
+    // device memory. Only write when the whole copy provably lands inside the
+    // located speaker buffer (and inside the mapped BAR1): a stale or oversized
+    // CopySize must never scribble past the hardware buffer into adjacent
+    // device memory.
+    if (instance->SystemBufferVa != NULL && instance->CopySize != 0 &&
+        instance->SourceSize != 0 && context != NULL &&
+        context->HardwareReady && context->MmioCopyEnabled &&
+        context->Bar1Mapped != NULL &&
+        context->SpeakerBufferSize != 0 &&
+        instance->CopySize <= context->SpeakerBufferSize &&
+        context->SpeakerBufferOffset <= context->Bar1Size &&
+        instance->CopySize <= context->Bar1Size - context->SpeakerBufferOffset) {
+        // Tile the client's (possibly smaller) buffer across the whole hardware
+        // buffer so the engine never reads stale bytes, whatever portion of the
+        // hardware ring it happens to be consuming.
+        destination = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
+        source = (PUCHAR)instance->SystemBufferVa;
+        sourceSize = instance->SourceSize;
+        remaining = instance->CopySize;
+        sourceOffset = 0;
+
+        while (remaining > 0) {
+            ULONG chunk = sourceSize - sourceOffset;
+            if (chunk > remaining) {
+                chunk = remaining;
+            }
+            RtlCopyMemory(destination, source + sourceOffset, chunk);
+            destination += chunk;
+            remaining -= chunk;
+            sourceOffset += chunk;
+            if (sourceOffset >= sourceSize) {
+                sourceOffset = 0;
+            }
+        }
+    }
+
+    // Advance the memory-mapped play cursor the audio engine reads, in every
+    // mode, so the engine can drain the buffer.
+    instance->PositionRegister = T2AudioStreamPlayPositionBytes(instance);
+}
+
+static VOID
+T2AudioStreamStartCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
+{
+    LARGE_INTEGER dueTime;
+
+    // First fire after 1 ms, then every T2AUDIO_COPY_PERIOD_MS.
+    dueTime.QuadPart = -10000;
+    KeSetTimerEx(&instance->CopyTimer, dueTime, T2AUDIO_COPY_PERIOD_MS,
+                 &instance->CopyDpc);
+    instance->TimerActive = TRUE;
+}
+
+static VOID
+T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
+{
+    if (instance->TimerActive) {
+        KeCancelTimer(&instance->CopyTimer);
+        // Wait for a tick that may already be executing before the caller frees
+        // anything the DPC touches.
+        KeFlushQueuedDpcs();
+        instance->TimerActive = FALSE;
+    }
+}
+
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioStreamSetFormat(
     _In_ PMINIPORTWAVERTSTREAM Stream,
@@ -103,6 +256,9 @@ T2AudioStreamSetFormat(
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
     NTSTATUS status = T2AudioValidateSixChannelFormat(DataFormat);
+
+    T2AudioLogFormat("SetFormat", DataFormat);
+    KdPrint(("T2Audio: SetFormat status=0x%08X\n", status));
 
     if (NT_SUCCESS(status)) {
         instance->SampleRate = 48000;
@@ -119,46 +275,91 @@ T2AudioStreamSetState(
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
 
+    KdPrint(("T2Audio: SetState %u (forceSys=%u bceIo=%u irql=%u)\n", State,
+             instance->DeviceContext->ForceSystemBuffer ? 1u : 0u,
+             instance->DeviceContext->BceIoEnabled ? 1u : 0u,
+             (ULONG)KeGetCurrentIrql()));
+
     if (State < KSSTATE_STOP || State > KSSTATE_RUN) {
         return STATUS_INVALID_PARAMETER;
     }
     if (State == KSSTATE_RUN) {
-        // (Re)start hardware I/O only if it is not already running.
-        if (!instance->HardwareStarted) {
+        // Only act on the STOP/PAUSE -> RUN edge; a redundant RUN is a no-op.
+        if (instance->State != KSSTATE_RUN) {
             NTSTATUS status;
 
             // A stream may only run once a buffer has been allocated.
             if (instance->AudioBufferMdl == NULL) {
                 return STATUS_INVALID_DEVICE_STATE;
             }
-            // Hardware playback must use the hardware (MMIO) buffer. If a BCE
-            // device id appeared after a system buffer was allocated, refuse to
-            // start hardware I/O with the wrong buffer.
-            if (instance->DeviceContext->SpeakerDeviceId != 0 &&
-                !instance->HardwareBuffer) {
-                return STATUS_INVALID_DEVICE_STATE;
+
+            // Hardware I/O only in the real device path. ForceSystemBuffer (or a
+            // stream with no wired speaker) must never issue START_IO, and a
+            // stream that already started it must not issue it twice. The
+            // EnableBceIo gate keeps stage 4 able to wire the speaker without
+            // sending any command.
+            if (instance->DeviceContext->BceIoEnabled &&
+                T2AudioDecideHardwareIo(
+                    instance->DeviceContext->ForceSystemBuffer ? 1u : 0u,
+                    (instance->DeviceContext->SpeakerDeviceId != 0) ? 1u : 0u,
+                    instance->HardwareIoStarted ? 1u : 0u)) {
+                KdPrint(("T2Audio: SetState RUN about to StartIo irql=%u\n",
+                         (ULONG)KeGetCurrentIrql()));
+                status = T2AudioStartIo(instance->DeviceContext);
+                KdPrint(("T2Audio: SetState RUN StartIo status=0x%08X\n", status));
+                if (!NT_SUCCESS(status)) {
+                    return status;
+                }
+                instance->HardwareIoStarted = TRUE;
             }
-            status = T2AudioStartIo(instance->DeviceContext);
-            if (!NT_SUCCESS(status)) {
-                return status;
+
+            // Begin mirroring the system buffer into the hardware buffer and
+            // advancing the play cursor. In diagnostic mode the DPC skips the
+            // BAR1 copy but the cursor still advances so the engine drains.
+            if (T2AudioShouldStartCopyTimer(
+                    (instance->SystemBufferVa != NULL) ? 1u : 0u,
+                    (instance->CopySize != 0) ? 1u : 0u,
+                    instance->TimerActive ? 1u : 0u)) {
+                KdPrint(("T2Audio: SetState RUN starting copy timer va=%p copy=%u\n",
+                         instance->SystemBufferVa, instance->CopySize));
+                T2AudioStreamStartCopyTimer(instance);
+            } else {
+                KdPrint(("T2Audio: SetState RUN no timer va=%p copy=%u\n",
+                         instance->SystemBufferVa, instance->CopySize));
             }
-            instance->HardwareStarted = TRUE;
-        }
-        if (instance->State != KSSTATE_RUN) {
-            LARGE_INTEGER qpcFreq;
-            instance->AnchorQpc = KeQueryPerformanceCounter(&qpcFreq).QuadPart;
-            instance->AnchorFrames = 0;
+
+            // Anchor the play cursor on entry to RUN.
+            {
+                LARGE_INTEGER qpcFreq;
+                instance->AnchorQpc = KeQueryPerformanceCounter(&qpcFreq).QuadPart;
+                instance->AnchorFrames = 0;
+                instance->PositionRegister = 0;
+            }
         }
     } else {
-        // PAUSE / ACQUIRE / STOP: stop hardware I/O only if it was actually
-        // started. This avoids issuing a STOP that was never paired with a
-        // successful start (e.g. a RUN that failed in diagnostic mode).
-        if (instance->HardwareStarted) {
-            NTSTATUS status = T2AudioStopIo(instance->DeviceContext);
+        // PAUSE / ACQUIRE / STOP: stop mirroring, and stop hardware I/O only if
+        // this stream actually started it. A forced/software stream never
+        // started it and must not issue an unmatched STOP_IO.
+        KdPrint(("T2Audio: SetState %u posCalls=%u regCalls=%u ticks=%u posReg=%u\n",
+                 State, instance->GetPositionCalls,
+                 instance->GetPositionRegCalls, instance->CopyTickCalls,
+                 instance->PositionRegister));
+        T2AudioStreamStopCopyTimer(instance);
+        if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u)) {
+            NTSTATUS status;
+            KdPrint(("T2Audio: SetState %u about to StopIo irql=%u\n",
+                     State, (ULONG)KeGetCurrentIrql()));
+            status = T2AudioStopIo(instance->DeviceContext);
             if (!NT_SUCCESS(status)) {
-                return status;
+                // The STOP_IO failed (for example the BCE transport was poisoned
+                // after a send timeout). This must not wedge the stream in RUN
+                // with the timer already stopped: clear the started flag so we do
+                // not retry a request the transport can no longer carry, log it,
+                // and still complete the state transition below.
+                KdPrint(("T2Audio: SetState %u StopIo failed: 0x%08X (continuing)\n",
+                         State, status));
             }
-            instance->HardwareStarted = FALSE;
+            instance->HardwareIoStarted = FALSE;
         }
     }
     instance->State = State;
@@ -172,8 +373,7 @@ T2AudioStreamGetPosition(
 {
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
-    LARGE_INTEGER qpc, qpcFreq;
-    ULONG64 elapsedTicks, elapsedFrames, playOffset;
+    ULONG playOffset;
     ULONG bufferSize;
 
     if (Position == NULL) {
@@ -187,14 +387,8 @@ T2AudioStreamGetPosition(
         return STATUS_SUCCESS;
     }
 
-    qpc = KeQueryPerformanceCounter(&qpcFreq);
-
-    // Calculate elapsed frames using QPC interpolation
-    elapsedTicks = qpc.QuadPart - instance->AnchorQpc;
-    elapsedFrames = (elapsedTicks * instance->SampleRate) / qpcFreq.QuadPart;
-
-    playOffset = (instance->AnchorFrames + elapsedFrames) * instance->BytesPerFrame;
-    playOffset %= bufferSize;
+    instance->GetPositionCalls++;
+    playOffset = T2AudioStreamPlayPositionBytes(instance);
 
     Position->PlayOffset = playOffset;
     // WriteOffset is ahead of PlayOffset by a reasonable FIFO size (512 frames = ~10.6ms at 48kHz)
@@ -215,7 +409,6 @@ T2AudioStreamAllocateAudioBuffer(
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
     ULONG alignedSize;
-    NTSTATUS status;
 
     if (AudioBufferMdl == NULL || ActualSize == NULL ||
         OffsetFromFirstPage == NULL || CacheType == NULL) {
@@ -244,70 +437,78 @@ T2AudioStreamAllocateAudioBuffer(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (instance->DeviceContext->SpeakerDeviceId != 0) {
-        // BCE is ready: expose the BAR1 speaker buffer as a zero-copy MMIO
-        // WaveRT buffer (matches AppleAudio.sys). The hardware buffer has a
-        // fixed size, so it must be able to satisfy the request.
-        status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
-                                         AudioBufferMdl,
-                                         OffsetFromFirstPage,
-                                         ActualSize);
-        if (!NT_SUCCESS(status)) {
-            return status;
-        }
-        if (!T2AudioHardwareBufferSatisfies(RequestedSize, *ActualSize,
-                                            instance->BytesPerFrame)) {
-            // The hardware buffer cannot satisfy this request (too small or
-            // not frame-aligned). Release it and fail rather than report a
-            // buffer smaller than the client asked for.
-            T2AudioFreeSpeakerMdl(instance->DeviceContext);
-            *AudioBufferMdl = NULL;
-            *ActualSize = 0;
-            *OffsetFromFirstPage = 0;
-            return STATUS_UNSUCCESSFUL;
-        }
-        *CacheType = MmWriteCombined;
-        instance->HardwareBuffer = TRUE;
-    } else {
-        // No BCE device id yet (diagnostic mode): allocate an ordinary
-        // system-memory cyclic buffer through the WaveRT port so the endpoint
-        // stays testable without touching device memory. Audio I/O is still
-        // gated by T2AudioStartIo/StopIo, so nothing reaches the hardware.
+    KdPrint(("T2Audio: AllocateAudioBuffer req=%u aligned=%u speakerId=0x%I64X forceSys=%u\n",
+             RequestedSize, alignedSize,
+             instance->DeviceContext->SpeakerDeviceId,
+             instance->DeviceContext->ForceSystemBuffer ? 1u : 0u));
+
+    // The WaveRT buffer must live in system memory. PortCls maps it to user
+    // mode with MmMapLockedPagesSpecifyCache(UserMode, ...), which cannot map
+    // device (BAR) pages -- an MMIO MDL is rejected by the port and the stream
+    // fails to initialize (0x8007001F). Instead, hand out an ordinary
+    // system-memory cyclic buffer and mirror it into the BAR1 hardware buffer
+    // from a periodic DPC (T2AudioStreamCopyTick).
+    {
         PHYSICAL_ADDRESS highAddress;
         PMDL mdl;
+        PVOID systemVa;
         ULONG byteCount;
+        ULONG desiredSize = alignedSize;
 
         if (instance->PortStream == NULL) {
             return STATUS_INVALID_DEVICE_STATE;
         }
 
+        // Hand out exactly the client-requested (frame-aligned) size. Growing
+        // the system buffer to the hardware buffer size made PortCls reject the
+        // stream at Initialize (0x8007001F): the hardware size (0x61800) is not
+        // page-aligned and the port would not map it. The copy DPC mirrors the
+        // client buffer into the BAR1 ring instead.
+
         highAddress.QuadPart = (LONGLONG)-1;
         mdl = instance->PortStream->lpVtbl->AllocatePagesForMdl(
-                  (PVOID)instance->PortStream, highAddress, alignedSize);
+                  (PVOID)instance->PortStream, highAddress, desiredSize);
         if (mdl == NULL) {
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         byteCount = MmGetMdlByteCount(mdl);
-        if (byteCount < alignedSize) {
+        if (byteCount < desiredSize) {
             // The allocator returned less than requested (it may allocate
             // fewer pages under pressure); do not hand out a short buffer.
             instance->PortStream->lpVtbl->FreePagesFromMdl(
                 (PVOID)instance->PortStream, mdl);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        systemVa = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+        if (systemVa == NULL) {
+            instance->PortStream->lpVtbl->FreePagesFromMdl(
+                (PVOID)instance->PortStream, mdl);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        // Start from silence so the hardware buffer is well-defined until the
+        // client writes real samples.
+        RtlZeroMemory(systemVa, desiredSize);
+
         *AudioBufferMdl = mdl;
-        *ActualSize = alignedSize;
+        *ActualSize = desiredSize;
         *OffsetFromFirstPage = 0;
         *CacheType = MmCached;
         instance->HardwareBuffer = FALSE;
+        instance->SystemBufferVa = systemVa;
+        instance->SourceSize = desiredSize;
+        // Copy exactly the client buffer each tick. Tiling across the (larger)
+        // hardware ring would saturate the bus from a DPC, so keep the mirror
+        // light and revisit if the engine needs the whole ring primed.
+        instance->CopySize = desiredSize;
     }
 
     instance->AudioBufferMdl = *AudioBufferMdl;
     instance->AudioBufferSize = *ActualSize;
 
-    KdPrint(("T2Audio: AllocateAudioBuffer: %s MDL=%p size=%u offset=%u\n",
+    KdPrint(("T2Audio: AllocateAudioBuffer: %s MDL=%p size=%u offset=%u src=%u copy=%u\n",
              instance->HardwareBuffer ? "MMIO" : "system",
-             *AudioBufferMdl, *ActualSize, *OffsetFromFirstPage));
+             *AudioBufferMdl, *ActualSize, *OffsetFromFirstPage,
+             instance->SourceSize, instance->CopySize));
     return STATUS_SUCCESS;
 }
 
@@ -322,9 +523,13 @@ T2AudioStreamFreeAudioBuffer(
 
     UNREFERENCED_PARAMETER(BufferSize);
 
-    // Releases only the MDL this stream handed out; a NULL, foreign, or
-    // already-released MDL is ignored (see T2AudioStreamReleaseBuffer).
-    T2AudioStreamReleaseBuffer(instance, AudioBufferMdl);
+    // Release only the MDL this stream handed out. A NULL, foreign, or
+    // already-released MDL is ignored. T2AudioStreamReleaseBuffer(NULL) forces
+    // release and is reserved for internal teardown, so it must not be reachable
+    // from here with a NULL argument.
+    if (AudioBufferMdl != NULL && AudioBufferMdl == instance->AudioBufferMdl) {
+        T2AudioStreamReleaseBuffer(instance, AudioBufferMdl);
+    }
     KdPrint(("T2Audio: FreeAudioBuffer\n"));
 }
 
@@ -348,11 +553,35 @@ T2AudioStreamGetPositionRegister(
     _In_ PMINIPORTWAVERTSTREAM Stream,
     _Out_ KSRTAUDIO_HWREGISTER *Register)
 {
-    UNREFERENCED_PARAMETER(Stream);
-    if (Register != NULL) {
-        RtlZeroMemory(Register, sizeof(*Register));
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+
+    if (Register == NULL) {
+        return STATUS_INVALID_PARAMETER;
     }
-    return STATUS_NOT_SUPPORTED;
+    instance->GetPositionRegCalls++;
+    RtlZeroMemory(Register, sizeof(*Register));
+
+    // Expose a memory-mapped play cursor (bytes) that the audio engine reads
+    // directly. The copy DPC keeps it advancing at the sample rate; without it
+    // the engine never drains the buffer and the stream stays silent.
+    Register->Register = (PVOID)&instance->PositionRegister;
+    Register->Width = 32;
+    // For a position register the WDK requires only Register, Width and
+    // Accuracy; Numerator/Denominator are clock-register specific and stay zero.
+    // Accuracy is the maximum error of a reading expressed in BYTES, not in time
+    // units: the DPC refreshes the cursor every T2AUDIO_COPY_PERIOD_MS, so the
+    // worst-case error is one refresh worth of audio.
+    {
+        ULONG framesPerPeriod =
+            (instance->SampleRate * T2AUDIO_COPY_PERIOD_MS) / 1000;
+        ULONG accuracy = framesPerPeriod * instance->BytesPerFrame;
+        if (accuracy == 0) {
+            accuracy = instance->BytesPerFrame; // at least one frame
+        }
+        Register->Accuracy = accuracy;
+    }
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -413,6 +642,8 @@ T2AudioCreateStream(
     instance->SampleRate = 48000;
     instance->BytesPerFrame = 24;
     instance->State = KSSTATE_STOP;
+    KeInitializeTimer(&instance->CopyTimer);
+    KeInitializeDpc(&instance->CopyDpc, T2AudioStreamCopyTick, instance);
     *Stream = &instance->Interface;
     return STATUS_SUCCESS;
 }

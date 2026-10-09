@@ -1,115 +1,84 @@
-# T2AudioPort - Windows Audio Driver for Apple T2
+# T2AudioPort — experimental Apple T2 audio driver for Windows
 
-## Overview
-Native Windows PortCls audio driver for Apple T2 chip (PCI\VEN_106B&DEV_1803) found in MacBook Pro 2019 (16,1) and similar models. Targets 6-channel speaker array at 48kHz/24-bit.
+Experimental WDM/PortCls WaveRT miniport for the Apple T2 audio function
+(`PCI\VEN_106B&DEV_1803`) on MacBookPro16,1. This is a **BSOD reproducer, not a
+working audio replacement**. Keep the AppleAudio driver for everyday playback.
 
-## Current Status
-**Phase 3 BLOCKED (2026-10-06):** WaveRT miniport registration successful. **Critical blocker:** Topology miniport `Port->Init()` returns `STATUS_INVALID_DEVICE_STATE (0xC000028C)` in all tested configurations. This prevents audio endpoint creation. Hardware access working (buffer @ 0xC1000000+0x12C000, config @ 0xC1670000).
+## Status (October 2026)
 
-## Requirements
-- **Hardware:** MacBook Pro with Apple T2 audio (PCI\VEN_106B&DEV_1803)
-- **OS:** Windows 11 with test signing enabled
-- **Build Tools:**
-  - Visual Studio 2022 (v143 toolset)
-  - Windows Driver Kit (WDK) 10.0.28000.0
-  - MSBuild 18.10.1+
+- DriverEntry, AddDevice, PortCls Topology/WaveRT registration, BAR mapping and
+  BCE discovery work in diagnostic sessions. The Speaker device ID is `0x39`
+  on the tested MacBookPro16,1. A stage-4 test **without** BCE I/O completed.
+- A stage-4 render test **with BCE `START_IO` enabled** repeatedly bugchecks:
+  `SYSTEM_THREAD_EXCEPTION_NOT_HANDLED (0x7E)`, `0xC0000005`, read of `0x18`
+  in `ks!DispatchDeviceIoControl+0x15`. The observed stack is
+  `AppleUSBVHCI -> ksthunk -> ks`. Setting `FileObject` on our outgoing BCE
+  IRP did not fix this; the forwarded IRP's origin and handling remain unknown.
+- The signed **1.0.3.15** package in `packaging/` is the binary that reproduced
+  the bugcheck. Its `T2AudioMiniport.sys` SHA256 is
+  `7DDB8237DE367669B98B603782F0DEF39EABFBEB3F79D33532C8D1F11BD32039`.
+  `src/Phase4.c` retains the failing `START_IO` path for investigation. Normal
+  boot is inert: without a volatile `TestSession` key the driver refuses to
+  start before mapping resources or opening BCE. The manual test agent refuses
+  `-BceIo` even with `-Force` to prevent reproducing the known bug by mistake.
+- The test machine was restored to **AppleAudio** (`oem16.inf`, Started/OK).
+  No custom driver is installed on it. No full crash dump or Apple binary is
+  included in this repository.
 
-## Project Structure
-```
-src/                    - Driver source code and build project
-  ├── Driver.c          - DriverEntry, AddDevice, StartDevice, port registration
-  ├── Device.c          - Hardware resource mapping (working)
-  ├── Topology.c        - Topology miniport (BLOCKED at Port->Init)
-  ├── WaveRTMiniport.c  - WaveRT miniport (working)
-  ├── WaveRTStream.c    - WaveRT stream implementation (working)
-  ├── BceTransport.c    - T2 BCE protocol (disabled, stub)
-  ├── Phase4.c          - Audio I/O commands (disabled, stub)
-  └── T2AudioMiniport.h - Shared definitions
+See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for the timeline and
+diagnostics. The sanitized captures in `docs/logs/EXCERPT_*.md` do not include
+full kernel logs; local minidumps are not published. The latest bugcheck was
+at 2026-10-08 01:48:20; its minidump is local to the test machine.
 
-packaging/              - Signed driver package (INF, SYS, CAT)
-  ├── T2AudioMiniport.inf - PCI device binding (VEN_106B&DEV_1803)
-  └── T2AudioMiniport.sys - Latest signed driver (oem16.inf in system)
+## Build and package
 
-tools/                  - Install/rollback PowerShell scripts (if present)
-```
+Requirements: Visual Studio with the Windows kernel-mode driver toolset,
+Windows Driver Kit 10.0.28000.0, and x64 Windows. On the development machine:
 
-## Building
 ```powershell
-cd src
-& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
-  T2AudioMiniport.vcxproj /p:Configuration=Debug /p:Platform=x64
+& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe' `
+  'src\T2AudioMiniport.vcxproj' /p:Configuration=Debug /p:Platform=x64 `
+  /p:SignMode=Off /t:Build
 ```
 
-Output: `src\x64\Debug\T2AudioMiniport.sys`
+Unsigned output: `src/bin/Debug/T2AudioMiniport.sys`. Rebuilding does **not**
+reproduce the hash of the signed package: signing changes the binary. If
+building your own package, sign the SYS with your **own** local test certificate,
+generate a catalog from `packaging/t2audio.cdf` with `makecat`, and sign the
+catalog after copying the new SYS. Never pair a rebuilt SYS with an old catalog.
+No private signing keys are distributed here. After compiling the host-side
+tests with MSVC (`cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe
+tests\BceProtocolLogicTest.c` and likewise for
+`tests\T2AudioBufferLogicTest.c`), run:
 
-## Signing
 ```powershell
-# Requires test certificate in LocalMachine\My, Root, TrustedPublisher
-signtool sign /fd SHA256 /t http://timestamp.digicert.com /a `
-  /n "T2AudioPort Test Certificate" T2AudioMiniport.sys
-
-Inf2Cat /driver:. /os:10_X64
-
-signtool sign /fd SHA256 /t http://timestamp.digicert.com /a `
-  /n "T2AudioPort Test Certificate" t2audiominiport.cat
+& 'tests\BceProtocolLogicTest.exe'
+& 'tests\T2AudioBufferLogicTest.exe'
 ```
 
-## Installation
-```powershell
-# Enable test signing (reboot required)
-bcdedit /set testsigning on
-bcdedit /set nointegritychecks on
-bcdedit /set loadoptions DISABLE_INTEGRITY_CHECKS
+## Diagnostic safeguards and recovery
 
-# Install driver package
-pnputil /add-driver packaging\T2AudioMiniport.inf /install
-```
+`tools/Install-T2AudioDriver.ps1` stages the package by default; `-Bind`
+replaces the current AppleAudio binding and may require a reboot. Do not use
+the signed package for daily sound. `tools/T2Audio-TestAgent.ps1` creates a
+volatile session and disables the test device afterward; it rejects `-BceIo`
+because that path is known to crash. Stage 5 / `-Mmio` writes to BAR memory and
+has not been validated as a fix. See the agent script and
+[`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) before any hardware test.
 
-## Progress
+To restore stock sound after a test or reboot, first remove the volatile
+session, then remove the **currently published T2AudioMiniport INF** (look it up
+with `pnputil /enum-drivers`) using `pnputil /delete-driver oemNNN.inf /uninstall`;
+rescan devices and enable `PCI\VEN_106B&DEV_1803` if needed. Verify its service
+is `AppleAudio` and its status is `OK`. Do not remove the AppleAudio `oem16.inf`.
 
-### ✅ Working (Phases 1-2, complete)
-- Driver loads through PortCls (DriverEntry, AddDevice, StartDevice)
-- PCI resource mapping: 3 memory regions mapped successfully
-  - Resource[0]: Buffer memory (0xC1000000, 4MB) - BAR0
-  - Resource[2]: Config memory (0xC1670000, 64KB) - BAR4
-  - GPR signature validated: 0x19870423, version 3, bufferOffset 0x4000
-- Speaker buffer located: offset 0x12C000, size 0x61800 bytes (48kHz/24-bit/6ch)
-- WaveRT port/miniport registered successfully
-- KSCATEGORY_AUDIO interface created
+## Layout
 
-### ❌ Blocked (Phase 3.1, topology registration)
-**Critical issue:** Topology `Port->Init()` fails with `STATUS_INVALID_DEVICE_STATE (0xC000028C)`
+- `src/`: PortCls miniport, WaveRT stream, BAR discovery, BCE transport and
+  command serialization.
+- `tests/`: host-side protocol and buffer logic tests.
+- `packaging/`: signed **known-crashing** test SYS, INF and catalog.
+- `tools/`: staging, manual diagnostic agent and AppleAudio recovery scripts.
+- `docs/CURRENT_STATE.md`: authoritative implementation and test history.
 
-Tested configurations (all failed):
-- Registration order: Topology FIRST / Topology AFTER WaveRT
-- UnknownAdapter: NULL / WaveRT miniport pointer
-- Topology structure: Direct pins / Pin→Node→Pin
-- Pin categories: KSCATEGORY_AUDIO / NULL (bridge pin)
-- Pin instance counts: {0,0,0} / {1,1,0}
-
-Current descriptor:
-- 2 pins: Pin0=bridge(IN,COMMUNICATION_NONE), Pin1=speaker(OUT,COMMUNICATION_NONE)
-- 1 node: KSNODETYPE_SPEAKER
-- 2 connections: Filter→Node, Node→Filter
-- Automation: none (0 properties)
-
-Without topology registration, no audio endpoint appears in Windows Sound Settings.
-
-### ⏸️ Not implemented (Phases 4-5, deferred)
-- BCE transport (disabled, returns STATUS_NOT_SUPPORTED)
-- Hardware I/O (START_IO/STOP_IO commands disabled)
-- Audio streaming (requires BCE transport + hardware initialization)
-
-## Verified Build
-**SHA256:** `BC5F0E43...` (latest with topology miniport)
-**Size:** ~35KB
-**Last tested:** 2026-10-06 (timestamp 1922.28s in debug log)
-**Device status:** CM_PROB_FAILED_START (Code 10) due to topology Init failure
-
-## References
-- Boot test results: `docs/logs/BOOT_TEST_20261005.md`
-- Full debugging history: `docs/DEBUGGING_LOG.md`
-- Third-party attributions: `THIRD_PARTY_LICENSES.md`
-
-## License
-Original implementation. See THIRD_PARTY_LICENSES.md for protocol research attributions.
+See `THIRD_PARTY_LICENSES.md` for protocol research attributions.

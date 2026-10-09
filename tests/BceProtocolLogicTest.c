@@ -224,6 +224,50 @@ static void test_parse_property_response(void)
                                            &selector, &offset, &size));
 }
 
+static void test_parse_command_response(void)
+{
+    unsigned char b[128];
+
+    printf("T2AudioBceParseCommandResponse\n");
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    check("valid START_IO ack -> ok",
+          T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    check("short reply -> fail",
+          !T2AudioBceParseCommandResponse(b, 20, 0, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 2, 0);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    check("wrong message id -> fail",
+          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    T2AudioBceWriteU64(b + 5, 0x3A);
+    check("wrong echoed device id -> fail",
+          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0x80000000ul);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    check("non-zero status -> fail",
+          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_COMMAND, 0, 0);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    check("command type (not response) -> fail",
+          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    b[0] = 'X';
+    check("bad tag -> fail",
+          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+
+    check("NULL reply -> fail",
+          !T2AudioBceParseCommandResponse(NULL, 21, 0, 0x39));
+}
+
 int main(void)
 {
     test_scalar_roundtrip();
@@ -232,6 +276,7 @@ int main(void)
     test_uid_match();
     test_parse_device_list_response();
     test_parse_property_response();
+    test_parse_command_response();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",
