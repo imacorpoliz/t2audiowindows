@@ -1,9 +1,31 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28  
-**Current status**: **EXPERIMENTAL, diagnostic session only.** The `0x7E` bugcheck on `START_IO` is **PROVEN FIXED ON HARDWARE** via kernel-mode `IOCTL 0x222020` interception. BridgeOS receives `START_IO` and emits continuous `UPDATE_TIMESTAMP` packets every 16,640 frames (346.66 ms). START_IO command response parsing needs refinement.  
+**Current status**: **STAGE D COMPLETE (PROVEN ON HARDWARE).** All Stage D criteria passed: BSOD 0x7E fixed, `START_IO`/`STOP_IO` handshake verified against bridgeOS, `SetState RUN` transitions cleanly, T2 clock locks at 1000-frame lead with DPC copy active, and hardware cleanly halts on stop. Ready for Stage E (first sound at low volume).  
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+
+### 2026-10-28: Stage D Repeat Hardware Verification (START_IO Protocol Fix, RUN Transition, Clock Lock, Clean STOP_IO) (PROVEN ON HARDWARE)
+
+- **Test Report:** [`docs/logs/EXCERPT_20261028_043442.md`](logs/EXCERPT_20261028_043442.md).
+- **Tested Build:** DriverVer `10/28/2026,1.0.7.0`, SHA256 `48F336C1BC857AD2BC8794529841108BE4B1C68E3A12D7AE5D802FF8DCBDABE4`, signed with test cert `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`.
+- **Pre-check (PASS):** Stage 1 run verified endpoint-specific volume 0 and mute (`wasapi.txt`: `endpoint mute=True volume=0`, `T2 endpoint muted, volume 0.`). Windows sound scheme set to `.None`.
+- **START_IO Reply & RUN Transition (PASS):**
+  - `T2Audio: START_IO reply size=256 tag=12 type=2 dev=0x0 msg=1 status=0x00000000` received and accepted.
+  - BridgeOS echoes `dev=0x0` (not `0x39`), confirming why the previous check failed and why matching AppleAudio's check (`msg == 1 && status == 0`) was the correct fix.
+  - `SetState RUN StartIo status=0x00000000` logged. Stream transitioned into `KSSTATE_RUN`.
+- **T2 Clock Sync & Lead Correction (PASS):**
+  - Stream received 6 consecutive timestamps during active playback, exactly **16,640 frames** apart ($\Delta t2 \approx 346.66$ ms).
+  - Clock re-aiming triggered exactly twice:
+    - `#1`: `re-aimed lead by -1906 frames` (initial ~40 ms bridgeOS startup latency).
+    - `#2`: `re-aimed lead by 768 frames` (settled into the target 1000-frame lead).
+    - `#3` to `#6`: Zero re-aiming events; clock remained stably locked within tolerance.
+- **Copy DPC & STOP_IO Teardown (PASS):**
+  - At stop, `ticks=1006` recorded across 205 position calls.
+  - `STOP_IO reply size=256 tag=13 type=2 dev=0x0 msg=3 status=0x00000000` received.
+  - `STOP_IO sent to device 0x39` logged.
+  - **Zero timestamps arrived after stop**, proving hardware DMA and clock generator cleanly halted.
+- **Post-test Recovery (PASS):** Cleanly uninstalled test package, restored to `AppleAudio.sys` (`oem16.inf`), Status: `Started`, `OK (CM_PROB_NONE)`. Sound scheme restored to `.Default`, Volume 0%, Muted.
 
 ### 2026-10-28 (later): analysis of the Stage D run; START_IO reply check fixed (fix not hardware-tested)
 
