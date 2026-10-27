@@ -285,27 +285,22 @@ T2AudioBceReplyTagMatches(const unsigned char *Reply,
 }
 
 // Validate a simple command response (START_IO / STOP_IO and similar), whose
-// payload is just the base. Requires: ReplySize covers header+base, type ==
-// RESPONSE, device_id echoes ExpectedDeviceId, the message id equals
-// ExpectedMessage, and the protocol status is zero. The tag is checked by the
-// transport (T2AudioBceReplyTagMatches). Returns 1 on success.
+// payload is just the base. Exactly AppleAudio's check (START_IO
+// 0x140004919..0x14000492C): ReplySize covers header+base, the message id
+// equals ExpectedMessage, and the protocol status is zero. Type and device_id
+// are NOT checked: on hardware (2026-10-28) the T2's START_IO reply with the
+// right tag failed our former type/device_id checks, while bridgeOS did start
+// I/O. The tag is checked by the transport (T2AudioBceReplyTagMatches).
+// Returns 1 on success.
 static __inline int
 T2AudioBceParseCommandResponse(const unsigned char *Reply,
                                unsigned long long ReplySize,
-                               unsigned long ExpectedMessage,
-                               unsigned long long ExpectedDeviceId)
+                               unsigned long ExpectedMessage)
 {
     if (Reply == 0) {
         return 0;
     }
     if (ReplySize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
-        return 0;
-    }
-    if (Reply[T2AUDIO_BCE_TYPE_OFFSET] != T2AUDIO_BCE_MSG_RESPONSE) {
-        return 0;
-    }
-    // device_id sits immediately after the 4-byte tag and the type byte.
-    if (T2AudioBceReadU64(Reply + 5) != ExpectedDeviceId) {
         return 0;
     }
     if (T2AudioBceReadU32(Reply + T2AUDIO_BCE_HEADER_SIZE) != ExpectedMessage) {

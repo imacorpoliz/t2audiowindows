@@ -5,13 +5,21 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): analysis of the Stage D run; START_IO reply check fixed (fix not hardware-tested)
+
+- **Confirmed by the run:** no bugcheck with START_IO (the `0x222020` handler works); one `UPDATE_TIMESTAMP` per ring lap: `sample` steps by exactly 16,640 and hostTime by 346.66 ms. The first timestamp (`sample=16640`) came ~40 ms after START_IO was sent, as kaiT2en observes (~30 ms).
+- **hostTime was wrapped** (`t2=18446701622728035531`, i.e. -42,451 s as signed): AppleUSBVHCI's 64-bit `qpc*1e7` overflow predicted in `analysis/RE_speaker_layout_and_clock.md` §1. It is consistent with ~39.4 h uptime at test time (to confirm from `LastBootUpTime`). The driver treats such a hostTime as implausible and anchors on the receive time.
+- **Bug 1 - START_IO reply rejected:** `T2AudioBceParseCommandResponse` also required type == RESPONSE and an echoed device_id; AppleAudio only checks msg (`+0x0D == 1`) and status (`+0x11 == 0`). The check now matches AppleAudio (tag is still checked by the transport). The other replies on this transport pass a type check, so the device_id echo is the likely mismatch (not confirmed: the reply bytes were not logged). START_IO/STOP_IO replies are now logged (`START_IO reply size=… tag=… type=… dev=… msg=… status=…`).
+- **Bug 2 - T2 left running:** after the rejected reply the stream failed RUN and never sent STOP_IO, so timestamps kept coming after `SetState 0` until the device was removed. `T2AudioStartIo` now sends STOP_IO (best effort) when the START_IO reply is rejected.
+- Not shown by this run: that the T2 reads our ring (no RUN, no copy), lead correction (`re-aimed`), sound.
+
 ### 2026-10-28: Stage D Hardware Verification (START_IO Executed, 0x7E BSOD Proven Fixed, 8x UPDATE_TIMESTAMP Received) (PROVEN ON HARDWARE)
 
 - **Test Report:** [`docs/logs/EXCERPT_20261028_041655.md`](logs/EXCERPT_20261028_041655.md).
 - **Tested Build:** DriverVer `10/28/2026,1.0.6.0`, SHA256 `9A4149AB3BCD9989FD74664DAA75C026713C5EEC0820CB3DB2BB13B7106FD4B5`, signed with test cert `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`.
 - **Pre-check (PASS):** Stage 1 run verified endpoint-specific volume 0 and mute (`wasapi.txt`: `endpoint mute=True volume=0`, `T2 endpoint muted, volume 0.`). Windows sound scheme set to `.None`.
 - **BSOD 0x7E PROVEN FIXED (PASS):** Under `-Mmio -BceIo -OwnerApprovedBceIo`, `AppleUSBVHCI` sent `IOCTL 0x222020` without a FileObject. The kernel IRP intercept in `T2AudioDeviceControl` successfully captured and handled all incoming requests without entering PortCls/ks.sys. **Zero bugchecks, zero system thread exceptions.**
-- **Hardware START_IO Transmission (PASS):** Command `msg=0`, `tag=12`, `id=0x39` transmitted to bridgeOS via `IOCTL 0x222018`. BridgeOS immediately began hardware DMA reading from BAR0 speaker buffer `0x12c000`.
+- **Hardware START_IO Transmission (PASS):** Command `msg=0`, `tag=12`, `id=0x39` transmitted to bridgeOS via `IOCTL 0x222018`. BridgeOS started I/O (timestamps followed); that it reads the BAR0 ring at `0x12c000` is not shown by this run.
 - **Continuous UPDATE_TIMESTAMP Stream (8 timestamps received - PROVEN ON HARDWARE):**
   - Timestamps #1 to #8 received via `IOCTL 0x222020` (sample counter: 16,640 -> 33,280 -> 49,920 -> 66,560 -> 83,200 -> 99,840 -> 116,480 -> 133,120).
   - **Sample step:** Exactly **16,640 frames** between every consecutive timestamp.

@@ -226,51 +226,55 @@ static void test_parse_property_response(void)
 
 static void test_parse_command_response(void)
 {
-    unsigned char b[128];
+    unsigned char b[256] = {0};
 
     printf("T2AudioBceParseCommandResponse\n");
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("valid START_IO ack -> ok",
-          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_STOP_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("valid STOP_IO ack -> ok",
-          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_STOP_IO_RESPONSE, 0x39));
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_STOP_IO_RESPONSE));
 
     check("short reply -> fail",
-          !T2AudioBceParseCommandResponse(b, 20, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          !T2AudioBceParseCommandResponse(b, 20, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 2, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("wrong message id -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x3A);
-    check("wrong echoed device id -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+    check("other echoed device id is accepted (AppleAudio does not check it)",
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0x80000000ul);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("non-zero status -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_COMMAND, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
-    check("command type (not response) -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+    check("type byte is not checked (AppleAudio does not check it)",
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
+    check("256-byte reply buffer (as VHCI returns) -> ok",
+          T2AudioBceParseCommandResponse(b, 256, T2AUDIO_MSG_START_IO_RESPONSE));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     T2AudioBceWriteU32(b, 42);
     check("tag is not checked here (transport checks it)",
-          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 
     check("NULL reply -> fail",
-          !T2AudioBceParseCommandResponse(NULL, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+          !T2AudioBceParseCommandResponse(NULL, 21, T2AUDIO_MSG_START_IO_RESPONSE));
 }
 
 static void test_physical_format(void)

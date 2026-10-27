@@ -791,8 +791,7 @@ T2AudioSetRemoteAccess(_In_ BOOLEAN Enable)
     }
 
     if (!T2AudioBceParseCommandResponse(reply, replySize,
-                                        T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE,
-                                        0)) {
+                                        T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE)) {
         KdPrint(("T2Audio: SET_REMOTE_ACCESS(%u) reply invalid (size=%u)\n",
                  Enable ? 1u : 0u, replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;

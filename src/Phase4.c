@@ -157,6 +157,23 @@ T2AudioBuildIoCommand(
     return STATUS_SUCCESS;
 }
 
+// Log the header and base of a command reply (tag, type, device_id, msg,
+// status) so a rejected reply can be diagnosed from the kernel log.
+static VOID
+T2AudioLogCommandReply(_In_z_ PCSTR What, _In_reads_bytes_(Size) const UCHAR *Reply, _In_ ULONG Size)
+{
+    if (Size < sizeof(T2AUDIO_MESSAGE_HEADER) + sizeof(T2AUDIO_MESSAGE_BASE)) {
+        KdPrint(("T2Audio: %s reply too short (size=%u)\n", What, Size));
+        return;
+    }
+    KdPrint(("T2Audio: %s reply size=%u tag=%u type=%u dev=0x%I64X msg=%u status=0x%08X\n",
+             What, Size,
+             *(UNALIGNED const ULONG *)Reply, (ULONG)Reply[4],
+             *(UNALIGNED const ULONG64 *)(Reply + 5),
+             *(UNALIGNED const ULONG *)(Reply + 13),
+             *(UNALIGNED const ULONG *)(Reply + 17)));
+}
+
 NTSTATUS
 T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
@@ -202,10 +219,14 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return status;
     }
 
+    T2AudioLogCommandReply("START_IO", reply, replySize);
     if (!T2AudioBceParseCommandResponse(reply, replySize,
-                                        T2AUDIO_MSG_START_IO_RESPONSE,
-                                        Context->SpeakerDeviceId)) {
+                                        T2AUDIO_MSG_START_IO_RESPONSE)) {
         KdPrint(("T2Audio: START_IO response invalid (size=%u)\n", replySize));
+        // The command reached the T2 and it may have started anyway (on
+        // 2026-10-28 timestamps kept coming after such a reply). Stop it so a
+        // failed RUN never leaves the T2 reading the ring.
+        (VOID)T2AudioStopIo(Context);
         return STATUS_DEVICE_PROTOCOL_ERROR;
     }
 
@@ -254,11 +275,11 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return status;
     }
 
-    // Validate the whole reply: tag, response type, echoed device id, message id
-    // and protocol status. A malformed or mismatched reply is a protocol error.
+    // Same check as START_IO (message id and status; the tag was checked by
+    // the transport). A malformed or mismatched reply is a protocol error.
+    T2AudioLogCommandReply("STOP_IO", reply, replySize);
     if (!T2AudioBceParseCommandResponse(reply, replySize,
-                                        T2AUDIO_MSG_STOP_IO_RESPONSE,
-                                        Context->SpeakerDeviceId)) {
+                                        T2AUDIO_MSG_STOP_IO_RESPONSE)) {
         KdPrint(("T2Audio: STOP_IO response invalid (size=%u)\n", replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;
     }

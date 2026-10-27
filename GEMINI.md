@@ -209,6 +209,28 @@ T2Audio: STOP_IO sent to device 0x39                          # на стопе
 
 ---
 
+### 5.1 Повтор этапа D (после исправления ответа START_IO)
+
+Первый прогон D (2026-10-28) прошёл без BSOD, но ответ T2 на START_IO был отклонён нашей проверкой, и поток не вошёл в RUN. Проверка исправлена. Повтор — по тем же правилам и **только с новым разрешением владельца**: пересобрать, Stage 1 с подтверждением mute, затем тот же прогон D. Ожидаемое:
+
+```
+T2Audio: START_IO reply size=256 tag=… type=… dev=0x… msg=1 status=0x00000000   # запиши все поля
+T2Audio: SetState RUN StartIo status=0x00000000
+T2Audio: VHCI UPDATE_TIMESTAMP #1 … sample=…
+T2Audio: T2 clock: re-aimed lead by … frames (#1, …)    # ожидается 1 раз в начале (~ −1900: T2 начинает читать ~40 мс после START_IO)
+T2Audio: STOP_IO reply size=… msg=3 status=0x00000000
+T2Audio: STOP_IO sent to device 0x39
+```
+
+Запиши:
+* все поля строк `START_IO reply` и `STOP_IO reply`;
+* сколько раз сработало `re-aimed` и на сколько кадров. Больше 2–3 раз за 2 секунды — ошибка, приложи лог;
+* `ticks` > 0 на стопе;
+* после стопа метки времени **больше не приходят**;
+* аптайм на момент теста (`(Get-CimInstance Win32_OperatingSystem).LastBootUpTime`) — для проверки переполнения hostTime.
+
+Если START_IO снова отклонён (`START_IO response invalid`), сразу после него в логе должен быть `STOP_IO`, и метки должны прекратиться.
+
 ## 6. Этап E — первый звук (только когда владелец разрешит шуметь)
 
 ### 6.1 Стерео
