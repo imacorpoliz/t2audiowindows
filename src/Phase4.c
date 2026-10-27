@@ -183,13 +183,9 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_NOT_SUPPORTED;
     }
 
-    // The T2 must be in host-controlled mode first. START_IO without the
-    // SET_REMOTE_ACCESS handshake is what the reference driver never does; we
-    // refuse rather than risk an undefined firmware/lower-driver state.
-    if (!Context->BceRemoteAccess) {
-        KdPrint(("T2Audio: START_IO blocked: remote access not acquired\n"));
-        return STATUS_DEVICE_NOT_READY;
-    }
+    // No SET_REMOTE_ACCESS prerequisite: on Windows AppleUSBVHCI establishes
+    // remote access (mode 1) itself, and AppleAudio.sys sends START_IO without
+    // ever sending SET_REMOTE_ACCESS (see docs/analysis/RE_appleaudio_protocol.md).
 
     // Opcode verified with REA against AppleAudio.sys FUN_1400048b0:
     // sends T2AUDIO_MSG_START_IO (0), checks reply opcode T2AUDIO_MSG_START_IO_RESPONSE (1).

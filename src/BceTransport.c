@@ -749,9 +749,11 @@ T2AudioGetDeviceList(
 // Take (Enable=TRUE) or release (Enable=FALSE) host audio control over BCE.
 // This mirrors kaiT2en's t2audio_cmd_set_remote_access: header device_id 0, base
 // message 32, an 8-byte little-endian mode (0 = off, 2 = on), and a command
-// response (message 33) echoing device_id 0. START_IO is only legal once the T2
-// has accepted this, so the caller records success in Context->BceRemoteAccess
-// and T2AudioStartIo refuses to run without it.
+// response (message 33) echoing device_id 0.
+//
+// Currently unused: on Windows AppleUSBVHCI sends SET_REMOTE_ACCESS itself
+// (mode 1 at init/resume, mode 0 at power-down) and AppleAudio.sys never
+// does, so the audio driver must not change it. Kept for diagnostics.
 NTSTATUS
 T2AudioSetRemoteAccess(_In_ BOOLEAN Enable)
 {

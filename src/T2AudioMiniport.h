@@ -118,11 +118,6 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // send itself from the stream/transport setup. The send is also refused
     // above PASSIVE_LEVEL regardless of this flag (see T2AudioSendBceMessage).
     BOOLEAN BceIoEnabled;
-    // Set once SET_REMOTE_ACCESS(ON) has been acknowledged by the T2. The T2
-    // must be told to hand audio control to the host before any START_IO, so
-    // T2AudioStartIo refuses to run until this is set (kaiT2en issues the
-    // handshake at init; see BceTransport.c:T2AudioSetRemoteAccess).
-    BOOLEAN BceRemoteAccess;
     // Diagnostic stage selected by the test session (DiagStage). Higher stages
     // include lower ones:
     //   1 = RAM only       - no BAR mapping, no BCE, system-memory buffer only

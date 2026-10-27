@@ -27,12 +27,12 @@
  T2 audio DSP → speakers
 
  Control path: IOCTL 0x222018 on \Device\AppleUSBVHCI  (BCE "Audt" messages:
- GET_DEVICE_LIST, GET_PROPERTY, GET_OUTPUT_STREAM_LIST, SET_REMOTE_ACCESS,
+ GET_DEVICE_LIST, GET_PROPERTY, GET_OUTPUT_STREAM_LIST,
  START_IO / STOP_IO)
 ```
 
 * **Buffer discovery (`src/Device.c`).** The driver maps BAR0 (the ring memory) and finds the config BAR by its GPR signature `0x19870423` at `+0xC000`. It then walks the `BufferStruct` to the `"Speaker"` output buffer, bounds-checking everything against the mapped size. BAR0 is mapped write-combining when the BAR is prefetchable, as kaiT2en does.
-* **Control (`src/BceTransport.c`, `src/Phase4.c`).** The speaker device is found by its UID. The driver then reads the stream's physical format (`'pft '`), latency (`'ltnc'`) and safety offset (`'saft'`) from the T2. It takes host control with `SET_REMOTE_ACCESS(ON)` and returns it on stop/remove.
+* **Control (`src/BceTransport.c`, `src/Phase4.c`).** The speaker device is found by its UID. The driver then reads the stream's physical format (`'pft '`), latency (`'ltnc'`) and safety offset (`'saft'`) from the T2. Remote access is left to AppleUSBVHCI, which manages it itself.
 * **Streaming (`src/WaveRTStream.c`).** PortCls cannot map BAR pages to user mode, so the engine writes to RAM and the driver mirrors it. The engine is only ever told a frame was played after that frame has been copied.
 * **Formats (`src/WaveRTMiniport.c`).** The render pin offers a single format, 6 ch / 48 kHz / 32-bit. It is negotiated as `WAVEFORMATEXTENSIBLE` with a 5.1 mask.
 
@@ -41,7 +41,7 @@
 | Gate | Registry value (`HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\TestSession`, **volatile**) | Default |
 |---|---|---|
 | Start at all | `EnableTestMode=1` | off → Code 10 |
-| Stage | `DiagStage` = 1 RAM only · 2 map BARs · 3 BCE discovery + stream format · 4 wire speaker, `SET_REMOTE_ACCESS` · 5 MMIO copy | 1 |
+| Stage | `DiagStage` = 1 RAM only · 2 map BARs · 3 BCE discovery + stream format · 4 wire speaker (+ `START_IO` with `EnableBceIo`) · 5 MMIO copy | 1 |
 | Write PCM into BAR0 | `EnableMmioCopy=1` (stage 5) **and** a supported `'pft '` format read from the T2 | off |
 | Send `START_IO`/`STOP_IO` | `EnableBceIo=1` (stage 4+) | off |
 
@@ -61,7 +61,7 @@ Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the ses
 | Stream + device latency, safety offset | ✅ new | Reported through `GetHWLatency`. |
 | Ring zeroed before a run; clock anchored **before** `START_IO` | ✅ new | |
 | `pci_iomap_wc` for a prefetchable BAR | ✅ new | WC mapping + `sfence` after each copy. |
-| `SET_REMOTE_ACCESS(ON)` before I/O, `OFF` on quiesce | ✅ (OFF new) | OFF is sent on PnP stop/remove. |
+| `SET_REMOTE_ACCESS(ON)` before I/O, `OFF` on quiesce | n/a on Windows | AppleUSBVHCI sends it itself (`mode 1` at init/resume, `0` at power-down) and AppleAudio never does, so this driver no longer sends it ([RE](docs/analysis/RE_appleaudio_protocol.md)). |
 | `NOTIFICATION_ALIVE` handshake before commands | ❌ | Needs a receive path for T2→host messages through `AppleUSBVHCI`, which is not known yet. |
 | Hardware position from `UPDATE_TIMESTAMP` (sampleTime/hostTime) | ❌ | Same blocker. The position is extrapolated from QPC since the anchor, which can drift against the T2 clock over long runs. |
 | Exposing the bridge ring itself as the PCM buffer | ❌ | PortCls refuses BAR MDLs for WaveRT (0x8007001F), hence the RAM mirror. |

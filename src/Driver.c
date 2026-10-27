@@ -40,21 +40,11 @@ T2AudioPnpHandler(
             KdPrint(("T2Audio: PnP minor 0x%02X - releasing hardware\n",
                      stack->MinorFunction));
 
-            // Hand audio control back to bridgeOS while the BCE transport is
-            // still open, as kaiT2en's quiesce path does before the bus goes
-            // away; otherwise the T2 keeps waiting for a host that is gone
-            // (and AppleAudio cannot take over cleanly). Not on surprise
-            // removal: the device is already gone and the send would only
-            // run into its timeout.
-            if (context->BceRemoteAccess &&
-                stack->MinorFunction != IRP_MN_SURPRISE_REMOVAL) {
-                NTSTATUS status = T2AudioSetRemoteAccess(FALSE);
-
-                KdPrint(("T2Audio: SET_REMOTE_ACCESS(OFF) on teardown: 0x%08X\n",
-                         status));
-            }
-            context->BceRemoteAccess = FALSE;
-
+            // No SET_REMOTE_ACCESS here: AppleUSBVHCI owns remote access (it
+            // sends mode 1 at init and on resume, mode 0 on power-down;
+            // 0x140002864 and its callers). Turning it off from the audio
+            // driver would leave AppleAudio without audio until VHCI
+            // re-initializes.
             T2AudioUnmapResources(context);
         }
         break;
@@ -424,7 +414,6 @@ T2AudioStartDevice(
     context->SpeakerDeviceId = 0;
     context->BceSpeakerDeviceId = 0;
     context->BceProbed = FALSE;
-    context->BceRemoteAccess = FALSE;
 
     // Enumerate BCE devices and log their UIDs (stage 3+). On success the
     // transport is left open so START_IO/STOP_IO can use it.
@@ -444,19 +433,11 @@ T2AudioStartDevice(
         context->BceProbed && context->BceSpeakerDeviceId != 0) {
         context->SpeakerDeviceId = context->BceSpeakerDeviceId;
 
-        // Take host audio control before any START_IO can be issued. This is a
-        // prerequisite for START_IO (T2AudioStartIo refuses until it succeeds).
-        // Only sent when hardware I/O is enabled, so stage-4-no-I/O runs and the
-        // stage-3 probe are byte-for-byte unchanged.
-        if (context->BceIoEnabled) {
-            status = T2AudioSetRemoteAccess(TRUE);
-            if (NT_SUCCESS(status)) {
-                context->BceRemoteAccess = TRUE;
-            } else {
-                KdPrint(("T2Audio: SET_REMOTE_ACCESS failed: 0x%08X; hardware I/O stays blocked\n",
-                         status));
-            }
-        }
+        // Remote access is not requested here. AppleUSBVHCI already sends
+        // NOTIFICATION_ALIVE and SET_REMOTE_ACCESS(mode 1) itself when it
+        // initializes and on resume (0x140002690 / 0x140002864), and
+        // AppleAudio.sys never sends SET_REMOTE_ACCESS. Sending kaiT2en's
+        // mode 2 would change a state the Windows stack set up.
 
         KdPrint(("T2Audio: audio path ENABLED for speaker 0x%I64X (bceIo=%u, transport held open)\n",
                  context->SpeakerDeviceId, context->BceIoEnabled ? 1u : 0u));

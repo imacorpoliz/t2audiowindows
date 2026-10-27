@@ -7,7 +7,7 @@
 
 1. [Статус и ограничения](#1-статус-и-ограничения)
 2. [Аппаратура: T2 audio controller](#2-аппаратура-t2-audio-controller)
-3. [Протокол BCE «Audt»](#3-протокол-bce-audt)
+3. [Протокол BCE](#3-протокол-bce)
 4. [Архитектура драйвера](#4-архитектура-драйвера)
 5. [Жизненный цикл устройства](#5-жизненный-цикл-устройства)
 6. [Потоковый тракт (WaveRT → BAR0)](#6-потоковый-тракт-wavert--bar0)
@@ -115,22 +115,23 @@ BUFFER_ENTRY                     (0x30)
 
 ---
 
-## 3. Протокол BCE «Audt»
+## 3. Протокол BCE
 
 ### 3.1 Транспорт (`src/BceTransport.c`)
 
 * Устройство `\Device\AppleUSBVHCI`, открывается `IoGetDeviceObjectPointer(FILE_ALL_ACCESS)`. Ссылка на file object удерживается всё время, пока транспорт открыт.
 * `IOCTL 0x222018` = `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)`. Входной буфер — сообщение, выходной — ответ. `IoStatus.Information` — длина ответа (обрезается до размера буфера).
 * IRP строится `IoBuildDeviceIoControlRequest`, `FileObject` в стеке IRP **не** выставляется (как у `AppleAudio.sys`; см. §12 — BSOD это не исправило).
-* Все отправки сериализуются `KMUTEX`. Захват ждёт не дольше 3000 мс, сама отправка — не дольше **2000 мс**.
-* **Poisoning.** Если ответ не пришёл за 2000 мс, IRP бросается как есть (без `IoCancelIrp` — это была бы гонка с освобождением IRP), контекст намеренно утекает, транспорт помечается «отравленным». После этого все отправки сразу возвращают `STATUS_IO_TIMEOUT`, а транспорт никогда не закрывается: ссылка на file object держит целевое устройство живым для зависшего IRP.
+* Все отправки сериализуются `KMUTEX`. Захват ждёт не дольше 7000 мс, сама отправка — не дольше **6000 мс**: это больше 5 с, которые ждёт ответа сам AppleUSBVHCI (`0x140002128`). Поэтому медленный ответ завершает IRP на стороне VHCI, а не приводит к «отравлению».
+* **Тег запроса** (первые 4 байта): счётчик 1..127, как у AppleAudio; его проставляет `T2AudioSendBceMessage`. Ответ с другим тегом отклоняется (`STATUS_DEVICE_PROTOCOL_ERROR`): AppleUSBVHCI будит ожидающий запрос любым RESPONSE, а также `NOTIFICATION_ALIVE`.
+* **Poisoning.** Если ответ не пришёл за 6000 мс, IRP бросается как есть (без `IoCancelIrp` — это была бы гонка с освобождением IRP), контекст намеренно утекает, транспорт помечается «отравленным». После этого все отправки сразу возвращают `STATUS_IO_TIMEOUT`, а транспорт никогда не закрывается: ссылка на file object держит целевое устройство живым для зависшего IRP.
 * Отправка запрещена выше `PASSIVE_LEVEL` (`STATUS_INVALID_DEVICE_STATE`).
 
 ### 3.2 Формат сообщения (little-endian, без выравнивания)
 
 ```
 header (13 байт)
-  +0  char tag[4]   = "Audt"
+  +0  u32  tag      счётчик запросов 1..127 (bridgeOS возвращает его в ответе)
   +4  u8   type     1 = COMMAND, 2 = RESPONSE, 3 = NOTIFICATION
   +5  u64  device_id
 base (8 байт)
@@ -146,7 +147,7 @@ payload — с +21
 | `GET_DEVICE_LIST` (101) | 102 | 0 | — | `count u64`, `count × id u64` | `T2AudioGetDeviceList` |
 | `GET_PROPERTY` (7) | 8 | устройство | `obj u64, element u32, scope u32, selector u32, qualifier_size u64` (28 байт) | `obj, element, scope, selector, data_size u64`, затем данные (с +49) | `T2AudioGetProperty` |
 | `GET_OUTPUT_STREAM_LIST` (26) | 27 | устройство | — | как у списка устройств | `T2AudioGetOutputStreamList` |
-| `SET_REMOTE_ACCESS` (32) | 33 | 0 | `mode u64` (0 = OFF, 2 = ON) | — | `T2AudioSetRemoteAccess` |
+| `SET_REMOTE_ACCESS` (32) | 33 | 0 | `mode u64` | — | `T2AudioSetRemoteAccess` — **не используется**: на Windows его шлёт сам AppleUSBVHCI (`mode 1` при старте/пробуждении, `0` при сне), AppleAudio не шлёт никогда |
 | `START_IO` (0) | 1 | speaker | — | — | `T2AudioStartIo` (`Phase4.c`) |
 | `STOP_IO` (2) | 3 | speaker | — | — | `T2AudioStopIo` |
 
@@ -229,7 +230,6 @@ Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
 | `HardwareLock`, `HardwareReady` | защита MMIO от teardown (§7) |
 | `BceSpeakerDeviceId`, `SpeakerDeviceId` | найденный / «подключённый» speaker (второе — только на стадии ≥ 4) |
 | `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | результат запроса потока (§5.3) |
-| `BceRemoteAccess` | `SET_REMOTE_ACCESS(ON)` подтверждён |
 | `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `ForceSystemBuffer`, `MdlVariant` | гейты и параметры (§8) |
 
 ### 4.3 Формат на пине
@@ -259,7 +259,7 @@ Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
 5. **Стадия ≥ 2:** `T2AudioMapResources`: маппинг BAR0, поиск config BAR по GPR, проверки, `BufferStruct`, кольцо динамиков. При успехе `HardwareReady = TRUE`.
 6. Создание и регистрация Topology, затем WaveRT, затем физического соединения. При ошибке всё созданное освобождается и BAR размапливаются.
 7. **Стадия ≥ 3 и `HardwareReady`:** `T2AudioProbeBceDevices` (§5.3).
-8. **Стадия ≥ 4, speaker найден:** `SpeakerDeviceId = BceSpeakerDeviceId`. Если `EnableBceIo` — `SET_REMOTE_ACCESS(ON)` → `BceRemoteAccess`. Транспорт остаётся открытым. Иначе транспорт закрывается.
+8. **Стадия ≥ 4, speaker найден:** `SpeakerDeviceId = BceSpeakerDeviceId`. `SET_REMOTE_ACCESS` драйвер не шлёт (его отправляет AppleUSBVHCI, см. `analysis/RE_appleaudio_protocol.md` §1). Транспорт остаётся открытым. Иначе транспорт закрывается.
 
 ### 5.3 BCE probe и запрос потока (стадия ≥ 3)
 
@@ -280,8 +280,7 @@ GET_PROPERTY(speaker, outp 'saft')    ┘   (необязательные, ош�
 
 `T2AudioPnpHandler` на `IRP_MN_STOP_DEVICE`, `IRP_MN_SURPRISE_REMOVAL`, `IRP_MN_REMOVE_DEVICE`:
 
-1. Если `BceRemoteAccess` и это не surprise removal — `SET_REMOTE_ACCESS(OFF)` (управление возвращается bridgeOS, как в quiesce у kaiT2en).
-2. `T2AudioUnmapResources`: под `HardwareLock` — `HardwareReady = FALSE` и обнуление указателей. Затем `KeFlushQueuedDpcs`, закрытие транспорта (если он не «отравлен»), освобождение MDL и `MmUnmapIoSpace`. Функция идемпотентна.
+1. `T2AudioUnmapResources`: под `HardwareLock` — `HardwareReady = FALSE` и обнуление указателей. Затем `KeFlushQueuedDpcs`, закрытие транспорта (если он не «отравлен»), освобождение MDL и `MmUnmapIoSpace`. Функция идемпотентна.
 3. `PcDispatchIrp`.
 
 ---
@@ -395,7 +394,7 @@ LastCopiedFrame = playFrame
 | `EnableTestMode` | 1 = драйвер может стартовать | нет → Code 10 |
 | `DiagStage` | 1–5, стадии накопительные | 1 |
 | `EnableMmioCopy` | 1 = разрешить запись PCM в BAR0 (только стадия 5) | 0 |
-| `EnableBceIo` | 1 = разрешить `SET_REMOTE_ACCESS(ON)`, `START_IO`, `STOP_IO` (стадия ≥ 4) | 0 |
+| `EnableBceIo` | 1 = разрешить `START_IO`, `STOP_IO` (стадия ≥ 4) | 0 |
 
 ### 8.2 Стадии
 
@@ -404,7 +403,7 @@ LastCopiedFrame = playFrame
 | 1 RAM only | endpoint и поток на системной памяти, позиция по QPC | ничего |
 | 2 BAR metadata | маппинг BAR, чтение GPR и `BufferStruct` | только чтение device memory |
 | 3 BCE discovery | открытие транспорта, `GET_DEVICE_LIST`, `uid`, список потоков, `'pft '`/`'ltnc'`/`'saft'` | только запросы-чтения по BCE |
-| 4 hardware I/O | speaker подключён, транспорт держится открытым. С `EnableBceIo`: `SET_REMOTE_ACCESS`, `START_IO`/`STOP_IO` | команды управления (**BSOD-путь**) |
+| 4 hardware I/O | speaker подключён, транспорт держится открытым. С `EnableBceIo`: `START_IO`/`STOP_IO` | команды управления (**BSOD-путь**) |
 | 5 MMIO copy | с `EnableMmioCopy` и валидным форматом: запись PCM в BAR0, обнуление кольца | запись в device memory |
 
 Поднимайте стадию по одной, чтобы любой сбой можно было приписать одному шагу.
@@ -520,9 +519,9 @@ gcc -Wall -Wextra -o /tmp/buf tests/T2AudioBufferLogicTest.c && /tmp/buf
 | ≥ 3 | `speaker sample shift=8 latency=A+B frames safety=C frames` | **shift=8** |
 | ≥ 3 | `BCE probe done; speaker id 0x39 stream 0x3A format=1` | `format=1` |
 | ≥ 4 | `audio path ENABLED for speaker 0x39 (bceIo=…)` | |
-| ≥ 4 + BceIo | `SET_REMOTE_ACCESS(1) acknowledged` | |
+| ≥ 4 + BceIo | `START_IO sent to device 0x39`, затем `VHCI UPDATE_TIMESTAMP #1 dev=0x39 …` | без BSOD |
 | поток | `AllocateAudioBuffer: system MDL=… size=11520 …`, `SetState 3 …` | |
-| остановка | `PnP minor 0x02 - releasing hardware`, `SET_REMOTE_ACCESS(OFF) on teardown: 0x00000000` | 0x02 = REMOVE, 0x04 = STOP |
+| остановка | `PnP minor 0x02 - releasing hardware` | 0x02 = REMOVE, 0x04 = STOP |
 
 Типичные проблемы:
 
@@ -557,7 +556,7 @@ gcc -Wall -Wextra -o /tmp/buf tests/T2AudioBufferLogicTest.c && /tmp/buf
 | latency, safety offset | ✅ → `GetHWLatency` |
 | обнуление кольца в prepare, якорь до `START_IO` | ✅ |
 | `pci_iomap_wc` для prefetchable BAR | ✅ WC + `sfence` |
-| `SET_REMOTE_ACCESS(ON)` до I/O, `OFF` в quiesce | ✅ (OFF — на PnP stop/remove) |
+| `SET_REMOTE_ACCESS(ON=2)` до I/O, `OFF` в quiesce | ⚠️ на Windows это делает AppleUSBVHCI (`mode 1`), драйвер не шлёт |
 | `NOTIFICATION_ALIVE` перед командами | ❌ (§12.2) |
 | позиция из `UPDATE_TIMESTAMP` | ❌ (§12.2) |
 | кольцо bridgeOS = буфер ALSA | ❌ ограничение PortCls |

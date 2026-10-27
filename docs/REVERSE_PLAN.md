@@ -29,6 +29,8 @@
 
 ## 2. Задачи (по приоритету)
 
+> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R9 и часть R7 (формат сэмплов) — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). Осталось: R6 (часы), R7 (раскладка стерео → 6 каналов, коэффициенты фильтров), R8 (питание в AppleAudio), msg 28 и свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`.
+
 ### R1. Подтвердить причину BSOD по минидампам — **первым делом**
 
 Гипотеза: AppleUSBVHCI доставляет сообщение bridgeOS через `IOCTL 0x222020` в наш стек, а KS разыменовывает `NULL` FileObject.

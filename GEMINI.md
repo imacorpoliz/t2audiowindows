@@ -15,7 +15,8 @@
   * конверсия сэмплов в S24_LE (`>> 8`);
   * чтение формата потока `'pft '`, latency и safety offset у T2;
   * write-combining для BAR0;
-  * PnP teardown и `SET_REMOTE_ACCESS(OFF)`.
+  * PnP teardown; `SET_REMOTE_ACCESS` больше не отправляется (его делает AppleUSBVHCI);
+  * перехват `IOCTL 0x222020`, тег запроса 1..127 с проверкой ответа, таймаут 6 с.
 * **`START_IO` ронял систему (BSOD `0x7E`).** Причина найдена статически и исправлена в коде (см. D1–D2), но на железе это **не проверено**. `tools/T2Audio-TestAgent.ps1` по-прежнему отказывается запускать `-BceIo` — так и должно оставаться до выполнения условий из `docs/REVERSE_PLAN.md` §3.
 
 ---
@@ -168,9 +169,9 @@ $h = '<SHA256 из A3>'
 ### D3. Питание (сон/пробуждение)
 
 * Как в kaiT2en (`t2audio_quiesce`, `t2audio_suspend`, `t2audio_reset_buffers`):
-  * перед сном (`IRP_MN_QUERY_POWER` / `SET_POWER` для S1–S4): остановить I/O, `SET_REMOTE_ACCESS(OFF)`;
+  * перед сном (`IRP_MN_QUERY_POWER` / `SET_POWER` для S1–S4): остановить I/O (`SET_REMOTE_ACCESS` при сне/пробуждении шлёт сам AppleUSBVHCI — `analysis/RE_appleaudio_protocol.md` §1);
   * записать sleep marker `0x19770525` в GPR `+0x10` (config BAR сейчас смаплен read-only — нужен отдельный R/W-маппинг одного регистра);
-  * при пробуждении: проверить marker, при необходимости перечитать `BufferStruct`, `SET_REMOTE_ACCESS(ON)`, сбросить потоки.
+  * при пробуждении: проверить marker, при необходимости перечитать `BufferStruct`, сбросить потоки.
 * В PortCls: `IAdapterPowerManagement` (`PcRegisterAdapterPowerManagement`) или хук `IRP_MJ_POWER` перед `PcDispatchIrp`.
 
 ### D4. Упаковка в CI
