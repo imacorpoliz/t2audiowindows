@@ -77,6 +77,7 @@
     <ClCompile Include="Topology.c" />
     <ClCompile Include="Phase4.c" />
     <ClCompile Include="BceTransport.c" />
+    <ClCompile Include="Power.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="T2AudioMiniport.h" />

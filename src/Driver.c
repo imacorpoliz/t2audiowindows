@@ -72,8 +72,13 @@ T2AudioDeviceControl(
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
 
+    // Only AppleUSBVHCI's own IRPs (IoBuildDeviceIoControlRequest: kernel
+    // mode, no FileObject) carry bridgeOS messages. A user-mode caller of the
+    // same code on our KS filter must not be able to feed us fake timestamps;
+    // its IRP has a FileObject and goes to KS like any other request.
     if (stack->Parameters.DeviceIoControl.IoControlCode ==
-        IOCTL_APPLE_VHCI_AUDIO_MESSAGE) {
+            IOCTL_APPLE_VHCI_AUDIO_MESSAGE &&
+        Irp->RequestorMode == KernelMode) {
         PT2AUDIO_DEVICE_CONTEXT context = NULL;
 
         if (DeviceObject->DeviceExtension != NULL) {
@@ -421,6 +426,10 @@ T2AudioStartDevice(
 
     port->Release();
     topologyPort->Release();
+
+    // STOP_IO before D3 (as AppleAudio does), no MMIO while powered down.
+    // Failure is not fatal: streams still stop I/O when they leave RUN.
+    (VOID)T2AudioRegisterPowerManagement(DeviceObject, context);
 
     // HardwareReady was set by a successful MapResources (stage >= 2). Do NOT
     // force it here: below stage 2 the context must stay "not hardware ready" so

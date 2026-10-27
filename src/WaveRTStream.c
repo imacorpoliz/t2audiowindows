@@ -227,7 +227,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     // Hold the device's hardware lock across the check and the writes so
     // T2AudioUnmapResources cannot unmap BAR1 underneath the copy.
     KeAcquireSpinLockAtDpcLevel(&context->HardwareLock);
-    canCopy = context->HardwareReady &&
+    canCopy = context->HardwareReady && !context->PoweredDown &&
               context->MmioCopyEnabled && context->SpeakerFormatValid &&
               context->Bar1Mapped != NULL &&
               context->SpeakerBufferSize != 0 &&
@@ -600,6 +600,7 @@ T2AudioStreamSetState(
                     return status;
                 }
                 instance->HardwareIoStarted = TRUE;
+                InterlockedExchange(&instance->DeviceContext->HardwareIoActive, 1);
             }
 
             // Publish the anchor taken above.
@@ -684,7 +685,13 @@ T2AudioStreamSetState(
             }
             KeReleaseSpinLock(&context->HardwareLock, oldIrql);
         }
-        if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u)) {
+        // The power callbacks may already have stopped the I/O before D3; the
+        // HardwareIoActive exchange makes sure only one STOP_IO is sent.
+        if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u) &&
+            InterlockedExchange(&instance->DeviceContext->HardwareIoActive, 0) == 0) {
+            KdPrint(("T2Audio: SetState %u: I/O already stopped (power)\n", State));
+            instance->HardwareIoStarted = FALSE;
+        } else if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u)) {
             NTSTATUS status;
             KdPrint(("T2Audio: SetState %u about to StopIo irql=%u\n",
                      State, (ULONG)KeGetCurrentIrql()));

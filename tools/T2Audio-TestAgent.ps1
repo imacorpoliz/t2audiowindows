@@ -36,7 +36,7 @@
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 1   # RAM only, no device memory
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 3   # + BAR + BCE discovery
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 4   # speaker wired, NO I/O sent
-#   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 4 -BceIo   # + BCE START_IO/STOP_IO
+#   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo   # + START_IO (owner only, muted)
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 5 -Mmio   # + BAR1 writes (risky)
 #   .\T2Audio-TestAgent.ps1 -Mode Recover
 
@@ -61,6 +61,11 @@ param(
     # default: at stage 4 the speaker is wired and the transport is held open,
     # but no command is sent. Pass this only after the no-command run is clean.
     [switch]$BceIo,
+
+    # The machine owner's explicit approval for -BceIo. START_IO bugchecked
+    # before the IOCTL 0x222020 fix (docs/analysis/START_IO_BSOD_ROOT_CAUSE.md);
+    # the fix is not hardware-verified yet. Only the owner may pass this.
+    [switch]$OwnerApprovedBceIo,
 
     # Offer the 6 raw ring channels to Windows instead of the stereo endpoint
     # (RawSpeakerChannels=1), for per-speaker diagnostics. The tweeters then
@@ -362,12 +367,24 @@ function Invoke-Test {
     # -BceIo implies at least the hardware-I/O stage.
     if ($BceIo -and $effectiveStage -lt 4) { $effectiveStage = 4 }
 
-    # START_IO remains unsafe even with FileObject attached to our outgoing
-    # request: the lower driver forwards a different IRP into KS and bugchecks.
-    # Do not create a hardware-I/O test session while this path is blocked.
-    if ($BceIo) {
-        Write-Fail 'BCE START_IO is blocked after repeated ks.sys bugchecks; refusing -BceIo.'
+    # START_IO used to bugcheck: AppleUSBVHCI forwards bridgeOS messages as
+    # IOCTL 0x222020 without a FileObject, and KS dereferenced it. The driver
+    # now handles that IOCTL itself, but this is not verified on hardware, so
+    # -BceIo needs the owner's explicit approval.
+    if ($BceIo -and -not $OwnerApprovedBceIo) {
+        Write-Fail '-BceIo sends START_IO, which bugchecked before the 0x222020 fix. It needs the owner''s explicit approval: -OwnerApprovedBceIo.'
         exit 1
+    }
+    # Without -Mmio the ring is neither cleared nor written, so after START_IO
+    # the T2 would play whatever is left in BAR0 (e.g. AppleAudio's last
+    # audio): noise. With -Mmio the ring is zeroed and carries the engine's
+    # output, i.e. silence while Windows is muted.
+    if ($BceIo -and -not $Mmio) {
+        Write-Fail '-BceIo requires -Mmio (otherwise the T2 plays stale ring contents).'
+        exit 1
+    }
+    if ($BceIo) {
+        Write-Warn 'START_IO run: Windows must be MUTED with volume 0 (rule 0 - silent runs only).'
     }
 
     $stageName = switch ($effectiveStage) {

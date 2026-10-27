@@ -81,6 +81,13 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // KSPIN_LOCK is a valid released lock, so a fresh extension is usable.
     KSPIN_LOCK HardwareLock;
     BOOLEAN HardwareReady;
+    // TRUE while the adapter is in D1..D3 (set by PowerChangeState under
+    // HardwareLock): the copy DPC does not write BAR0 then.
+    BOOLEAN PoweredDown;
+    // 1 while START_IO is in effect. Whoever clears it with
+    // InterlockedExchange (the stream leaving RUN, or the power callbacks
+    // before D3) sends the one matching STOP_IO.
+    volatile LONG HardwareIoActive;
     ULONG64 BceSpeakerDeviceId;
     BOOLEAN BceProbed;
     // Speaker output stream as reported by the T2 (BCE probe, stage 3+).
@@ -234,6 +241,9 @@ NTSTATUS T2AudioBuildIoCommand(
 
 NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
+NTSTATUS T2AudioRegisterPowerManagement(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 VOID T2AudioInitializeBceTransport(VOID);
 NTSTATUS T2AudioOpenBceTransport(VOID);

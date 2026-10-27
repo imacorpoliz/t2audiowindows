@@ -297,6 +297,11 @@ T2AudioMiniportDataRangeIntersection(
                DataRange->FormatSize == sizeof(KSDATARANGE_AUDIO)) {
         PKSDATARANGE_AUDIO audioRange = (PKSDATARANGE_AUDIO)DataRange;
 
+        // Raw mode still offers stereo to a client range that cannot take six.
+        if (channels == T2AUDIO_RING_CHANNELS && audioRange->MaximumChannels >= 2 &&
+            audioRange->MaximumChannels < T2AUDIO_RING_CHANNELS) {
+            channels = 2;
+        }
         if (audioRange->MaximumChannels < channels ||
             audioRange->MinimumBitsPerSample > 32 ||
             audioRange->MaximumBitsPerSample < 32 ||
