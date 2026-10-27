@@ -66,14 +66,14 @@ PCI\VEN_106B&DEV_1803&SUBSYS_00000000&REV_01
 
 | № | Дефект | Исходный файл | Симптом / Последствие | Причина и Решение |
 |---|---|---|---|---|
-| **1** | Ошибка кодов ответов `START_IO` / `STOP_IO` | [`Phase4.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/Phase4.c) | `STATUS_DEVICE_PROTOCOL_ERROR` при включении звука | Драйвер ждал ответ `0` и `2`. REA доказало, что T2 возвращает `1` (`START_IO_RESPONSE`) и `3` (`STOP_IO_RESPONSE`). Введены правильные макросы в [`BceProtocolLogic.h`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/BceProtocolLogic.h). |
-| **2** | BSOD `0x7E` в `ks!DispatchDeviceIoControl` | [`BceTransport.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/BceTransport.c) | Мгновенный синий экран при попытке отправки команды BCE | Ручное присвоение `irpStack->FileObject = FileObject`. В `AppleAudio.sys` (`FUN_140004a4c`) `FileObject` строго `NULL`. Назначение `FileObject` отправляло IRP в стек `ksthunk`. Ручное присвоение удалено. |
-| **3** | Отказ Windows Audio Engine в создании потока | [`WaveRTMiniport.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTMiniport.c) | Ошибка `0x80070057` / отказ WASAPI открывать пин 0 | Драйвер требовал `WAVE_FORMAT_PCM`. Для потоков >2 каналов Windows Audio Engine строго требует `WAVEFORMATEXTENSIBLE` (`0xFFFE`). Добавлена полная поддержка `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` (6ch, 48kHz, 32-bit, mask 5.1). |
-| **4** | Статическое копирование в смещение 0 (Тишина / щелчки) | [`WaveRTStream.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTStream.c) | Звук пропадал через 10 мс; щелчок раз в 347 мс | Драйвер копировал 11.5 КБ в смещение 0 буфера 399 КБ. T2 циклически считывал 336 мс тишины. Разработан алгоритм `T2AudioCalculateCopyChunk`, циклически заполняющий BAR1 перед курсором T2 с опережением 15 мс. |
-| **5** | Отказ запуска при обычной загрузке (Code 10) | [`Driver.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/Driver.c) | `STATUS_UNSUCCESSFUL` без стороннего скрипта | Запуск блокировался отсутствием волатильного ключа `TestSession`. Добавлен Normal Operational Mode (Stage 5 MMIO, BCE I/O включен по умолчанию). |
-| **6** | Гонка состояний (Race Condition) в таймере DPC | [`WaveRTStream.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTStream.c) | Искажение курсора воспроизведения, рассинхронизация | Таймерный DPC (2 мс) и `SetState` несинхронно читали `AnchorQpc` и `AnchorFrames`. Добавлен спинлок `KSPIN_LOCK StreamLock`. |
-| **7** | Зацикливание шума при остановке потока | [`WaveRTStream.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTStream.c) | Жужжание/гул после нажатия Pause/Stop | Буфер BAR1 не обнулялся при остановке. Добавлено обнуление буфера динамиков в BAR1 при переходе в `KSSTATE_STOP`. |
-| **8** | Опасный вызов `KeFlushQueuedDpcs()` на повышенном IRQL | [`WaveRTStream.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTStream.c) | `BugCheck 0x4A` при остановке таймера | Вызов `KeFlushQueuedDpcs()` обернут в проверку `if (KeGetCurrentIrql() == PASSIVE_LEVEL)`. |
+| **1** | Ошибка кодов ответов `START_IO` / `STOP_IO` | [`Phase4.c`](../src/Phase4.c) | `STATUS_DEVICE_PROTOCOL_ERROR` при включении звука | Драйвер ждал ответ `0` и `2`. REA доказало, что T2 возвращает `1` (`START_IO_RESPONSE`) и `3` (`STOP_IO_RESPONSE`). Введены правильные макросы в [`BceProtocolLogic.h`](../src/BceProtocolLogic.h). |
+| **2** | BSOD `0x7E` в `ks!DispatchDeviceIoControl` | [`BceTransport.c`](../src/BceTransport.c) | Мгновенный синий экран при попытке отправки команды BCE | Ручное присвоение `irpStack->FileObject = FileObject`. В `AppleAudio.sys` (`FUN_140004a4c`) `FileObject` строго `NULL`. Назначение `FileObject` отправляло IRP в стек `ksthunk`. Ручное присвоение удалено. **Поправка:** сборка с `FileObject = NULL` тоже падала (2026-10-08 01:35) — BSOD не устранён, см. `docs/CURRENT_STATE.md`. |
+| **3** | Отказ Windows Audio Engine в создании потока | [`WaveRTMiniport.c`](../src/WaveRTMiniport.c) | Ошибка `0x80070057` / отказ WASAPI открывать пин 0 | Драйвер требовал `WAVE_FORMAT_PCM`. Для потоков >2 каналов Windows Audio Engine строго требует `WAVEFORMATEXTENSIBLE` (`0xFFFE`). Добавлена полная поддержка `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` (6ch, 48kHz, 32-bit, mask 5.1). |
+| **4** | Статическое копирование в смещение 0 (Тишина / щелчки) | [`WaveRTStream.c`](../src/WaveRTStream.c) | Звук пропадал через 10 мс; щелчок раз в 347 мс | Драйвер копировал 11.5 КБ в смещение 0 буфера 399 КБ. T2 циклически считывал 336 мс тишины. Разработан алгоритм `T2AudioCalculateCopyChunk`, циклически заполняющий BAR1 перед курсором T2 с опережением 15 мс. |
+| **5** | Отказ запуска при обычной загрузке (Code 10) | [`Driver.c`](../src/Driver.c) | `STATUS_UNSUCCESSFUL` без стороннего скрипта | Запуск блокировался отсутствием волатильного ключа `TestSession`. **Поправка:** этого изменения в коде нет; гейт `TestSession` сохранён намеренно (см. `docs/DRIVER_GUIDE.md`, §8). |
+| **6** | Гонка состояний (Race Condition) в таймере DPC | [`WaveRTStream.c`](../src/WaveRTStream.c) | Искажение курсора воспроизведения, рассинхронизация | Таймерный DPC (2 мс) и `SetState` несинхронно читали `AnchorQpc` и `AnchorFrames`. Добавлен спинлок `KSPIN_LOCK StreamLock`. |
+| **7** | Зацикливание шума при остановке потока | [`WaveRTStream.c`](../src/WaveRTStream.c) | Жужжание/гул после нажатия Pause/Stop | Буфер BAR1 не обнулялся при остановке. Добавлено обнуление буфера динамиков в BAR1 при переходе в `KSSTATE_STOP`. |
+| **8** | Опасный вызов `KeFlushQueuedDpcs()` на повышенном IRQL | [`WaveRTStream.c`](../src/WaveRTStream.c) | `BugCheck 0x4A` при остановке таймера | **Поправка:** такой проверки в коде нет; `KeFlushQueuedDpcs()` вызывается только из PASSIVE-колбэков (`SetState`, `FreeAudioBuffer`, teardown), что и обеспечивает корректность. |
 
 ---
 
@@ -125,20 +125,20 @@ tests\T2AudioBufferLogicTest.exe
 
 ### 5.3 Безопасное тестирование на реальном оборудовании
 1. **Тестовая подпись**: В Windows должна быть включена тестовая подпись (`bcdedit /set testsigning on`).
-2. **Экстренный откат**: В корне репозитория расположен проверенный скрипт [`restore_appleaudio.ps1`](file:///c:/Users/othysa/Desktop/mbp/restore_appleaudio.ps1). В случае необходимости он мгновенно восстанавливает оригинальный `AppleAudio.sys`.
+2. **Экстренный откат**: Проверенный скрипт [`tools/Restore-AppleAudioDriver.ps1`](../tools/Restore-AppleAudioDriver.ps1). В случае необходимости он мгновенно восстанавливает оригинальный `AppleAudio.sys`.
 3. **Мониторинг отладочных сообщений**: Запустите утилиту DebugView (`C:\Users\othysa\Desktop\mbp\DebugView\Dbgview.exe`) с включенной опцией *Capture Kernel* для просмотра префиксов `T2Audio:`.
 
 ---
 
 ## 6. Связь с файлами и навигация
 
-- **Анализ протокола AppleAudio**: [`docs/analysis/AppleAudio_Reverse_Engineering_Report.md`](file:///c:/Users/othysa/Desktop/mbp/docs/analysis/AppleAudio_Reverse_Engineering_Report.md)
-- **Индекс всех отчетов**: [`docs/INDEX.md`](file:///c:/Users/othysa/Desktop/mbp/docs/INDEX.md)
-- **Матрица статуса проекта**: [`PROJECT_STATUS.md`](file:///c:/Users/othysa/Desktop/mbp/PROJECT_STATUS.md)
+- **Анализ протокола AppleAudio**: [`docs/analysis/AppleAudio_Reverse_Engineering_Report.md`](analysis/AppleAudio_Reverse_Engineering_Report.md)
+- **Индекс всех отчетов**: [`docs/INDEX.md`](INDEX.md)
+- **Матрица статуса проекта**: [`CURRENT_STATE.md`](CURRENT_STATE.md)
 - **Исходный код драйвера**:
-  - Транспорт BCE: [`T2AudioPort/src/BceTransport.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/BceTransport.c)
-  - Команды Start/Stop: [`T2AudioPort/src/Phase4.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/Phase4.c)
-  - Поток WaveRT и таймер DMA: [`T2AudioPort/src/WaveRTStream.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTStream.c)
-  - Минипорт и валидация форматов: [`T2AudioPort/src/WaveRTMiniport.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/WaveRTMiniport.c)
-  - Инициализация PnP и диспетчеризация: [`T2AudioPort/src/Driver.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/Driver.c)
-  - Выделение BAR и поиск спикера: [`T2AudioPort/src/Device.c`](file:///c:/Users/othysa/Desktop/mbp/T2AudioPort/src/Device.c)
+  - Транспорт BCE: [`T2AudioPort/src/BceTransport.c`](../src/BceTransport.c)
+  - Команды Start/Stop: [`T2AudioPort/src/Phase4.c`](../src/Phase4.c)
+  - Поток WaveRT и таймер DMA: [`T2AudioPort/src/WaveRTStream.c`](../src/WaveRTStream.c)
+  - Минипорт и валидация форматов: [`T2AudioPort/src/WaveRTMiniport.c`](../src/WaveRTMiniport.c)
+  - Инициализация PnP и диспетчеризация: [`T2AudioPort/src/Driver.c`](../src/Driver.c)
+  - Выделение BAR и поиск спикера: [`T2AudioPort/src/Device.c`](../src/Device.c)

@@ -6,6 +6,8 @@
 > * The driver only starts inside a **volatile** `TestSession`, so a normal boot (or the boot after a crash) never activates it.
 > * The current source has been unit-tested on a host and checked by CI, but **no hardware run has validated it yet**.
 
+📘 **Full documentation (Russian): [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md)** — hardware, BCE protocol, architecture, streaming path, safety model, build, hardware testing, log reference.
+
 `T2AudioPort` (`T2AudioMiniport.sys`) is a PortCls / WaveRT miniport for the Apple T2 audio controller (`PCI\VEN_106B&DEV_1803`) on Intel Macs with a T2 chip (MacBookPro15,x, 16,1, 16,2, 16,4, iMac Pro, Mac mini 2018; hardware testing so far only on MacBookPro16,1). The goal is to drive the internal **6-channel speaker array** directly. Boot Camp's `AppleAudio.sys` only exposes a stereo endpoint.
 
 ---
@@ -106,7 +108,7 @@ The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `s
 * `tests/` — host unit tests for the pure protocol and buffer helpers.
 * `packaging/` — INF/CAT for test installs.
 * `tools/` — install, rollback, staged test agent, log capture, WASAPI tone tests.
-* `docs/` — [`CURRENT_STATE.md`](docs/CURRENT_STATE.md) (authoritative status), [`AGENT_HANDOVER_GUIDE.md`](docs/AGENT_HANDOVER_GUIDE.md), [`INDEX.md`](docs/INDEX.md), reverse-engineering notes in `docs/analysis/`.
+* `docs/` — [`DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md) (detailed guide), [`CURRENT_STATE.md`](docs/CURRENT_STATE.md) (authoritative status), [`AGENT_HANDOVER_GUIDE.md`](docs/AGENT_HANDOVER_GUIDE.md), [`INDEX.md`](docs/INDEX.md), reverse-engineering notes in `docs/analysis/`.
 
 ## Roadmap
 
