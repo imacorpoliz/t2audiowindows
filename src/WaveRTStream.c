@@ -71,6 +71,8 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     ULONG64 playFrame;
     ULONG64 frame;
     ULONG64 pendingFrames;
+    ULONG64 skippedFrames = 0;
+    ULONG64 skipStart;
     ULONG sourceFrames;
     BOOLEAN canCopy;
 
@@ -97,7 +99,9 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     // by the client; skip them instead of copying stale data.
     sourceFrames = instance->SourceSize / instance->BytesPerFrame;
     pendingFrames = playFrame - frame;
+    skipStart = frame;
     if (pendingFrames > sourceFrames) {
+        skippedFrames = pendingFrames - sourceFrames;
         frame = playFrame - sourceFrames;
         pendingFrames = sourceFrames;
     }
@@ -122,6 +126,28 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
         PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
         ULONG remainingFrames = (ULONG)pendingFrames;
+
+        // Silence the ring slots of skipped frames. Left alone they still hold
+        // audio from the previous lap (~347 ms earlier), which the T2 would
+        // play again as an echo/stutter.
+        if (skippedFrames != 0) {
+            ULONG hwFrames = (ULONG)context->SpeakerBufferSize / instance->BytesPerFrame;
+            ULONG64 zeroFrames = (skippedFrames < hwFrames) ? skippedFrames : hwFrames;
+            ULONG64 dstFrame = skipStart + T2AUDIO_LEAD_FRAMES;
+
+            while (zeroFrames != 0 && hwFrames != 0) {
+                ULONG slot = (ULONG)(dstFrame % hwFrames);
+                ULONG run = hwFrames - slot;
+
+                if (run > zeroFrames) {
+                    run = (ULONG)zeroFrames;
+                }
+                RtlZeroMemory(hwBufferBase + (SIZE_T)slot * instance->BytesPerFrame,
+                              (SIZE_T)run * instance->BytesPerFrame);
+                dstFrame += run;
+                zeroFrames -= run;
+            }
+        }
 
         while (remainingFrames > 0) {
             ULONG srcOffset = 0;

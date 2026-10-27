@@ -5,6 +5,15 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): second review pass (source only, not hardware-tested)
+
+- **Conflicting cache types (introduced by the WC change):** the config-BAR probe re-mapped Resource[0] uncached while it was already mapped write-combining; x86 forbids two mappings of one physical range with different cache types. Resource[0] is now skipped and only the 12 GPR bytes of each candidate are mapped.
+- **Bogus specifier accepted:** `05589f82-c356-11ce-...` (DirectShow `FORMAT_MPEGVideo`) was accepted as a "WAVEFORMATEXTENSIBLE specifier" and parsed as WAVEFORMATEX. Removed; extensible formats use the WAVEFORMATEX specifier.
+- **DataRangeIntersection:** a concrete format passed by the client was read as a `KSDATARANGE_AUDIO` (any size ≥ the range size). Ranges are now recognized by exact size; formats are checked with `T2AudioValidateSixChannelFormat`.
+- **Stale audio after a skip:** when the copy fell more than a client buffer behind, the skipped frames' ring slots kept the previous lap's audio (~347 ms old) and the T2 would replay it. They are now zeroed.
+- **INF:** added `KSCATEGORY_REALTIME` for the wave filter and `Include=ks.inf,wdmaudio.inf` / `Needs=KS.Registration,WDMAUDIO.Registration` (+ services) as in the WDK audio samples. The committed `packaging/t2audiominiport.cat` no longer matches the INF and must be regenerated (GEMINI.md A3 already does this).
+- **Open risk noted:** kaiT2en observes that bridgeOS can emit an `UPDATE_TIMESTAMP` notification before the `START_IO` response; if AppleUSBVHCI delivers that notification into our IOCTL reply buffer, `START_IO` would fail with `STATUS_DEVICE_PROTOCOL_ERROR`. Unverified.
+
 ### 2026-10-28 (later): kaiT2en parity pass (source only, not hardware-tested)
 
 Compared against `kaiT2en/KaiT2en-Fedora` `modules/t2bce_audio` (audio.c, pcm.c, protocol.h):

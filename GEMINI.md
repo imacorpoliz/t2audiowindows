@@ -9,7 +9,7 @@
 
 ## 0. Текущее состояние (на 2026-10-28)
 
-* Рабочая ветка: **`claude/great-maxwell-fe09ki`**. CI (`.github/workflows/build.yml`) на ней зелёный: драйвер собирается с WDK (Release x64), хост-тесты проходят на MSVC, gcc и clang.
+* Основная ветка: **`diagnostics`** (ветка по умолчанию). CI (`.github/workflows/build.yml`) на ней зелёный: драйвер собирается с WDK (Release x64), хост-тесты проходят на MSVC, gcc и clang.
 * Последние изменения в коде **ни разу не запускались на железе**:
   * копирование с «потреблённым» курсором и опережением 15 мс;
   * конверсия сэмплов в S24_LE (`>> 8`);
@@ -29,7 +29,7 @@
 5. После каждого прогона, особенно после сбоя: `.\tools\T2Audio-TestAgent.ps1 -Mode Recover`. Устройство в итоге должно вернуться на **AppleAudio** (Started, без ошибок).
 6. Не пиши «исправлено» / «работает» в документации и коммитах без доказательства с железа (лог, дамп, хэш бинаря).
 7. Не коммить сертификаты, `.pfx`, приватные ключи, полные логи ядра (`docs/logs/capture_*/` в `.gitignore`). В репозиторий кладутся только выдержки.
-8. В `main` не пушь. Работай в своей ветке от `claude/great-maxwell-fe09ki` (например, `gemini/hw-stage3`) и открывай PR.
+8. В `diagnostics` напрямую не пушь. Работай в своей ветке от `diagnostics` (например, `gemini/hw-stage3`) и открывай PR в `diagnostics`.
 
 ---
 
@@ -39,7 +39,7 @@
 
 ```powershell
 git fetch origin
-git checkout -b gemini/hw-stage3 origin/claude/great-maxwell-fe09ki
+git checkout -b gemini/hw-stage3 origin/diagnostics
 
 msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild `
         /p:WindowsTargetPlatformVersion=10.0.26100.0     # или версия установленного SDK

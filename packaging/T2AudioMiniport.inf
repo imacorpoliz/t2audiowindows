@@ -13,11 +13,16 @@ CatalogFile=T2AudioMiniport.cat
 %T2Audio.DeviceDesc%=T2Audio_Install,PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01
 
 [T2Audio_Install.NT]
+; Standard audio-driver registration (KS + wdmaudio), as in the WDK samples.
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
 CopyFiles=T2Audio_CopyFiles
 
 [T2Audio_Install.NT.Interfaces]
 AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Wave%,T2Audio.Wave
 AddInterface=%KSCATEGORY_RENDER%,%KSNAME_Wave%,T2Audio.Wave
+; A WaveRT wave filter must also be registered as KSCATEGORY_REALTIME.
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_Wave%,T2Audio.Wave
 AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Topology%,T2Audio.Topology
 AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_Topology%,T2Audio.Topology
 
@@ -36,6 +41,8 @@ HKR,,CLSID,,%Proxy.CLSID%
 HKR,,FriendlyName,,%T2Audio.Topology.FriendlyName%
 
 [T2Audio_Install.NT.Services]
+Include=wdmaudio.inf
+Needs=WDMAUDIO.Registration.NT.Services
 AddService=T2AudioMiniport,0x00000002,T2Audio_Service
 
 [T2Audio_Service]
@@ -66,6 +73,7 @@ T2Audio.Wave.FriendlyName="T2 Audio Speaker"
 T2Audio.Topology.FriendlyName="T2 Audio Topology"
 KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
 KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
 KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
 KSNAME_Wave="Wave"
 KSNAME_Topology="Topology"

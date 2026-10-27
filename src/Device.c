@@ -166,9 +166,15 @@ T2AudioMapResources(
     // driver/version signature. Probe every memory resource and use the first
     // one that reports the signature. The previous hard-coded Resource[2]/[1]
     // order silently failed if the enumeration order ever changed.
+    //
+    // Resource[0] is skipped: it is the buffer BAR, already mapped above
+    // (possibly write-combining), and mapping the same physical range again
+    // with a different cache type is not allowed on x86. Only the 12 GPR
+    // bytes are mapped, not the whole BAR.
     descriptor = NULL;
     for (i = 0; i < memoryResourceCount; ++i) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR candidate;
+        PHYSICAL_ADDRESS gprPhysical;
         PVOID mapped;
         SIZE_T size;
 
@@ -176,22 +182,26 @@ T2AudioMapResources(
         if (candidate == NULL || candidate->Type != CmResourceTypeMemory) {
             continue;
         }
+        if (candidate->u.Memory.Start.QuadPart == Context->Bar1Physical.QuadPart) {
+            continue;
+        }
         size = candidate->u.Memory.Length;
         if (size <= T2AUDIO_GPR_OFFSET + sizeof(ULONG) * 3) {
             continue;
         }
 
-        mapped = MmMapIoSpaceEx(candidate->u.Memory.Start, size,
+        gprPhysical.QuadPart = candidate->u.Memory.Start.QuadPart + T2AUDIO_GPR_OFFSET;
+        mapped = MmMapIoSpaceEx(gprPhysical, sizeof(ULONG) * 3,
                                 PAGE_READONLY | PAGE_NOCACHE);
         if (mapped == NULL) {
             continue;
         }
 
-        gpr = (PUCHAR)mapped + T2AUDIO_GPR_OFFSET;
+        gpr = (PUCHAR)mapped;
         version = READ_REGISTER_ULONG((PULONG)(gpr + 0));
         signature = READ_REGISTER_ULONG((PULONG)(gpr + 4));
         bufferOffset = READ_REGISTER_ULONG((PULONG)(gpr + 8));
-        MmUnmapIoSpace(mapped, size);
+        MmUnmapIoSpace(mapped, sizeof(ULONG) * 3);
 
         KdPrint(("T2Audio: Resource[%u] GPR probe: version=0x%08X signature=0x%08X bufferOffset=0x%08X\n",
                  i, version, signature, bufferOffset));

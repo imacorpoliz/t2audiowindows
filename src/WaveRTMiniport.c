@@ -13,10 +13,6 @@ static const GUID g_T2AudioSpecifierWaveformex = {
     0x05589f81, 0xc356, 0x11ce,
     { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a }
 };
-static const GUID g_T2AudioSpecifierWaveformextensible = {
-    0x05589f82, 0xc356, 0x11ce,
-    { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a }
-};
 static const GUID g_T2AudioCategoryAudio = {
     0x6994ad04, 0x93ef, 0x11d0,
     { 0xa3, 0xcc, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
@@ -278,8 +274,18 @@ T2AudioMiniportDataRangeIntersection(
         !IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioWildcard)) {
         return STATUS_NO_MATCH;
     }
+    // A client may pass either a range (KSDATARANGE_AUDIO, exactly its size)
+    // or a concrete format (KSDATAFORMAT_WAVEFORMATEX[TENSIBLE]). Telling them
+    // apart by size matters: reading a format's WAVEFORMATEX as range limits
+    // would match against garbage. A concrete format must be one we accept.
     if (IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioSpecifierWaveformex) &&
-        DataRange->FormatSize >= sizeof(KSDATARANGE_AUDIO)) {
+        DataRange->FormatSize != sizeof(KSDATARANGE_AUDIO) &&
+        DataRange->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX)) {
+        if (!NT_SUCCESS(T2AudioValidateSixChannelFormat((PKSDATAFORMAT)DataRange))) {
+            return STATUS_NO_MATCH;
+        }
+    } else if (IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioSpecifierWaveformex) &&
+               DataRange->FormatSize == sizeof(KSDATARANGE_AUDIO)) {
         PKSDATARANGE_AUDIO audioRange = (PKSDATARANGE_AUDIO)DataRange;
 
         if (audioRange->MaximumChannels < 6 ||
@@ -422,10 +428,11 @@ T2AudioValidateSixChannelFormat(_In_ PKSDATAFORMAT DataFormat)
         return STATUS_INVALID_PARAMETER;
     }
 
+    // WAVEFORMATEXTENSIBLE uses the same WAVEFORMATEX specifier; there is no
+    // separate "extensible" specifier. (05589f82-... accepted here before is
+    // DirectShow's FORMAT_MPEGVideo, not an audio layout.)
     if (!IsEqualGUIDAligned(&DataFormat->Specifier,
-                            &g_T2AudioSpecifierWaveformex) &&
-        !IsEqualGUIDAligned(&DataFormat->Specifier,
-                            &g_T2AudioSpecifierWaveformextensible)) {
+                            &g_T2AudioSpecifierWaveformex)) {
         KdPrint(("T2Audio: Validate: spec=%08X != WFEX\n",
                  DataFormat->Specifier.Data1));
         return STATUS_INVALID_PARAMETER;
