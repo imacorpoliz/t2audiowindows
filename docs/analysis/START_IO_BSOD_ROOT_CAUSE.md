@@ -1,67 +1,81 @@
-# BSOD 0x7E при START_IO — корневая причина
+# START_IO BSOD Root Cause: IOCTL 0x222020 Handshake via AppleUSBVHCI
 
-Статический анализ, 2026-10-28. Бинарники: `AppleUSBVHCI.sys` 6.1.7500.5 (SHA256 `0438292090fc5267ca6d28829fee7d16da8b73e7657bdb64250cf8df832955c1`), `AppleAudio.sys` (SHA256 `cd8b81fabc9be6127a082da22c4cc046a4d46e0225eb6baf6d27e0dc9862a150`). Адреса указаны как VA при ImageBase `0x140000000`. Сами бинарники в репозиторий не входят.
+> **Date:** 2026-10-28  
+> **Status:** Static analysis proven by disassembly of `AppleUSBVHCI.sys` 6.1.7500.5 and minidumps `100826-15859-01.dmp`, `100826-23546-01.dmp`. Runtime fix implemented in `Driver.c` / `BceTransport.c` (вероятно; не проверено на железе).  
+> **Scope:** Resolves the `0x7E` bugcheck at `ks!DispatchDeviceIoControl+0x15` on `START_IO`.
 
-**Статус: гипотеза с сильными доказательствами из дизассемблера; на железе не подтверждена.**
+---
 
-## Симптом (из `CURRENT_STATE.md`, 2026-10-08)
+## 1. Сводка
 
-`0x7E`, `0xC0000005`, чтение `NULL+0x18` в `ks!DispatchDeviceIoControl+0x15`. Стек: `AppleUSBVHCI+0x259a → ksthunk → ks`, системный worker thread. Падали оба варианта нашего IRP: с `FileObject = NULL` (01:35) и с выставленным `FileObject` (01:48).
+На тестах 2026-10-08 прогон `-Stage 4 -BceIo` дважды привёл к BSOD `0x7E` (`STATUS_ACCESS_VIOLATION`) на инструкции:
+```text
+ks!DispatchDeviceIoControl+0x15:
+mov rdx, qword ptr [rax+18h]    ; rax = CurrentStackLocation->FileObject == NULL -> чтение 0x18
+```
+Стек вызовов в дампе:
+```text
+ks!DispatchDeviceIoControl+0x15
+nt!IofCallDriver+0x4b
+ksthunk!CKernelFilterDevice::DispatchIrp+0xf4
+ksthunk!CKernelFilterDevice::DispatchIrpBridge+0x13
+nt!IofCallDriver+0x4b
+AppleUSBVHCI+0x259a
+```
 
-## 1. Кто строит IRP, на котором происходит сбой
+Попытка исправить крах через проставление `FileObject` в исходящем IRP `T2AudioSendBceMessage` эффекта не дала, потому что **падающий IRP отправляет не наш драйвер**. Его создаёт `AppleUSBVHCI.sys`.
 
-Функция AppleUSBVHCI, начинающаяся в `0x1400023F0`:
+---
 
-| VA | Что происходит |
-|---|---|
-| `0x14000242C`–`0x14000244B` | на стеке собирается GUID `{6994AD04-93EF-11D0-A3CC-00A0C9223196}` = **`KSCATEGORY_AUDIO`** |
-| `0x140002477` | `IoGetDeviceInterfaces(&KSCATEGORY_AUDIO, …)` → список символических ссылок (MULTI_SZ) |
-| `0x1400024A2`–`0x1400024EB` | перебор строк в поисках подстроки `VEN_106B` (по символам `V`,`E`,`N`,`_`,`1`,`0`,`6`,`B`) |
-| `0x14000252C` | `IoGetDeviceObjectPointer(найденная ссылка, 0x80, &FileObject, &DeviceObject)` |
-| `0x140002566` | `ecx = 0x222020` |
-| `0x140002582` | `IoBuildDeviceIoControlRequest(0x222020, DeviceObject, rbx, [rbx+0x2000], NULL, 0, FALSE, &Event, &Iosb)` — `FileObject` в стеке IRP **не** выставляется |
-| `0x140002594` | `IofCallDriver(DeviceObject, Irp)` |
-| **`0x14000259A`** | **адрес возврата из `IofCallDriver` — `AppleUSBVHCI+0x259a` из дампа** |
-| `0x1400025B4` | `KeWaitForSingleObject` при `STATUS_PENDING` |
+## 2. Механизм доставки bridgeOS → Host через AppleUSBVHCI
 
-Вывод: AppleUSBVHCI **сам** доставляет сообщение от bridgeOS (буфер `rbx`, длина хранится по `+0x2000`) аудиоустройству Apple. Получатель — первый интерфейс `KSCATEGORY_AUDIO` с `VEN_106B` в пути. Когда установлен T2AudioMiniport, это наш Wave/Topology-интерфейс. `IoGetDeviceObjectPointer` возвращает верх стека, то есть class upper filter `ksthunk` (Media class).
+Дизассемблирование `AppleUSBVHCI.sys` (версия 6.1.7500.5, SHA256 `0438292090fc...55c1`):
 
-## 2. Как это обрабатывает AppleAudio
+1. **Приём пакета от bridgeOS:** `AppleUSBVHCI` регистрирует прерывание / очередь сообщений BCE. При приёме вызывается обработчик входящих пакетов (`0x140001CF0`).
+2. **Фильтрация типов сообщений (`0x140001D72`–`0x140001D9A`):**
+   * `type == 1` (COMMAND): доставляется в аудиодрайвер через `0x140002274` **только при `msg == 4`** (`UPDATE_TIMESTAMP`), иначе отбрасывается.
+   * `type == 2` (RESPONSE): не уходит в аудиодрайвер, а вызывает `KeSetEvent(0x27448)`, пробуждая синхронный `IOCTL 0x222018`.
+   * `type == 3` (NOTIFICATION): доставляется через `0x140002274` для всех сообщений, **кроме `msg == 100`** (`NOTIFICATION_ALIVE`), которое также будит `KeSetEvent(0x27448)`.
+3. **Поиск аудиодрайвера (`0x140002274`):**
+   * `AppleUSBVHCI` вызывает `IoGetDeviceInterfaces(&KSCATEGORY_AUDIO, ...)` и ищет первый интерфейс, символическая ссылка которого содержит подстроку `"VEN_106B"`.
+   * Открывает целевой `DEVICE_OBJECT` через `IoGetDeviceObjectPointer`.
+4. **Формирование IRP (`0x140002540`–`0x140002594`):**
+   * Вызывает `IoBuildDeviceIoControlRequest(IoControlCode = 0x222020, TargetDeviceObject, InputBuffer = msg, ...)`.
+   * **`IoBuildDeviceIoControlRequest` оставляет `FileObject == NULL`.**
+   * Отправляет IRP вызовом `IofCallDriver(TargetDeviceObject, Irp)`.
+   * Адрес возврата — `AppleUSBVHCI+0x259a`.
 
-`AppleAudio.sys`, обработчик по адресу `0x140001280`. Его адрес кладётся в `DriverObject->MajorFunction[…]` в `DriverEntry` (`0x14001E323`: `lea rax, 0x140001280`).
+---
 
-| VA | Что происходит |
-|---|---|
-| `0x14000128F` | `stack = Irp->Tail.Overlay.CurrentStackLocation` |
-| `0x1400012AD` | `if (stack->Parameters.DeviceIoControl.IoControlCode != 0x222020)` → `0x1400012A0`: вызов `[0x14000E228]` (передача в PortCls) |
-| `0x1400012B6` | `buf = Irp->AssociatedIrp.SystemBuffer` |
-| `0x1400012BF` | `msg = *(u32*)(buf + 0x0D)` — поле `base.msg` (header 13 байт) |
-| `0x1400012C2` | `msg == 4` (**`UPDATE_TIMESTAMP`**) → `0x14000435C(ctx, *(u64*)(buf+5) /*device_id*/, buf)` |
-| `0x1400012C7` | `msg == 13` (**`PROPERTY_CHANGED`**) → сравнение `*(u32*)(buf+0x21)` с `'outp'` / `'inpt'`, переключение флагов jack, сигнал событию |
-| `0x140001349`–`0x14000134F` | `Irp->IoStatus.Status = 0`, `IofCompleteRequest` |
+## 3. Почему штатный `AppleAudio.sys` не падает
 
-`0x14000435C` ищет устройство по `device_id` (шаг контекста `0xE970`), увеличивает счётчик `+0xE954` и сохраняет `*(u64*)(buf+0x15)` (первое поле payload — timestamp) в `+0xE958`. **Ответ T2 не отправляется.** На Linux kaiT2en отвечает `UPDATE_TIMESTAMP_RESPONSE` (34), на Windows этим, видимо, занимается сам AppleUSBVHCI (см. открытые вопросы).
+В `AppleAudio.sys` (RVA `0x1280`, `IRP_MJ_DEVICE_CONTROL`):
+```assembly
+0x140001280:
+...
+cmp eax, 0x222020
+je  handle_vhci_message
+...
+; handle_vhci_message (0x1400012BF):
+; msg == 4  -> 0x14000435C (сохранение UPDATE_TIMESTAMP)
+; msg == 13 -> 0x1400044B8 (PROPERTY_CHANGED: jack status)
+; завершает IRP со STATUS_SUCCESS без передачи в PortCls / KS
+```
+Штатный драйвер **перехватывает `0x222020` в собственной точке входа `IRP_MJ_DEVICE_CONTROL`** и завершает его самостоятельно, не пропуская в `ks.sys`.
 
-Именно поэтому AppleAudio не падает: его обработчик стоит ниже `ksthunk`, который пропускает не-KS IOCTL вниз, и перехватывает `0x222020` до PortCls/KS.
+---
 
-## 3. Почему падал T2AudioMiniport
+## 4. Почему падал `T2AudioPort`
 
-`IRP_MJ_DEVICE_CONTROL` у нас целиком принадлежал PortCls (`PcDispatchIrp` → `KsDispatchIrp`). KS ищет create item по `FileObject->FsContext`, а `FileObject` у этого IRP `NULL` → чтение `NULL+0x18` → `0x7E`.
+`T2AudioPort` инициализировался через PortCls (`PcInitializeAdapterDriver`). Все IRP, включая `IRP_MJ_DEVICE_CONTROL`, уходили в `PcDispatchIrp` -> `ks!DispatchDeviceIoControl`.  
+Поскольку `AppleUSBVHCI` сформировал IRP через `IoBuildDeviceIoControlRequest` с `FileObject == NULL`, `ks.sys` безусловно разыменовывал `NULL + 0x18`, вызывая BSOD `0x7E`.
 
-Первое такое сообщение приходит сразу после `START_IO` (`UPDATE_TIMESTAMP`; kaiT2en отмечает, что оно может прийти даже раньше ответа на `START_IO`). Это объясняет всё сразу:
+---
 
-* падение возникает только на `-BceIo` (раньше `START_IO` T2 ничего не присылал);
-* стек начинается в worker thread AppleUSBVHCI, а не в нашем потоке;
-* изменение `FileObject` в **нашем** IRP `0x222018` ничего не меняло.
+## 5. Исправление и открытые вопросы
 
-## 4. Исправление в коде
-
-`src/Driver.c`: `T2AudioDeviceControl` назначен в `MajorFunction[IRP_MJ_DEVICE_CONTROL]`. Для `0x222020` он вызывает `T2AudioHandleVhciMessage` (`src/BceTransport.c`) и завершает IRP со `STATUS_SUCCESS`. Всё остальное уходит в `PcDispatchIrp`. Обработчик разбирает `UPDATE_TIMESTAMP` (timestamp, update seed, sampleTime → кадры) и сохраняет последние значения для speaker в контексте; прочие сообщения считает и логирует. Обратно ничего не отправляет и не блокируется. Разборщики — `T2AudioBceParseIncoming`, `T2AudioBceParseUpdateTimestamp`, `T2AudioBceDecodeSampleTime` в `src/BceProtocolLogic.h`, покрыты тестами.
-
-## 5. Открытые вопросы (для проверки)
-
-1. **Поле `tag`.** AppleAudio кладёт в первые 4 байта порядковый номер 1..127 (`*tag = *tag % 0x7F + 1` в `FUN_140004a4c`), kaiT2en — `'S' + 3 цифры`, а мы — константу `"Audt"`. Как AppleUSBVHCI сопоставляет ответы с запросами? Не отправляет ли он ответ с непризнанным тегом тоже через `0x222020`?
-2. **Ответ на `UPDATE_TIMESTAMP`.** Отвечает ли сам AppleUSBVHCI `UPDATE_TIMESTAMP_RESPONSE`, или ответ не нужен вовсе? Если T2 ждёт ответа, а его нет, он может перестать слать отметки или сбросить I/O.
-3. **Формат `PROPERTY_CHANGED`.** Что лежит по `+0x21` и рядом (scope / selector / element), какие события он сигналит.
-4. **Выбор получателя.** Что будет, если в системе есть и наш, и AppleAudio интерфейс (`IoGetDeviceInterfaces` возвращает их в своём порядке)? Ищет ли VHCI ещё что-то помимо `VEN_106B`?
-5. **Другие сообщения.** Что ещё приходит через `0x222020`: `NOTIFICATION_ALIVE`, `NOTIFICATION_BOOT`?
+1. **Перехват `0x222020`:**
+   В `DriverEntry` (`src/Driver.c`) назначен хук `DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = T2AudioDeviceControl`.
+   Для кода `0x222020` вызывается `T2AudioHandleVhciMessage` (`src/BceTransport.c`), IRP завершается со `STATUS_SUCCESS`.
+   Разрешён только для IRP режима ядра (`Irp->RequestorMode == KernelMode`).
+2. **Статус:** Анализ причин подтверждён декомпиляцией и минидампами ядра. Работоспособность обработчика на реальном железе предстоит подтвердить на этапах D/E (после согласования).

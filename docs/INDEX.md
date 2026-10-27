@@ -22,6 +22,9 @@
 
 | Документ | Описание |
 | :--- | :--- |
+| **[RE_minidump.md](analysis/RE_minidump.md)** | **Задача R1 (ДОКАЗАНО)**: Подтверждение причины BSOD по минидампам ядра (`ks!DispatchDeviceIoControl+0x15`, `FileObject == NULL`, вызов из `AppleUSBVHCI+0x259a`). |
+| **[RE_tag_semantics.md](analysis/RE_tag_semantics.md)** | **Задача R2 (ДОКАЗАНО)**: Семантика поля `tag` (`1..127` в `AppleAudio.sys`), механизм синхронного ожидания `0x222018` в `AppleUSBVHCI.sys` без фильтрации по тегу. |
+| **[RE_update_timestamp.md](analysis/RE_update_timestamp.md)** | **Задача R3 (ДОКАЗАНО)**: Доказательство отправки `UPDATE_TIMESTAMP_RESPONSE (34)` самим `AppleUSBVHCI.sys` (`0x140001DE8`); аудиодрайвер не должен отправлять ответ. |
 | [AppleAudio_Reverse_Engineering_Report.md](analysis/AppleAudio_Reverse_Engineering_Report.md) | **Главный отчет REA + Ghidra 12.1.4**: Декомпиляция `FUN_140004a4c` (шлюз `AppleUSBVHCI`), старт/стоп потока, распределение памяти `BufferStruct`, разгадка BSOD 0x7E. |
 | [AppleAudio_BufferRegistration_Report.md](analysis/AppleAudio_BufferRegistration_Report.md) | Детальный анализ механизма регистрации буферов и колец DMA в `AppleAudio.sys`. |
 | [AppleAudio_Message_Path.md](analysis/AppleAudio_Message_Path.md) | Трасса прохождения сообщений от верхнего уровня до шины PCI. |
