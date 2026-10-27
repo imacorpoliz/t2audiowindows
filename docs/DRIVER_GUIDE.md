@@ -30,7 +30,7 @@
 | Сборка | В CI (`.github/workflows/build.yml`): WDK, Release x64 + хост-тесты MSVC/gcc/clang. |
 | Хост-тесты | `tests/BceProtocolLogicTest.c`, `tests/T2AudioBufferLogicTest.c` — проходят. |
 | Стадии 1–3 на железе (RAM, BAR, BCE discovery) | Проверялись на MacBookPro16,1 на более ранних сборках: BAR, `BufferStruct` и устройство `Speaker` `0x39` находятся. |
-| `START_IO` на железе | Падал с BSOD `0x7E`. Причина найдена статически (IOCTL `0x222020` от AppleUSBVHCI), обработчик добавлен; **на железе не проверено**. Агент по-прежнему отказывается запускать `-BceIo`. |
+| `START_IO` на железе | Падал с BSOD `0x7E`. Причина найдена статически (IOCTL `0x222020` от AppleUSBVHCI), обработчик добавлен; **на железе не проверено**. Агент принимает `-BceIo` только вместе с `-Mmio` и флагом владельца `-OwnerApprovedBceIo`. |
 | Запись PCM в BAR0 (стадия 5) | В текущем виде на железе **не проверялась**. |
 | Сон / пробуждение | Не реализовано. **Не уводите Mac в сон во время сессии стадии ≥ 4.** |
 | Микрофон, наушники, громкость | Не реализовано (только встроенные динамики). |
@@ -394,6 +394,7 @@ LastCopiedFrame = playFrame
 | `HardwareLock` (на устройство) | spin lock | `HardwareReady` + маппинги BAR0 во время записи | копирование, обнуление кольца, `T2AudioUnmapResources` |
 
 | `ClockLock` (на устройство) | spin lock | якорь часов T2 | обработчик `0x222020` (PASSIVE), DPC копирования |
+| `HardwareIoActive` (на устройство) | interlocked LONG | «START_IO в силе» | выход потока из RUN и колбэки питания (`src/Power.c`); тот, кто сбросил 1 → 0, шлёт STOP_IO |
 
 * Порядок захвата: **`StreamLock` → `HardwareLock` → `ClockLock`**. Обработчик VHCI берёт только `ClockLock`. Обратного порядка нигде нет.
 * Все BCE-отправки — только на `PASSIVE_LEVEL` (проверяется явно).
@@ -513,7 +514,7 @@ gcc -Wall -Wextra -o /tmp/buf tests/T2AudioBufferLogicTest.c && /tmp/buf
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover                               # после сбоя/перезагрузки
 ```
 
-Агент создаёт сессию, включает устройство, пишет лог ядра (DbgView) в `docs/logs/capture_*`, проверяет WASAPI-рендер (`tools/Test-WasapiRender.ps1`). В блоке `finally` он **всегда** выключает устройство и удаляет сессию. Отказывается работать, если хэш установленного `.sys` не совпадает с `-ExpectedSysHash`. `-BceIo` сейчас заблокирован (§12).
+Агент создаёт сессию, включает устройство, пишет лог ядра (DbgView) в `docs/logs/capture_*`, проверяет WASAPI-рендер (`tools/Test-WasapiRender.ps1`). В блоке `finally` он **всегда** выключает устройство и удаляет сессию. Отказывается работать, если хэш установленного `.sys` не совпадает с `-ExpectedSysHash`. `-BceIo` принимается только вместе с `-Mmio` (кольцо обнуляется перед START_IO, иначе T2 сыграл бы его остатки) и `-OwnerApprovedBceIo` (разрешение владельца). `-RawChannels` включает 6 сырых каналов.
 
 Дополнительно: `tools/Capture-T2AudioLog.ps1` (захват лога), `tools/Test-WasapiTone.ps1` (тестовый тон), `tools/Set-DefaultAudioDevice.ps1` (endpoint по умолчанию), `tools/PostInstall-Validate.ps1`.
 

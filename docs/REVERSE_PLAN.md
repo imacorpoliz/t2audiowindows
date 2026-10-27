@@ -29,7 +29,7 @@
 
 ## 2. Задачи (по приоритету)
 
-> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R8, R9, msg 28 — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). R6 (часы) и R7 (раскладка динамиков) — [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md), уже в коде (стерео-endpoint, ФВЧ твитеров, коррекция по `UPDATE_TIMESTAMP`). Осталось (не блокирует первый звук): нужен ли `SET_PROPERTY 'nsrt'` перед START_IO; свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`; номера каналов в цикле копирования AppleAudio (подтвердить раскладку статически); `IAdapterPowerManagement` в нашем драйвере.
+> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R8, R9, msg 28 — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). R6 (часы) и R7 (раскладка динамиков) — [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md), уже в коде (стерео-endpoint, ФВЧ твитеров, коррекция по `UPDATE_TIMESTAMP`). Осталось (не блокирует первый звук): нужен ли `SET_PROPERTY 'nsrt'` перед START_IO; свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`; номера каналов в цикле копирования AppleAudio (подтвердить раскладку статически). `IAdapterPowerManagement` уже в коде (`src/Power.c`).
 
 ### R1. Подтвердить причину BSOD по минидампам — **первым делом**
 
@@ -120,12 +120,12 @@ AppleAudio сохраняет timestamp в контекст устройства
 
 ## 3. После реверса: проверка на железе (только с одобрения владельца)
 
-Исправление R1 уже в коде (`T2AudioDeviceControl` в `src/Driver.c`). Агент `tools/T2Audio-TestAgent.ps1` по-прежнему **отказывается** от `-BceIo`. Снимать этот запрет можно только когда выполнено всё:
+Исправление R1 уже в коде (`T2AudioDeviceControl` в `src/Driver.c`). Агент `tools/T2Audio-TestAgent.ps1` принимает `-BceIo` только вместе с `-Mmio` и флагом владельца `-OwnerApprovedBceIo`. Запускать можно только когда выполнено всё:
 
 1. R1 подтверждает гипотезу (или дамп хотя бы не противоречит ей).
 2. R2 и R3 не выявили дополнительного обязательного шага (смена тега, ответ на timestamp). Если выявили — он реализован и покрыт тестами.
 3. Стадии 1–3 и стадия 5 без `-BceIo` прошли по `GEMINI.md`.
-4. **Владелец проекта явно разрешил** прогон `-Stage 4 -BceIo`.
+4. **Владелец проекта явно разрешил** прогон `-Mmio -BceIo -OwnerApprovedBceIo` (`-Mmio` обязателен: без него кольцо не обнуляется, и после START_IO T2 сыграл бы остатки буфера).
 
 Прогон — **беззвучный**: Mute и громкость 0, без тона и плееров. Для проверки причины BSOD звук не нужен — достаточно, чтобы `START_IO` прошёл и пришли отметки времени.
 
@@ -134,6 +134,9 @@ AppleAudio сохраняет timestamp в контекст устройства
 ```
 T2Audio: START_IO sent to device 0x39
 T2Audio: VHCI UPDATE_TIMESTAMP #1 dev=0x39 t2=… seed=… sample=…
+T2Audio: T2 clock: re-aimed lead by … frames (#1, …)   # допустимо несколько раз в начале
 ```
+
+Ожидается: метки примерно раз в 347 мс (один круг кольца, 16 640 кадров), `sample` растёт на один и тот же шаг (запиши его — это `timestampPeriod`).
 
 и **никакого** BSOD. После прогона: `-Mode Recover`, проверка AppleAudio, отчёт в `docs/logs/EXCERPT_*.md` и `CURRENT_STATE.md`.

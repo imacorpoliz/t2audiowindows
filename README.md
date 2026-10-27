@@ -49,7 +49,7 @@
 | Write PCM into BAR0 | `EnableMmioCopy=1` (stage 5) **and** a supported `'pft '` format read from the T2 | off |
 | Send `START_IO`/`STOP_IO` | `EnableBceIo=1` (stage 4+) | off |
 
-Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the session (`-Stage N`, `-Mmio`, `-BceIo`, `-RawChannels`). The agent still refuses `-BceIo` until the `0x222020` fix has been confirmed on hardware.
+Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the session (`-Stage N`, `-Mmio`, `-BceIo`, `-RawChannels`). `-BceIo` (START_IO) is accepted only together with `-Mmio` (so the ring is zeroed first) and `-OwnerApprovedBceIo`, because the `0x222020` fix has not been confirmed on hardware yet.
 
 Other options: `Parameters\TweeterMode` (1 = high-passed tweeters, default; 0 = woofers only) and `TestSession\RawSpeakerChannels=1` (raw 6-channel endpoint for per-speaker checks — **no tweeter protection**).
 
@@ -74,7 +74,7 @@ Other options: `Parameters\TweeterMode` (1 = high-passed tweeters, default; 0 = 
 | Speaker DSP (EQ, crossovers, XTC) in PipeWire, `dsp/profiles/16_1` | partial | The channel layout and the need to high-pass the tweeters come from that profile; only a 4th-order tweeter high-pass is applied. Equalizer APO can run on the stereo endpoint. |
 | Zeroing a stalled output ring (writer stopped across two timestamps) | ❌ | Not needed while the copy runs from QPC; revisit if stale loops are heard. |
 | Exposing the bridge ring itself as the PCM buffer | ❌ | PortCls refuses BAR MDLs for WaveRT (0x8007001F), hence the RAM mirror. |
-| Sleep: STOP_IO before D3, re-init after resume | ❌ | AppleAudio stops I/O in `QueryPowerChangeState(D3)` and re-registers only input buffers on D0 ([R8](docs/analysis/RE_appleaudio_protocol.md)); there is no sleep marker on Windows. This driver has no power interface yet — do not sleep the machine during a stage-4+ session. |
+| Sleep: STOP_IO before D3, re-init after resume | ✅ new | As AppleAudio ([R8](docs/analysis/RE_appleaudio_protocol.md)): STOP_IO in `QueryPowerChangeState(D3)`/`PowerChangeState(D1–D3)`, no BAR writes while powered down (`src/Power.c`). There is no sleep marker on Windows. Untested — do not sleep the machine during a stage-4+ session. |
 | Jack detection, mic / codec input, volume properties | ❌ | Speaker output only. |
 
 ---
@@ -128,7 +128,7 @@ The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `s
 1. ~~Root cause of the `START_IO` bugcheck~~ — found statically (`0x222020`), handler added; confirm on hardware.
 2. ~~Receive path for T2 notifications / hardware clock~~ — done (`UPDATE_TIMESTAMP`), confirm on hardware.
 3. First sound: stage 5 + `START_IO` at low volume; confirm the speaker order (`-RawChannels`).
-4. Power management (`IAdapterPowerManagement`: STOP_IO before D3).
+4. ~~Power management~~ — `IAdapterPowerManagement` (STOP_IO before D3, no BAR writes in D1–D3) is in, untested.
 5. Optional: closer speaker DSP (EQ/crossover per kaiT2en `dsp/profiles/16_1`), hardware volume (msg 28 controls), jack/headphone output, microphone input.
 
 ## Attributions

@@ -5,6 +5,14 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): power management, kernel-only 0x222020, owner-gated START_IO, stale timestamps (not hardware-tested)
+
+- **`src/Power.c`:** static `IAdapterPowerManagement` (registered in `T2AudioStartDevice`): STOP_IO in `QueryPowerChangeState(D3)` and `PowerChangeState(D1-D3)` as AppleAudio does (R8), no BAR writes while powered down (`PoweredDown`), no START_IO on D0. `HardwareIoActive` (interlocked) keeps it to one STOP_IO per START_IO between the stream and the power path.
+- **`T2AudioDeviceControl`** handles `0x222020` only for kernel-mode IRPs (AppleUSBVHCI's `IoBuildDeviceIoControlRequest`); a user-mode process opening our KS filter could otherwise inject fake `UPDATE_TIMESTAMP`s.
+- **Stale timestamps:** anchors whose host time precedes the stream's START_IO are ignored (kaiT2en `6128f86`: after a pause the previous run's next timestamp can arrive during START_IO).
+- Raw-mode intersection falls back to stereo for a client range below 6 channels.
+- **Test agent:** `-BceIo` is accepted only with `-Mmio` (ring zeroed first; otherwise the T2 would play stale ring contents) and `-OwnerApprovedBceIo`. `GEMINI.md` rewritten: stages B (1-3), C (4, 5 without START_IO), D (silent START_IO, owner only), E (first sound, owner only).
+
 ### 2026-10-28 (later): stereo endpoint over six speakers, tweeter high-pass, T2 clock; power RE (not hardware-tested)
 
 - **R7, speaker layout** (`docs/analysis/RE_speaker_layout_and_clock.md`, from kaiT2en's MacBookPro16,1 DSP graph): ring channels 0/1 = left woofer pair, 2 = left tweeter, 3/4 = right woofer pair, 5 = right tweeter. Apple high-passes the tweeters hard (-90 dB at 500 Hz). The old 5.1 endpoint would have played Windows stereo on the two left woofers only (Windows does not upmix).
