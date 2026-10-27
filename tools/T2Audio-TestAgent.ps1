@@ -470,7 +470,11 @@ function Invoke-Test {
             try {
                 $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ProbeScript -DeviceId $endpoint 2>&1 | Out-String
                 $out | Out-File (Join-Path $captureDir 'wasapi.txt') -Encoding utf8
-                Write-Ok 'WASAPI probe complete'
+                if ($out -match 'MUTE NOT CONFIRMED') {
+                    Write-Fail 'T2 endpoint could not be muted; the probe did not start a stream.'
+                } else {
+                    Write-Ok 'WASAPI probe complete (T2 endpoint muted, volume 0)'
+                }
             } catch {
                 Write-Warn "Probe error: $_"
             }

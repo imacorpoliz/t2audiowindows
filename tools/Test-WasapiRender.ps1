@@ -6,9 +6,18 @@
 #
 # All COM work is done inside C# so the RCW-to-interface casts happen in the
 # CLR (PowerShell cannot cast a raw COM object to a [ComImport] interface).
+#
+# Silence (GEMINI.md rule 0): before anything else the probe MUTES the T2
+# endpoint itself and sets its volume to 0 (IAudioEndpointVolume). Windows
+# keeps volume and mute per endpoint, and a freshly created T2 endpoint can
+# become the default device at full volume, so muting "the default device"
+# is not enough. If mute cannot be confirmed the probe does not start a
+# stream. Windows persists the setting, so the endpoint stays muted for later
+# sessions too. -MuteOnly mutes and exits.
 
 param(
-    [string]$DeviceId = '{0.0.0.00000000}.{aae9601c-668b-4949-b91d-c8a60566f8b5}'
+    [string]$DeviceId = '{0.0.0.00000000}.{aae9601c-668b-4949-b91d-c8a60566f8b5}',
+    [switch]$MuteOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,10 +80,47 @@ public interface IAudioClient {
     [PreserveSig] int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
 }
 
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume {
+    [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int GetChannelCount(out uint count);
+    [PreserveSig] int SetMasterVolumeLevel(float levelDb, ref Guid context);
+    [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid context);
+    [PreserveSig] int GetMasterVolumeLevel(out float levelDb);
+    [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+    [PreserveSig] int SetChannelVolumeLevel(uint channel, float levelDb, ref Guid context);
+    [PreserveSig] int SetChannelVolumeLevelScalar(uint channel, float level, ref Guid context);
+    [PreserveSig] int GetChannelVolumeLevel(uint channel, out float levelDb);
+    [PreserveSig] int GetChannelVolumeLevelScalar(uint channel, out float level);
+    [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid context);
+    [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
+
 public static class Probe {
     static string H(int hr) { return "0x" + ((uint)hr).ToString("X8"); }
 
-    public static string Run(string targetId) {
+    // Mute the endpoint and set its volume to 0; true only if both read back.
+    static bool Silence(IMMDevice device, StringBuilder sb) {
+        Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        Guid ctx = Guid.Empty;
+        object o;
+        int hr = device.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o);
+        sb.AppendLine("Activate(IAudioEndpointVolume) hr=" + H(hr));
+        if (hr != 0 || o == null) return false;
+        var vol = (IAudioEndpointVolume)o;
+        hr = vol.SetMute(true, ref ctx);
+        sb.AppendLine("SetMute(true) hr=" + H(hr));
+        hr = vol.SetMasterVolumeLevelScalar(0.0f, ref ctx);
+        sb.AppendLine("SetMasterVolumeLevelScalar(0) hr=" + H(hr));
+        bool muted; float level;
+        int mhr = vol.GetMute(out muted);
+        int lhr = vol.GetMasterVolumeLevelScalar(out level);
+        sb.AppendLine("endpoint mute=" + muted + " volume=" + level + " (hr " + H(mhr) + "/" + H(lhr) + ")");
+        return mhr == 0 && lhr == 0 && muted && level == 0.0f;
+    }
+
+    public static string Run(string targetId, bool muteOnly) {
         var sb = new StringBuilder();
         var enumerator = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(MMDeviceEnumerator));
 
@@ -93,6 +139,13 @@ public static class Probe {
         }
         if (device == null) { sb.AppendLine("TARGET NOT FOUND: " + targetId); return sb.ToString(); }
         sb.AppendLine("target matched.");
+
+        if (!Silence(device, sb)) {
+            sb.AppendLine("MUTE NOT CONFIRMED - refusing to start a stream on this endpoint.");
+            return sb.ToString();
+        }
+        sb.AppendLine("T2 endpoint muted, volume 0.");
+        if (muteOnly) return sb.ToString();
 
         // Also report the current default endpoint (all roles).
         foreach (ERole role in new[] { ERole.eConsole, ERole.eMultimedia, ERole.eCommunications }) {
@@ -151,4 +204,4 @@ if (-not ('T2Wasapi.Probe' -as [type])) {
     Add-Type -TypeDefinition $code
 }
 
-[T2Wasapi.Probe]::Run($DeviceId)
+[T2Wasapi.Probe]::Run($DeviceId, [bool]$MuteOnly)
