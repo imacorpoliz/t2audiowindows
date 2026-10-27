@@ -1,8 +1,9 @@
 #include "T2AudioMiniport.h"
 #include "BceProtocolLogic.h"
 
-// T2 BCE Protocol constants (from kaiT2en modules/t2bce_audio/protocol.h)
-#define T2AUDIO_BCE_TAG "Audt"
+// T2 BCE Protocol constants (from kaiT2en modules/t2bce_audio/protocol.h).
+// The 4-byte tag is not a constant: T2AudioSendBceMessage stamps a request
+// counter 1..127 into every message, as AppleAudio.sys does.
 #define T2AUDIO_MSG_TYPE_COMMAND 1
 #define T2AUDIO_MSG_TYPE_RESPONSE 2
 
@@ -65,7 +66,16 @@ static BCE_TRANSPORT_CONTEXT g_BceTransport = { NULL, NULL };
 // Scope: this bounds only the wait for completion. It cannot bound a lower
 // driver that blocks *inside* its dispatch routine (i.e. inside IoCallDriver);
 // that is a lower-driver defect we have no way to interrupt from here.
-#define T2AUDIO_BCE_SEND_TIMEOUT_MS  2000
+//
+// AppleUSBVHCI's own 0x222018 handler (0x140002128) waits up to 5 s for the
+// bridgeOS reply and then completes the IRP itself. Our bound is longer, so
+// a slow reply is resolved by VHCI (completed IRP) instead of us abandoning
+// the IRP and poisoning the transport while VHCI is still waiting.
+#define T2AUDIO_BCE_SEND_TIMEOUT_MS  6000
+
+// Largest message this driver sends (GET_PROPERTY = 49 bytes); the tagged copy
+// lives on the stack.
+#define T2AUDIO_BCE_MAX_MESSAGE_SIZE 128u
 
 // Upper bound on how long any caller will wait to take the transport lock. A
 // send holds the lock for up to T2AUDIO_BCE_SEND_TIMEOUT_MS, so this is set a
@@ -102,6 +112,9 @@ static BOOLEAN g_BceLockReady = FALSE;
 // Once poisoned the transport accepts no further sends and is never closed, so
 // the abandoned IRP's target device stays alive for as long as the IRP exists.
 static volatile LONG g_BceTransportPoisoned = 0;
+
+// Request tag counter (1..127), protected by g_BceLock.
+static ULONG g_BceTagCounter = 0;
 
 // Take the transport lock, waiting at most T2AUDIO_BCE_LOCK_TIMEOUT_MS. Returns
 // STATUS_SUCCESS on success or STATUS_TIMEOUT if the lock could not be taken.
@@ -228,6 +241,8 @@ T2AudioSendBceMessage(
     PIRP irp;
     NTSTATUS status;
     LARGE_INTEGER timeout;
+    UCHAR tagged[T2AUDIO_BCE_MAX_MESSAGE_SIZE];
+    ULONG tag;
 
     PAGED_CODE();
 
@@ -245,6 +260,10 @@ T2AudioSendBceMessage(
     }
 
     if (ReplyBufferSize != 0 && ReplyBuffer == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (Message == NULL || MessageSize < T2AUDIO_BCE_HEADER_SIZE ||
+        MessageSize > sizeof(tagged)) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -291,10 +310,17 @@ T2AudioSendBceMessage(
 
     KeInitializeEvent(&context->Event, NotificationEvent, FALSE);
 
+    // Stamp the request tag into a copy of the message. METHOD_BUFFERED: the
+    // I/O manager copies the input into the IRP's system buffer while building
+    // it, so the stack copy does not need to outlive this call.
+    RtlCopyMemory(tagged, Message, MessageSize);
+    tag = T2AudioBceNextTag(&g_BceTagCounter);
+    T2AudioBceWriteU32(tagged, tag);
+
     irp = IoBuildDeviceIoControlRequest(
         IOCTL_APPLE_BCE_SEND_MESSAGE,
         deviceObject,
-        (PVOID)Message,
+        tagged,
         MessageSize,
         context->ReplyBuffer,
         ReplyBufferSize,
@@ -321,9 +347,9 @@ T2AudioSendBceMessage(
     // or never saw a completion - i.e. a lower-driver fault vs. our own
     // post-processing.
     if (MessageSize >= T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
-        KdPrint(("T2Audio: BCE send ioctl=0x%08X dev=%p in=%u tag=%.4s type=%u id=0x%I64X msg=%u\n",
+        KdPrint(("T2Audio: BCE send ioctl=0x%08X dev=%p in=%u tag=%u type=%u id=0x%I64X msg=%u\n",
                  (ULONG)IOCTL_APPLE_BCE_SEND_MESSAGE, deviceObject, MessageSize,
-                 (const char *)Message, (ULONG)Message[T2AUDIO_BCE_TYPE_OFFSET],
+                 tag, (ULONG)Message[T2AUDIO_BCE_TYPE_OFFSET],
                  T2AudioBceReadU64(Message + 5),
                  T2AudioBceReadU32(Message + T2AUDIO_BCE_HEADER_SIZE)));
     }
@@ -386,6 +412,21 @@ T2AudioSendBceMessage(
         if (ReplySize != NULL) {
             *ReplySize = information;
         }
+        // AppleUSBVHCI hands back whatever woke its reply event - normally
+        // the RESPONSE, but a NOTIFICATION_ALIVE arriving meanwhile wakes it
+        // too. Only a reply carrying our tag answers this request.
+        if (ReplyBufferSize != 0 &&
+            !T2AudioBceReplyTagMatches(context->ReplyBuffer, information, tag)) {
+            KdPrint(("T2Audio: BCE reply tag mismatch: sent %u, got %u (size=%u type=%u msg=%u)\n",
+                     tag,
+                     (information >= 4) ? T2AudioBceReadU32(context->ReplyBuffer) : 0u,
+                     information,
+                     (information > T2AUDIO_BCE_TYPE_OFFSET)
+                         ? (ULONG)context->ReplyBuffer[T2AUDIO_BCE_TYPE_OFFSET] : 0u,
+                     (information >= T2AUDIO_BCE_HEADER_SIZE + 4)
+                         ? T2AudioBceReadU32(context->ReplyBuffer + T2AUDIO_BCE_HEADER_SIZE) : 0u));
+            status = STATUS_DEVICE_PROTOCOL_ERROR;
+        }
     }
 
     if (context->ReplyBuffer != NULL) {
@@ -432,7 +473,7 @@ T2AudioGetProperty(
     base = (T2AUDIO_MSG_BASE *)(header + 1);
     payload = (UCHAR *)(base + 1);
 
-    RtlCopyMemory(header->Tag, T2AUDIO_BCE_TAG, 4);
+    // header->Tag is stamped by T2AudioSendBceMessage.
     header->Type = T2AUDIO_MSG_TYPE_COMMAND;
     header->DeviceId = DeviceId;
     base->Message = T2AUDIO_MSG_GET_PROPERTY;
@@ -547,7 +588,7 @@ T2AudioGetOutputStreamList(
     RtlZeroMemory(requestBuffer, sizeof(requestBuffer));
     header = (T2AUDIO_MSG_HEADER *)requestBuffer;
     base = (T2AUDIO_MSG_BASE *)(header + 1);
-    RtlCopyMemory(header->Tag, T2AUDIO_BCE_TAG, 4);
+    // header->Tag is stamped by T2AudioSendBceMessage.
     header->Type = T2AUDIO_MSG_TYPE_COMMAND;
     header->DeviceId = DeviceId;
     base->Message = T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST;
@@ -674,7 +715,7 @@ T2AudioGetDeviceList(
     base = (T2AUDIO_MSG_BASE *)(header + 1);
 
     // Build GET_DEVICE_LIST command
-    RtlCopyMemory(header->Tag, T2AUDIO_BCE_TAG, 4);
+    // header->Tag is stamped by T2AudioSendBceMessage.
     header->Type = T2AUDIO_MSG_TYPE_COMMAND;
     header->DeviceId = 0;
     base->Message = T2AUDIO_MSG_GET_DEVICE_LIST;
@@ -730,7 +771,7 @@ T2AudioSetRemoteAccess(_In_ BOOLEAN Enable)
     base = (T2AUDIO_MSG_BASE *)(header + 1);
     payload = (UCHAR *)(base + 1);
 
-    RtlCopyMemory(header->Tag, T2AUDIO_BCE_TAG, 4);
+    // header->Tag is stamped by T2AudioSendBceMessage.
     header->Type = T2AUDIO_MSG_TYPE_COMMAND;
     header->DeviceId = 0;
     base->Message = T2AUDIO_MSG_SET_REMOTE_ACCESS;

@@ -265,9 +265,9 @@ static void test_parse_command_response(void)
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
-    b[0] = 'X';
-    check("bad tag -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+    T2AudioBceWriteU32(b, 42);
+    check("tag is not checked here (transport checks it)",
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
     check("NULL reply -> fail",
           !T2AudioBceParseCommandResponse(NULL, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
@@ -386,6 +386,39 @@ static void test_incoming(void)
           !T2AudioBceDecodeSampleTime(0xBFF0000000000000ull, &frames));
 }
 
+static void test_tags(void)
+{
+    unsigned long c = 0;
+    unsigned long t;
+    unsigned char r[8];
+    int i, ok = 1;
+
+    printf("T2AudioBceNextTag / ReplyTagMatches\n");
+
+    check("first tag from 0 is 1", T2AudioBceNextTag(&c) == 1);
+    check("then 2", T2AudioBceNextTag(&c) == 2);
+    c = 126;
+    check("126 -> 127", T2AudioBceNextTag(&c) == 127);
+    check("127 wraps to 1 (never 0)", T2AudioBceNextTag(&c) == 1);
+    c = 0x74647541ul; // "Audt" left over from an old build
+    t = T2AudioBceNextTag(&c);
+    check("any stale counter lands in 1..127", t >= 1 && t <= 127);
+    for (i = 0, c = 0; i < 1000; i++) {
+        t = T2AudioBceNextTag(&c);
+        if (t < 1 || t > 127) {
+            ok = 0;
+        }
+    }
+    check("1000 tags all in 1..127", ok);
+    check("NULL counter -> 1", T2AudioBceNextTag(0) == 1);
+
+    T2AudioBceWriteU32(r, 17);
+    check("reply tag matches", T2AudioBceReplyTagMatches(r, sizeof(r), 17));
+    check("reply tag differs", !T2AudioBceReplyTagMatches(r, sizeof(r), 18));
+    check("reply too short", !T2AudioBceReplyTagMatches(r, 3, 17));
+    check("NULL reply", !T2AudioBceReplyTagMatches(0, 8, 17));
+}
+
 int main(void)
 {
     test_scalar_roundtrip();
@@ -397,6 +430,7 @@ int main(void)
     test_parse_command_response();
     test_physical_format();
     test_incoming();
+    test_tags();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

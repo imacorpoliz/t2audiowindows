@@ -256,10 +256,39 @@ T2AudioBceParsePropertyResponse(const unsigned char *Reply,
     return 1;
 }
 
+// Request tag (first 4 bytes of every host -> T2 message). AppleAudio.sys
+// stamps a rolling counter 1..127 (FUN_140004a4c: tag = tag % 0x7F + 1);
+// bridgeOS echoes it in the reply (kaiT2en matches replies by tag), while
+// AppleUSBVHCI itself does not look at it. Advances *Counter and returns the
+// new tag, always in 1..127.
+static __inline unsigned long
+T2AudioBceNextTag(unsigned long *Counter)
+{
+    if (Counter == 0) {
+        return 1;
+    }
+    *Counter = (*Counter % 0x7Fu) + 1u;
+    return *Counter;
+}
+
+// Returns 1 if the reply carries the tag of the request it should answer.
+// AppleUSBVHCI completes a pending 0x222018 with whatever wakes its single
+// reply event - a RESPONSE, but also a NOTIFICATION_ALIVE (0x140001D85) - so
+// a reply with a different tag belongs to something else.
+static __inline int
+T2AudioBceReplyTagMatches(const unsigned char *Reply,
+                          unsigned long long ReplySize,
+                          unsigned long Tag)
+{
+    return Reply != 0 && ReplySize >= T2AUDIO_BCE_U32_SIZE &&
+           T2AudioBceReadU32(Reply) == Tag;
+}
+
 // Validate a simple command response (START_IO / STOP_IO and similar), whose
-// payload is just the base. Requires: ReplySize covers header+base, tag ==
-// "Audt", type == RESPONSE, device_id echoes ExpectedDeviceId, the message id
-// equals ExpectedMessage, and the protocol status is zero. Returns 1 on success.
+// payload is just the base. Requires: ReplySize covers header+base, type ==
+// RESPONSE, device_id echoes ExpectedDeviceId, the message id equals
+// ExpectedMessage, and the protocol status is zero. The tag is checked by the
+// transport (T2AudioBceReplyTagMatches). Returns 1 on success.
 static __inline int
 T2AudioBceParseCommandResponse(const unsigned char *Reply,
                                unsigned long long ReplySize,
@@ -270,10 +299,6 @@ T2AudioBceParseCommandResponse(const unsigned char *Reply,
         return 0;
     }
     if (ReplySize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
-        return 0;
-    }
-    if (Reply[0] != 'A' || Reply[1] != 'u' ||
-        Reply[2] != 'd' || Reply[3] != 't') {
         return 0;
     }
     if (Reply[T2AUDIO_BCE_TYPE_OFFSET] != T2AUDIO_BCE_MSG_RESPONSE) {

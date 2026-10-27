@@ -148,7 +148,7 @@ T2AudioBuildIoCommand(
     }
     RtlZeroMemory(Buffer, sizeof(*header) + sizeof(*base));
     header = (T2AUDIO_MESSAGE_HEADER *)Buffer;
-    RtlCopyMemory(header->Tag, "Audt", 4);
+    // header->Tag is stamped by T2AudioSendBceMessage (counter 1..127).
     header->Type = 1;
     header->DeviceId = DeviceId;
     base = (T2AUDIO_MESSAGE_BASE *)(Buffer + sizeof(*header));
