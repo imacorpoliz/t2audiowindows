@@ -5,6 +5,12 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): START_IO bugcheck root cause found statically; handler added (not hardware-tested)
+
+- **Root cause (static, strong evidence; `docs/analysis/START_IO_BSOD_ROOT_CAUSE.md`):** `AppleUSBVHCI+0x259a` is the return from its own `IofCallDriver` of an `IOCTL 0x222020` IRP. AppleUSBVHCI builds it with `IoBuildDeviceIoControlRequest` (no FileObject) to deliver a bridgeOS message to the first `KSCATEGORY_AUDIO` interface whose path contains `VEN_106B` - our driver once installed. `AppleAudio.sys` intercepts 0x222020 in its own `IRP_MJ_DEVICE_CONTROL` handler (`0x140001280`: msg 4 `UPDATE_TIMESTAMP` → store timestamp, msg 13 `PROPERTY_CHANGED` → jack flags; completes with success). We passed it to PortCls/KS, which dereferenced the NULL FileObject. The first such message follows `START_IO`, which is why only `-BceIo` runs crashed and why changing our own IRP's FileObject had no effect.
+- **Fix:** `T2AudioDeviceControl` (`src/Driver.c`) handles 0x222020 via `T2AudioHandleVhciMessage` (`src/BceTransport.c`) and completes it; everything else goes to `PcDispatchIrp`. UPDATE_TIMESTAMP is parsed and stored (`LastT2Timestamp`, `LastT2SampleFrames`). New tested parsers: `T2AudioBceParseIncoming`, `T2AudioBceParseUpdateTimestamp`, `T2AudioBceDecodeSampleTime`.
+- **Still open:** confirmation from the minidumps; the `tag` field (we send `"Audt"`, AppleAudio a 1..127 counter, kaiT2en `S###`); whether `UPDATE_TIMESTAMP` needs a response on Windows. Plan: `docs/REVERSE_PLAN.md`. The test agent still refuses `-BceIo`.
+
 ### 2026-10-28 (later): second review pass (source only, not hardware-tested)
 
 - **Conflicting cache types (introduced by the WC change):** the config-BAR probe re-mapped Resource[0] uncached while it was already mapped write-combining; x86 forbids two mappings of one physical range with different cache types. Resource[0] is now skipped and only the 12 GPR bytes of each candidate are mapped.

@@ -93,6 +93,15 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG SpeakerSampleShift;
     ULONG SpeakerLatencyFrames;
     ULONG SpeakerSafetyOffsetFrames;
+    // Messages bridgeOS pushed to us through AppleUSBVHCI (IOCTL 0x222020):
+    // counters and the latest UPDATE_TIMESTAMP for the speaker. Written by
+    // T2AudioHandleVhciMessage only; informational until the stream clock
+    // uses them.
+    volatile LONG VhciMessageCount;
+    volatile LONG VhciTimestampCount;
+    ULONG64 LastT2Timestamp;
+    ULONG64 LastT2SampleFrames;
+    ULONG64 LastT2UpdateSeed;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;
     // Test-session gates. Both are read from the VOLATILE registry key
@@ -230,6 +239,15 @@ NTSTATUS T2AudioFindSpeakerDeviceId(
     _Out_ PULONG64 DeviceId);
 
 NTSTATUS T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+
+// IOCTL AppleUSBVHCI uses to push bridgeOS messages to the audio device:
+// CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS).
+#define IOCTL_APPLE_VHCI_AUDIO_MESSAGE 0x222020u
+
+VOID T2AudioHandleVhciMessage(
+    _Inout_opt_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_reads_bytes_opt_(MessageSize) const UCHAR *Message,
+    _In_ ULONG MessageSize);
 
 #ifdef __cplusplus
 }

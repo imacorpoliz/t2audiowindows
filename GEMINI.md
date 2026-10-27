@@ -16,7 +16,7 @@
   * чтение формата потока `'pft '`, latency и safety offset у T2;
   * write-combining для BAR0;
   * PnP teardown и `SET_REMOTE_ACCESS(OFF)`.
-* **`START_IO` роняет систему (BSOD `0x7E`).** Это не исправлено. `tools/T2Audio-TestAgent.ps1` отказывается запускать `-BceIo` — так и должно оставаться.
+* **`START_IO` ронял систему (BSOD `0x7E`).** Причина найдена статически и исправлена в коде (см. D1–D2), но на железе это **не проверено**. `tools/T2Audio-TestAgent.ps1` по-прежнему отказывается запускать `-BceIo` — так и должно оставаться до выполнения условий из `docs/REVERSE_PLAN.md` §3.
 
 ---
 
@@ -150,19 +150,12 @@ $h = '<SHA256 из A3>'
 
 Каждая задача — отдельная ветка и PR. Код сначала пишется и тестируется на хосте, железо — только по этапам A–C. Все новые доступы к железу — за гейтом стадии.
 
-### D1. Корневая причина BSOD `0x7E` при `START_IO` (блокер всего звука)
+### D1–D2. Реверс: BSOD при `START_IO` и приём уведомлений T2 → **[`docs/REVERSE_PLAN.md`](docs/REVERSE_PLAN.md)**
 
-* Известно (см. `CURRENT_STATE.md` 2026-10-08): стек `AppleUSBVHCI+0x259a → ksthunk → ks!DispatchDeviceIoControl+0x15`, чтение `NULL+0x18` (`FileObject->FsContext` у **перенаправленного** IRP). Падали оба варианта `FileObject`.
-* Что сделать **офлайн** (без железа):
-  1. В WinDbg на минидампах `100826-15859-01.dmp` и `100826-23546-01.dmp`: `!irp`, `kv`, `.frame`. Выяснить, какой IRP строит AppleUSBVHCI и чей это device stack.
-  2. Дизассемблировать `AppleUSBVHCI.sys` вокруг `+0x259a`: куда и при каком условии он перенаправляет IOCTL в `ksthunk`. Отчёты-заготовки: `docs/analysis/AppleUSBVHCI_IOCTL_COMPLETE_ANALYSIS.md`, `docs/analysis/IOCTL_222008_CHAIN.md`.
-  3. Сравнить с полной последовательностью `AppleAudio.sys` до первого `START_IO`. Шлёт ли он `NOTIFICATION_ALIVE` (100) с версиями 1/3, как kaiT2en (`t2audio_init_cmd`)? Открывает ли он сначала какой-то другой IOCTL (`0x222004`–`0x222014`) — регистрацию получателя уведомлений? Возможно, AppleUSBVHCI перенаправляет ответ/уведомление на `START_IO` в зарегистрированный KS-объект, а у нас его нет.
-* Результат: отчёт `docs/analysis/START_IO_BSOD_ROOT_CAUSE.md` с доказательствами и предлагаемым изменением. **Включать `-BceIo` нельзя, пока владелец проекта не одобрит отчёт.**
-
-### D2. Путь приёма уведомлений T2 → хост
-
-* Нужен для `NOTIFICATION_ALIVE`, `UPDATE_TIMESTAMP` (аппаратная позиция) и `PROPERTY_CHANGED` (jack). Скорее всего, тот же механизм, что в D1.3.
-* Когда путь известен: добавить чистый разборщик `UPDATE_TIMESTAMP` в `src/BceProtocolLogic.h` (sampleTime — IEEE double, см. `t2audio_decode_sample_time` в kaiT2en `timing.h`) с тестами. Затем заменить QPC-экстраполяцию в `T2AudioStreamAdvanceLocked` на позицию от T2.
+* **Причина BSOD найдена статически** ([`docs/analysis/START_IO_BSOD_ROOT_CAUSE.md`](docs/analysis/START_IO_BSOD_ROOT_CAUSE.md)). AppleUSBVHCI сам шлёт каждое сообщение bridgeOS (например, `UPDATE_TIMESTAMP` после `START_IO`) как `IOCTL 0x222020` в первый `KSCATEGORY_AUDIO`-интерфейс с `VEN_106B`, то есть в наш драйвер, без `FileObject`. AppleAudio перехватывает этот IOCTL в своём `IRP_MJ_DEVICE_CONTROL`, а у нас он уходил в PortCls/KS → разыменование `NULL`.
+* **Исправление уже в коде:** `T2AudioDeviceControl` (`src/Driver.c`) + `T2AudioHandleVhciMessage` (`src/BceTransport.c`). Это же и есть путь приёма уведомлений (`UPDATE_TIMESTAMP` сохраняется в контексте).
+* **Осталось для реверса** (R1–R9 в `docs/REVERSE_PLAN.md`): подтвердить по минидампам; семантика поля `tag` (мы шлём `"Audt"`, AppleAudio — 1..127); нужен ли ответ на `UPDATE_TIMESTAMP`; формат `PROPERTY_CHANGED`; полная последовательность инициализации AppleAudio; модель часов; формат сэмплов и порядок каналов; питание.
+* `-BceIo` остаётся запрещённым до выполнения условий из `docs/REVERSE_PLAN.md` §3 и **явного разрешения владельца**.
 
 ### D3. Питание (сон/пробуждение)
 

@@ -2,7 +2,7 @@
 
 > **Status (October 2026): experimental, diagnostic-session only — not usable as a daily audio driver.**
 >
-> * Starting `START_IO` has bugchecked the machine (`0x7E` in `ks!DispatchDeviceIoControl`, reached through `AppleUSBVHCI` → `ksthunk`). Two different `FileObject` strategies both crashed on 2026-10-08, so this is **not fixed**. See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md).
+> * `START_IO` used to bugcheck the machine (`0x7E`). The cause has now been found statically: AppleUSBVHCI pushes bridgeOS messages to the audio device as `IOCTL 0x222020` without a FileObject, and those IRPs ended up in KS. The driver now intercepts that IOCTL, as AppleAudio does ([analysis](docs/analysis/START_IO_BSOD_ROOT_CAUSE.md)), but the fix has **not been verified on hardware**.
 > * The driver only starts inside a **volatile** `TestSession`, so a normal boot (or the boot after a crash) never activates it.
 > * The current source has been unit-tested on a host and checked by CI, but **no hardware run has validated it yet**.
 

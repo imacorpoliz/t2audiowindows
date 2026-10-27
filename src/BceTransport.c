@@ -814,6 +814,62 @@ T2AudioFindSpeakerDeviceId(
     return STATUS_DEVICE_NOT_READY;
 }
 
+// Handle one message bridgeOS pushed to the host (IOCTL 0x222020, see
+// T2AudioDeviceControl in Driver.c). AppleAudio.sys does the same in its own
+// IRP_MJ_DEVICE_CONTROL handler: UPDATE_TIMESTAMP (4) stores the timestamp per
+// device, PROPERTY_CHANGED (13) updates jack state; nothing is sent back. This
+// runs in AppleUSBVHCI's context while it waits for the IRP, so it must not
+// block or send BCE messages.
+VOID
+T2AudioHandleVhciMessage(
+    _Inout_opt_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_reads_bytes_opt_(MessageSize) const UCHAR *Message,
+    _In_ ULONG MessageSize)
+{
+    ULONG type = 0;
+    ULONG msg = 0;
+    ULONG64 deviceId = 0;
+    LONG count;
+
+    if (Context == NULL || Message == NULL ||
+        !T2AudioBceParseIncoming(Message, MessageSize, &type, &msg, &deviceId)) {
+        KdPrint(("T2Audio: VHCI message ignored (size=%u)\n", MessageSize));
+        return;
+    }
+
+    count = InterlockedIncrement(&Context->VhciMessageCount);
+
+    if (msg == T2AUDIO_MSG_UPDATE_TIMESTAMP) {
+        ULONG64 timestamp, seed, sampleBits, frames = 0;
+        LONG n;
+
+        if (!T2AudioBceParseUpdateTimestamp(Message, MessageSize, &deviceId,
+                                            &timestamp, &seed, &sampleBits) ||
+            !T2AudioBceDecodeSampleTime(sampleBits, &frames)) {
+            KdPrint(("T2Audio: VHCI UPDATE_TIMESTAMP invalid (size=%u)\n", MessageSize));
+            return;
+        }
+        if (deviceId == Context->BceSpeakerDeviceId && deviceId != 0) {
+            Context->LastT2Timestamp = timestamp;
+            Context->LastT2SampleFrames = frames;
+            Context->LastT2UpdateSeed = seed;
+        }
+        n = InterlockedIncrement(&Context->VhciTimestampCount);
+        // These arrive continuously while I/O runs: log the first few, then
+        // one in a thousand.
+        if (n <= 8 || (n % 1000) == 0) {
+            KdPrint(("T2Audio: VHCI UPDATE_TIMESTAMP #%d dev=0x%I64X t2=%I64u seed=%I64u sample=%I64u\n",
+                     n, deviceId, timestamp, seed, frames));
+        }
+        return;
+    }
+
+    if (count <= 64) {
+        KdPrint(("T2Audio: VHCI message #%d type=%u msg=%u dev=0x%I64X size=%u\n",
+                 count, type, msg, deviceId, MessageSize));
+    }
+}
+
 // Opens the BCE transport, enumerates devices and logs each UID, and records
 // the speaker id in Context->BceSpeakerDeviceId. It does not touch
 // Context->SpeakerDeviceId itself; the caller (T2AudioStartDevice) decides

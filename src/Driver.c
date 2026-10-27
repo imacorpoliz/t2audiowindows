@@ -65,6 +65,42 @@ T2AudioPnpHandler(
     return PcDispatchIrp(DeviceObject, Irp);
 }
 
+// AppleUSBVHCI pushes every message bridgeOS sends on its own (for example
+// UPDATE_TIMESTAMP right after START_IO) to the first KSCATEGORY_AUDIO
+// interface whose path contains VEN_106B, as IOCTL 0x222020 built with
+// IoBuildDeviceIoControlRequest - no FileObject. AppleAudio.sys intercepts
+// that IOCTL in its own IRP_MJ_DEVICE_CONTROL handler. Passed on to PortCls,
+// KS dereferences the NULL FileObject (FsContext at +0x18): this is the 0x7E
+// bugcheck at ks!DispatchDeviceIoControl+0x15 seen on every START_IO run
+// (AppleUSBVHCI+0x259a is the return from that IofCallDriver). Handle it here
+// and complete it; everything else goes to PortCls.
+static NTSTATUS
+T2AudioDeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (stack->Parameters.DeviceIoControl.IoControlCode ==
+        IOCTL_APPLE_VHCI_AUDIO_MESSAGE) {
+        PT2AUDIO_DEVICE_CONTEXT context = NULL;
+
+        if (DeviceObject->DeviceExtension != NULL) {
+            context = T2AudioGetContext(DeviceObject);
+        }
+        T2AudioHandleVhciMessage(context,
+                                 (const UCHAR *)Irp->AssociatedIrp.SystemBuffer,
+                                 stack->Parameters.DeviceIoControl.InputBufferLength);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
+    }
+
+    return PcDispatchIrp(DeviceObject, Irp);
+}
+
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT DriverObject,
@@ -86,6 +122,7 @@ DriverEntry(
     // Must come after PcInitializeAdapterDriver, which installs PortCls's own
     // dispatch table; T2AudioPnpHandler forwards to PcDispatchIrp.
     DriverObject->MajorFunction[IRP_MJ_PNP] = T2AudioPnpHandler;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = T2AudioDeviceControl;
 
     KdPrint(("T2Audio: PortCls driver initialized\n"));
     return STATUS_SUCCESS;

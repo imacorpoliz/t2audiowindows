@@ -336,6 +336,56 @@ static void test_physical_format(void)
           !T2AudioBceParsePhysicalFormat(bad, sizeof(bad), &f));
 }
 
+static void test_incoming(void)
+{
+    unsigned char m[45];
+    unsigned long type = 0, msg = 0;
+    unsigned long long dev = 0, ts = 0, seed = 0, bits = 0, frames = 0;
+
+    printf("incoming messages (IOCTL 0x222020)\n");
+
+    memset(m, 0, sizeof(m));
+    memcpy(m, "S001", 4);
+    m[4] = 1;                                   // COMMAND from bridgeOS
+    T2AudioBceWriteU64(m + 5, 0x39);
+    T2AudioBceWriteU32(m + 13, T2AUDIO_MSG_UPDATE_TIMESTAMP);
+    T2AudioBceWriteU64(m + 21, 123456789ull);   // timestamp (AppleAudio: +0x15)
+    T2AudioBceWriteU64(m + 29, 1);              // update seed
+    T2AudioBceWriteU64(m + 37, 0x40E7700000000000ull); // 48000.0
+
+    check("incoming header parses",
+          T2AudioBceParseIncoming(m, sizeof(m), &type, &msg, &dev) &&
+          type == 1 && msg == T2AUDIO_MSG_UPDATE_TIMESTAMP && dev == 0x39);
+    check("incoming too short -> fail",
+          !T2AudioBceParseIncoming(m, 20, &type, &msg, &dev));
+    check("UPDATE_TIMESTAMP parses",
+          T2AudioBceParseUpdateTimestamp(m, sizeof(m), &dev, &ts, &seed, &bits) &&
+          dev == 0x39 && ts == 123456789ull && seed == 1 &&
+          bits == 0x40E7700000000000ull);
+    check("UPDATE_TIMESTAMP truncated -> fail",
+          !T2AudioBceParseUpdateTimestamp(m, sizeof(m) - 1, &dev, &ts, &seed, &bits));
+    T2AudioBceWriteU32(m + 13, T2AUDIO_MSG_PROPERTY_CHANGED);
+    check("other message id is not a timestamp",
+          !T2AudioBceParseUpdateTimestamp(m, sizeof(m), &dev, &ts, &seed, &bits));
+
+    check("sampleTime 48000.0 -> 48000",
+          T2AudioBceDecodeSampleTime(0x40E7700000000000ull, &frames) && frames == 48000);
+    check("sampleTime 0 -> 0",
+          T2AudioBceDecodeSampleTime(0, &frames) && frames == 0);
+    check("sampleTime 1.0 -> 1",
+          T2AudioBceDecodeSampleTime(0x3FF0000000000000ull, &frames) && frames == 1);
+    check("sampleTime 2^40 -> 2^40",
+          T2AudioBceDecodeSampleTime(0x4270000000000000ull, &frames) && frames == (1ull << 40));
+    check("sampleTime 2^53 -> 2^53",
+          T2AudioBceDecodeSampleTime(0x4340000000000000ull, &frames) && frames == (1ull << 53));
+    check("sampleTime above 2^53 -> fail",
+          !T2AudioBceDecodeSampleTime(0x4340000000000001ull, &frames));
+    check("sampleTime 0.5 -> fail",
+          !T2AudioBceDecodeSampleTime(0x3FE0000000000000ull, &frames));
+    check("sampleTime negative -> fail",
+          !T2AudioBceDecodeSampleTime(0xBFF0000000000000ull, &frames));
+}
+
 int main(void)
 {
     test_scalar_roundtrip();
@@ -346,6 +396,7 @@ int main(void)
     test_parse_property_response();
     test_parse_command_response();
     test_physical_format();
+    test_incoming();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

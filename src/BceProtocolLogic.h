@@ -21,6 +21,8 @@
 // Protocol message IDs and responses (verified against AppleAudio.sys reverse engineering)
 #define T2AUDIO_MSG_START_IO                  0u
 #define T2AUDIO_MSG_START_IO_RESPONSE         1u
+#define T2AUDIO_MSG_UPDATE_TIMESTAMP          4u
+#define T2AUDIO_MSG_PROPERTY_CHANGED          13u
 #define T2AUDIO_MSG_STOP_IO                   2u
 #define T2AUDIO_MSG_STOP_IO_RESPONSE          3u
 #define T2AUDIO_MSG_GET_PROPERTY              7u
@@ -428,6 +430,91 @@ T2AudioBceDeviceSampleShift(const T2AUDIO_BCE_PHYS_FORMAT *Format,
         return (flags & T2AUDIO_BCE_FORMAT_FLAG_ALIGNED_HIGH) ? 0 : 8;
     }
     return -1;
+}
+
+// Messages bridgeOS sends to the host on its own (UPDATE_TIMESTAMP after
+// START_IO, PROPERTY_CHANGED for jacks, ...). On Windows AppleUSBVHCI
+// delivers each one as IOCTL 0x222020 to the first KSCATEGORY_AUDIO interface
+// whose path contains VEN_106B - i.e. to this driver once it is installed -
+// with the raw message (same header/base layout) as the input buffer.
+
+// Validate the fixed part of an incoming message and return its type, message
+// id and device id. Returns 1 when MessageSize covers header + base.
+static __inline int
+T2AudioBceParseIncoming(const unsigned char *Message,
+                        unsigned long long MessageSize,
+                        unsigned long *OutType,
+                        unsigned long *OutMessage,
+                        unsigned long long *OutDeviceId)
+{
+    if (Message == 0 || OutType == 0 || OutMessage == 0 || OutDeviceId == 0 ||
+        MessageSize < T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE) {
+        return 0;
+    }
+    *OutType = Message[T2AUDIO_BCE_TYPE_OFFSET];
+    *OutDeviceId = T2AudioBceReadU64(Message + 5);
+    *OutMessage = T2AudioBceReadU32(Message + T2AUDIO_BCE_HEADER_SIZE);
+    return 1;
+}
+
+// UPDATE_TIMESTAMP payload (kaiT2en protocol.c, matches what AppleAudio.sys
+// reads at message offset 0x15): timestamp u64, update_seed u64, then
+// sampleTime as an IEEE-754 double (raw bits). Returns 1 on success.
+static __inline int
+T2AudioBceParseUpdateTimestamp(const unsigned char *Message,
+                               unsigned long long MessageSize,
+                               unsigned long long *OutDeviceId,
+                               unsigned long long *OutTimestamp,
+                               unsigned long long *OutUpdateSeed,
+                               unsigned long long *OutSampleTimeBits)
+{
+    unsigned long long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+
+    if (Message == 0 || OutDeviceId == 0 || OutTimestamp == 0 ||
+        OutUpdateSeed == 0 || OutSampleTimeBits == 0 ||
+        MessageSize < base + 3 * T2AUDIO_BCE_U64_SIZE ||
+        T2AudioBceReadU32(Message + T2AUDIO_BCE_HEADER_SIZE) !=
+            T2AUDIO_MSG_UPDATE_TIMESTAMP) {
+        return 0;
+    }
+    *OutDeviceId = T2AudioBceReadU64(Message + 5);
+    *OutTimestamp = T2AudioBceReadU64(Message + base);
+    *OutUpdateSeed = T2AudioBceReadU64(Message + base + 8);
+    *OutSampleTimeBits = T2AudioBceReadU64(Message + base + 16);
+    return 1;
+}
+
+// Decode a nonnegative, integral IEEE-754 double (raw bits) up to 2^53 into a
+// 64-bit integer without floating point (sampleTime is a frame count).
+static __inline int
+T2AudioBceDecodeSampleTime(unsigned long long Bits, unsigned long long *OutFrames)
+{
+    unsigned int exponent = (unsigned int)((Bits >> 52) & 0x7ffu);
+    unsigned long long mantissa = Bits & ((1ull << 52) - 1);
+    unsigned int shift;
+
+    if (OutFrames == 0) {
+        return 0;
+    }
+    if (Bits == 0) {
+        *OutFrames = 0;
+        return 1;
+    }
+    if ((Bits >> 63) != 0 || exponent < 1023 || exponent > 1076 ||
+        (exponent == 1076 && mantissa != 0)) {
+        return 0;
+    }
+    mantissa |= 1ull << 52;
+    if (exponent == 1076) {
+        *OutFrames = mantissa << 1;   // exactly 2^53
+        return 1;
+    }
+    shift = 1075 - exponent;          // 0..52
+    if (shift != 0 && (mantissa & ((1ull << shift) - 1)) != 0) {
+        return 0;
+    }
+    *OutFrames = mantissa >> shift;
+    return 1;
 }
 
 #endif
