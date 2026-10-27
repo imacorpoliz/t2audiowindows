@@ -5,6 +5,34 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28: Hardware verification of Stages 1–3 (Stage B) and Stages 4–5 MMIO (Stage C) (PROVEN ON HARDWARE)
+
+- **Test Report:** [`docs/logs/EXCERPT_20261028_035800.md`](logs/EXCERPT_20261028_035800.md).
+- **Tested Build:** DriverVer `10/28/2026,1.0.5.0`, SHA256 `4529472D3918BA92B5899BF849ED64DAECFB9A86728927D8F8613DF54148254E`, signed with test cert `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`.
+- **Pre-requisite Bind without Code 14:** Demonstrated that disabling `PCI\VEN_106B&DEV_1803` before running `pnputil /add-driver /install` prevents `CM_PROB_NEED_RESTART` (Code 14) and allows immediate testing without a Windows reboot.
+- **Stage 1 (RAM only - PASS):** Stereo endpoint (2 channels, 48 kHz, 32-bit container) created; `PcRegisterAdapterPowerManagement status=0x00000000`; `StartDevice SUCCESS`; WASAPI probe successfully initialized, started, and stopped shared stream.
+- **Stage 2 (BAR metadata - PASS):** Resource[0] mapped write-combining; GPR signature `0x19870423` verified at offset `0x4000`; Speaker buffer discovered at BAR0 offset `0x12c000`, size `0x61800` (399,360 bytes = 16,640 frames * 24 bytes).
+- **Stage 3 (BCE probe - PASS):** 5 BCE devices enumerated: `0x21` ("Digital Mic"), `0x25` ("Codec Output"), `0x39` ("Speaker"), `0x3F` ("Bridge Loopback"), `0x44` ("Codec Input"). Speaker stream `0x3A` physical format verified: S24_LE 6ch, flags `0x4`.
+  - **Latency / Safety values recorded:** `sample shift = 8`, `latency = 0 + 11 frames` (A = 0, B = 11), `safety offset = 71 frames` (C = 71).
+- **Stage 4 (Transport held open - PASS):** Audio path enabled for speaker `0x39` (`bceIo=0`), transport held open during stream and cleanly closed.
+- **Stage 5 (MMIO copy - PASS):** Ring zeroed, copy DPC active; buffer allocated `20480` bytes (multiple of 8); `SetState 3`, `ticks=1005` on stop (`posCalls=205`); 0 `re-aimed` lines logged (as expected without START_IO).
+- **Post-test Recovery (PASS):** Device safely recovered via `-Mode Recover` and package deletion; restored to `AppleAudio.sys` (`oem16.inf`), Status `OK (CM_PROB_NONE)`.
+
+### 2026-10-28: REA reverse engineering completed (Tasks R1, R2, R3 - static analysis & minidump evidence)
+
+- **R1 (Minidumps confirmation, `docs/analysis/RE_minidump.md`):**
+  - Both minidumps (`100826-15859-01.dmp` and `100826-23546-01.dmp`) analyzed with CDB: identical crash `SYSTEM_THREAD_EXCEPTION_NOT_HANDLED (0x7E)` with `0xC0000005` at `ks!DispatchDeviceIoControl+0x15` reading `[rax+0x18]` with `rax == 0` (FileObject NULL).
+  - Call stack: `AppleUSBVHCI+0x259a -> nt!IofCallDriver -> ksthunk -> ks!DispatchDeviceIoControl`. Return address `AppleUSBVHCI+0x259a` matches the exact instruction after `IofCallDriver(0x222020)` at `0x140002594`.
+  - Static root cause confirmed: `AppleUSBVHCI` sends `IOCTL 0x222020` without a FileObject to the first `KSCATEGORY_AUDIO` interface with `VEN_106B`, which entered `ks.sys` and crashed.
+- **R2 (Tag field semantics, `docs/analysis/RE_tag_semantics.md`):**
+  - `AppleAudio.sys` (`0x140004AB9`–`0x140004AD9`) uses a rolling counter `1..127` (`*tag = (*tag % 0x7F) + 1`).
+  - `AppleUSBVHCI.sys` (`0x140002128`) passes the message buffer to BridgeOS as-is and synchronously waits on a single static event (`RVA 0x27448`). It does not filter or validate the response tag (wakes on any `type == 2` response).
+  - `NOTIFICATION_ALIVE` (`type == 3 && msg == 100`) also triggers `KeSetEvent(0x27448)` at `0x140001DEF`, creating an operational risk of early wakeup with an ALIVE packet during an in-flight command. Tag matching (`1..127`) and response validation in the driver are necessary.
+- **R3 (UPDATE_TIMESTAMP response, `docs/analysis/RE_update_timestamp.md`):**
+  - `AppleUSBVHCI.sys` (`0x140001DB9`–`0x140001DE8`) **itself automatically creates and transmits** `UPDATE_TIMESTAMP_RESPONSE (34)` back to BridgeOS immediately after calling `0x140002274`.
+  - `AppleAudio.sys` (`0x1400012BF`) only records the timestamp and completes the IRP with `STATUS_SUCCESS`.
+  - Audio driver **must not** send a response to `UPDATE_TIMESTAMP`. Current `T2AudioPort` implementation is consistent with `AppleAudio.sys` behavior (вероятно; не проверено на железе).
+
 ### 2026-10-28 (later): power management, kernel-only 0x222020, owner-gated START_IO, stale timestamps (not hardware-tested)
 
 - **`src/Power.c`:** static `IAdapterPowerManagement` (registered in `T2AudioStartDevice`): STOP_IO in `QueryPowerChangeState(D3)` and `PowerChangeState(D1-D3)` as AppleAudio does (R8), no BAR writes while powered down (`PoweredDown`), no START_IO on D0. `HardwareIoActive` (interlocked) keeps it to one STOP_IO per START_IO between the stream and the power path.
