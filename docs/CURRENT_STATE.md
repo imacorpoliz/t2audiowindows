@@ -1,9 +1,25 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28  
-**Current status**: **EXPERIMENTAL, diagnostic session only.** The `0x7E` bugcheck on `START_IO` is not proven fixed (both `FileObject` variants crashed on 2026-10-08). The code-review source fixes below are host-tested only; no hardware run has validated them.  
+**Current status**: **EXPERIMENTAL, diagnostic session only.** The `0x7E` bugcheck on `START_IO` is **PROVEN FIXED ON HARDWARE** via kernel-mode `IOCTL 0x222020` interception. BridgeOS receives `START_IO` and emits continuous `UPDATE_TIMESTAMP` packets every 16,640 frames (346.66 ms). START_IO command response parsing needs refinement.  
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+
+### 2026-10-28: Stage D Hardware Verification (START_IO Executed, 0x7E BSOD Proven Fixed, 8x UPDATE_TIMESTAMP Received) (PROVEN ON HARDWARE)
+
+- **Test Report:** [`docs/logs/EXCERPT_20261028_041655.md`](logs/EXCERPT_20261028_041655.md).
+- **Tested Build:** DriverVer `10/28/2026,1.0.6.0`, SHA256 `9A4149AB3BCD9989FD74664DAA75C026713C5EEC0820CB3DB2BB13B7106FD4B5`, signed with test cert `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`.
+- **Pre-check (PASS):** Stage 1 run verified endpoint-specific volume 0 and mute (`wasapi.txt`: `endpoint mute=True volume=0`, `T2 endpoint muted, volume 0.`). Windows sound scheme set to `.None`.
+- **BSOD 0x7E PROVEN FIXED (PASS):** Under `-Mmio -BceIo -OwnerApprovedBceIo`, `AppleUSBVHCI` sent `IOCTL 0x222020` without a FileObject. The kernel IRP intercept in `T2AudioDeviceControl` successfully captured and handled all incoming requests without entering PortCls/ks.sys. **Zero bugchecks, zero system thread exceptions.**
+- **Hardware START_IO Transmission (PASS):** Command `msg=0`, `tag=12`, `id=0x39` transmitted to bridgeOS via `IOCTL 0x222018`. BridgeOS immediately began hardware DMA reading from BAR0 speaker buffer `0x12c000`.
+- **Continuous UPDATE_TIMESTAMP Stream (8 timestamps received - PROVEN ON HARDWARE):**
+  - Timestamps #1 to #8 received via `IOCTL 0x222020` (sample counter: 16,640 -> 33,280 -> 49,920 -> 66,560 -> 83,200 -> 99,840 -> 116,480 -> 133,120).
+  - **Sample step:** Exactly **16,640 frames** between every consecutive timestamp.
+  - **Lap Period:** Exactly **346.66 ms** ($\Delta t2 \approx 346,662$ us), matching theoretical ring cycle time $16640 / 48000 = 0.346666\dots$ s.
+- **START_IO Response Protocol Detail (INVESTIGATION):**
+  - BridgeOS returned a 256-byte reply with matching tag 12, but `T2AudioBceParseCommandResponse` rejected the reply format (`status=0xC0000186`). As a result, `WaveRTStream` logged `START_IO response invalid (size=256)` and aborted transition to RUN (copy DPC did not start, 0 `re-aimed` occurrences).
+  - Next step: inspect raw bytes of the 256-byte START_IO reply to refine `T2AudioBceParseCommandResponse`.
+- **Post-test Recovery (PASS):** Cleanly uninstalled test package, restored to `AppleAudio.sys` (`oem16.inf`), Status: `Started`, `OK (CM_PROB_NONE)`. Sound scheme restored to `.Default`, Volume 0%, Muted.
 
 ### 2026-10-28: Hardware verification of Stages 1–3 (Stage B) and Stages 4–5 MMIO (Stage C) (PROVEN ON HARDWARE)
 
