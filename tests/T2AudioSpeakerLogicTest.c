@@ -135,6 +135,12 @@ static void test_clock(void)
     check("reception: hostTime in the future ignored",
           T2AudioClockFramesAtReception(1000, 9000000, 5000000, 48000) == 1000);
 
+    check("plausible: 2 ms old", T2AudioClockHostTimePlausible(5000000, 7000000));
+    check("implausible: future", !T2AudioClockHostTimePlausible(9000000, 7000000));
+    check("anchor ns: plausible uses hostTime", T2AudioClockAnchorNs(5000000, 7000000) == 5000000);
+    check("anchor ns: implausible uses reception",
+          T2AudioClockAnchorNs(1000, 1000 + 60000000ull) == 1000 + 60000000ull);
+
     check("distance simple", T2AudioRingDistance(1500, 500, ring) == 1000);
     check("distance across wrap", T2AudioRingDistance(ring + 200, ring - 800, ring) == 1000);
     check("distance negative", T2AudioRingDistance(100, 600, ring) == -500);

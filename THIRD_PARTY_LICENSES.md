@@ -23,6 +23,18 @@ This project references protocol constants and structures from the Linux kaiT2en
 
 The Windows implementation in this project is original work but relies on protocol knowledge derived from reverse engineering documented in the Linux driver.
 
+**Timestamp handling (2026-10):** dropping timestamps older than the run's
+`START_IO` and the plausibility check on `hostTime` follow kaiT2en commits
+`bbf3878` / `6128f86` (`modules/t2bce_audio/pcm.c`).
+
+**DSP profile (separate license):** the speaker channel layout used in
+`src/T2AudioSpeakerLogic.h` (ring channels 0/1 and 3/4 = woofers, 2/5 =
+tweeters) was read from `dsp/profiles/16_1/graph.json`, Copyright (C) 2026
+André Eikmeyer, KAIT2EN, GPL-3.0-or-later with the attribution term of its
+`LICENSING.md`. Only that fact is used; no filter coefficients, graph data or
+FIR files were copied. The tweeter high-pass is an independently computed
+Butterworth filter.
+
 **Original Authors:** kekrby and contributors to linux-t2  
 **Repository:** https://github.com/kekrby/linux-t2/tree/master/sound/soc/apple
 

@@ -896,6 +896,7 @@ T2AudioHandleVhciMessage(
         if (deviceId == Context->BceSpeakerDeviceId && deviceId != 0) {
             LARGE_INTEGER qpc, qpcFreq;
             ULONG64 anchorFrames;
+            ULONG64 receptionNs;
             KIRQL oldIrql;
 
             // hostTime is on the host clock AppleUSBVHCI publishes to the T2
@@ -903,10 +904,9 @@ T2AudioHandleVhciMessage(
             // implausible delta falls back to "current" (see
             // T2AudioClockFramesAtReception).
             qpc = KeQueryPerformanceCounter(&qpcFreq);
-            anchorFrames = T2AudioClockFramesAtReception(
-                frames, timestamp,
-                T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart),
-                48000);
+            receptionNs = T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart);
+            anchorFrames = T2AudioClockFramesAtReception(frames, timestamp,
+                                                         receptionNs, 48000);
 
             KeAcquireSpinLock(&Context->ClockLock, &oldIrql);
             Context->LastT2Timestamp = timestamp;
@@ -914,6 +914,7 @@ T2AudioHandleVhciMessage(
             Context->LastT2UpdateSeed = seed;
             Context->ClockAnchorFrames = anchorFrames;
             Context->ClockAnchorQpc = (ULONG64)qpc.QuadPart;
+            Context->ClockAnchorNs = T2AudioClockAnchorNs(timestamp, receptionNs);
             Context->ClockGeneration++;
             KeReleaseSpinLock(&Context->ClockLock, oldIrql);
         }

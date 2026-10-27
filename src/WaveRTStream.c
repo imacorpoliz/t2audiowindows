@@ -51,6 +51,9 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG64 DestOffset;
     // ClockGeneration of the last T2 anchor this stream checked its lead with.
     ULONG ClockGenerationSeen;
+    // Host time (QPC ns) just before this run's START_IO; older anchors
+    // belong to the previous run.
+    ULONG64 RunStartNs;
     ULONG ClockCorrections;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
@@ -115,6 +118,7 @@ T2AudioStreamFollowT2ClockLocked(
     ULONG generation;
     ULONG64 anchorFrames;
     ULONG64 anchorQpc;
+    ULONG64 anchorNs;
     ULONG64 readFrame;
     ULONG64 newOffset;
     LONGLONG jump;
@@ -126,12 +130,18 @@ T2AudioStreamFollowT2ClockLocked(
     generation = context->ClockGeneration;
     anchorFrames = context->ClockAnchorFrames;
     anchorQpc = context->ClockAnchorQpc;
+    anchorNs = context->ClockAnchorNs;
     KeReleaseSpinLockFromDpcLevel(&context->ClockLock);
 
     if (generation == instance->ClockGenerationSeen) {
         return;
     }
     instance->ClockGenerationSeen = generation;
+    // A timestamp of the previous run delivered after this START_IO: no
+    // timestamp of this run can carry a host time from before it.
+    if (anchorNs < instance->RunStartNs) {
+        return;
+    }
 
     KeQueryPerformanceCounter(&qpcFreq);
     readFrame = anchorFrames;
@@ -618,6 +628,8 @@ T2AudioStreamSetState(
                        (ULONG)(instance->LastCopiedFrame % hwFrames)) % hwFrames
                     : T2AUDIO_LEAD_FRAMES;
                 instance->ClockGenerationSeen = generation;
+                instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
+                                                      (ULONG64)qpcFreq.QuadPart);
                 if (instance->LastCopiedFrame == 0) {
                     T2AudioSpeakerStateReset(&instance->SpeakerState);
                 }

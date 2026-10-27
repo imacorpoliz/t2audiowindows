@@ -216,6 +216,26 @@ T2AudioQpcToNs(unsigned long long Qpc, unsigned long long Frequency)
            ((Qpc % Frequency) * 1000000000ull) / Frequency;
 }
 
+// 1 if hostTime is plausible on our clock at reception: not in the future and
+// at most T2AUDIO_CLOCK_MAX_DELIVERY_NS old (kaiT2en measures 1-3 ms; after a
+// wake bridgeOS can be far off until it recalibrates).
+static __inline int
+T2AudioClockHostTimePlausible(unsigned long long HostTimeNs,
+                              unsigned long long ReceptionNs)
+{
+    return HostTimeNs <= ReceptionNs &&
+           ReceptionNs - HostTimeNs <= T2AUDIO_CLOCK_MAX_DELIVERY_NS;
+}
+
+// Time (our ns) an anchor stands for: hostTime when plausible, else reception.
+// A stream ignores anchors from before it sent START_IO: after a pause the
+// previous run's next timestamp can still arrive (kaiT2en 6128f86).
+static __inline unsigned long long
+T2AudioClockAnchorNs(unsigned long long HostTimeNs, unsigned long long ReceptionNs)
+{
+    return T2AudioClockHostTimePlausible(HostTimeNs, ReceptionNs) ? HostTimeNs : ReceptionNs;
+}
+
 // T2 read position (frames) at the moment the message was received, given its
 // sampleTime and hostTime and our clock at reception. Uses the hostTime delta
 // when it is plausible (0..T2AUDIO_CLOCK_MAX_DELIVERY_NS), else assumes the
@@ -226,16 +246,10 @@ T2AudioClockFramesAtReception(unsigned long long SampleFrames,
                               unsigned long long ReceptionNs,
                               unsigned long SampleRate)
 {
-    unsigned long long delta;
-
-    if (ReceptionNs < HostTimeNs) {
+    if (!T2AudioClockHostTimePlausible(HostTimeNs, ReceptionNs)) {
         return SampleFrames;
     }
-    delta = ReceptionNs - HostTimeNs;
-    if (delta > T2AUDIO_CLOCK_MAX_DELIVERY_NS) {
-        return SampleFrames;
-    }
-    return SampleFrames + (delta * SampleRate) / 1000000000ull;
+    return SampleFrames + ((ReceptionNs - HostTimeNs) * SampleRate) / 1000000000ull;
 }
 
 // Signed distance (WriteFrame - ReadFrame) on a ring of RingFrames, folded

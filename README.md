@@ -3,6 +3,7 @@
 > **Status (October 2026): experimental, diagnostic-session only — not usable as a daily audio driver.**
 >
 > * `START_IO` used to bugcheck the machine (`0x7E`). The cause has now been found statically: AppleUSBVHCI pushes bridgeOS messages to the audio device as `IOCTL 0x222020` without a FileObject, and those IRPs ended up in KS. The driver now intercepts that IOCTL, as AppleAudio does ([analysis](docs/analysis/START_IO_BSOD_ROOT_CAUSE.md)), but the fix has **not been verified on hardware**.
+> * Windows sees a **stereo** endpoint; the driver lays it over the six speakers itself (woofers 0/1 and 3/4, tweeters 2/5 behind a 3 kHz high-pass). Apple's speaker EQ is not reproduced, so the first audible tests must be at **very low volume**.
 > * The driver only starts inside a **volatile** `TestSession`, so a normal boot (or the boot after a crash) never activates it.
 > * The current source has been unit-tested on a host and checked by CI, but **no hardware run has validated it yet**.
 
@@ -48,7 +49,9 @@
 | Write PCM into BAR0 | `EnableMmioCopy=1` (stage 5) **and** a supported `'pft '` format read from the T2 | off |
 | Send `START_IO`/`STOP_IO` | `EnableBceIo=1` (stage 4+) | off |
 
-Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the session (`-Stage N`, `-Mmio`, `-BceIo`). The agent currently refuses `-BceIo` because of the open BSOD.
+Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the session (`-Stage N`, `-Mmio`, `-BceIo`, `-RawChannels`). The agent still refuses `-BceIo` until the `0x222020` fix has been confirmed on hardware.
+
+Other options: `Parameters\TweeterMode` (1 = high-passed tweeters, default; 0 = woofers only) and `TestSession\RawSpeakerChannels=1` (raw 6-channel endpoint for per-speaker checks — **no tweeter protection**).
 
 ---
 
@@ -65,10 +68,13 @@ Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the ses
 | Ring zeroed before a run; clock anchored **before** `START_IO` | ✅ new | |
 | `pci_iomap_wc` for a prefetchable BAR | ✅ new | WC mapping + `sfence` after each copy. |
 | `SET_REMOTE_ACCESS(ON)` before I/O, `OFF` on quiesce | n/a on Windows | AppleUSBVHCI sends it itself (`mode 1` at init/resume, `0` at power-down) and AppleAudio never does, so this driver no longer sends it ([RE](docs/analysis/RE_appleaudio_protocol.md)). |
-| `NOTIFICATION_ALIVE` handshake before commands | ❌ | Needs a receive path for T2→host messages through `AppleUSBVHCI`, which is not known yet. |
-| Hardware position from `UPDATE_TIMESTAMP` (sampleTime/hostTime) | ❌ | Same blocker. The position is extrapolated from QPC since the anchor, which can drift against the T2 clock over long runs. |
+| `NOTIFICATION_ALIVE` handshake before commands | n/a on Windows | AppleUSBVHCI sends it itself at init/resume. |
+| Receiving T2→host messages | ✅ new | AppleUSBVHCI delivers them as `IOCTL 0x222020` to the audio device; `T2AudioDeviceControl` handles it (this was the `START_IO` bugcheck). |
+| Ring position from `UPDATE_TIMESTAMP` (sampleTime + hostTime, one per ring pass) | ✅ new | The ring write position is kept 1000 frames ahead of the T2 read position and re-aimed outside ±500 (AppleAudio's model). hostTime is host QPC ns; an implausible one falls back to the receive time, and timestamps from before this run's `START_IO` are dropped (as kaiT2en `6128f86`). |
+| Speaker DSP (EQ, crossovers, XTC) in PipeWire, `dsp/profiles/16_1` | partial | The channel layout and the need to high-pass the tweeters come from that profile; only a 4th-order tweeter high-pass is applied. Equalizer APO can run on the stereo endpoint. |
+| Zeroing a stalled output ring (writer stopped across two timestamps) | ❌ | Not needed while the copy runs from QPC; revisit if stale loops are heard. |
 | Exposing the bridge ring itself as the PCM buffer | ❌ | PortCls refuses BAR MDLs for WaveRT (0x8007001F), hence the RAM mirror. |
-| Sleep: remote access OFF in `prepare`, GPR sleep marker `0x19770525` at `+0x10`, buffer reset on resume | ❌ | Power handling is not implemented. kaiT2en notes that bridgeOS stops answering if remote access is still ON while VHCI suspends, so do not sleep the machine during a stage-4+ session. |
+| Sleep: STOP_IO before D3, re-init after resume | ❌ | AppleAudio stops I/O in `QueryPowerChangeState(D3)` and re-registers only input buffers on D0 ([R8](docs/analysis/RE_appleaudio_protocol.md)); there is no sleep marker on Windows. This driver has no power interface yet — do not sleep the machine during a stage-4+ session. |
 | Jack detection, mic / codec input, volume properties | ❌ | Speaker output only. |
 
 ---
@@ -87,10 +93,12 @@ msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:
 
 cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe tests\BceProtocolLogicTest.c
 cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c
+cl /nologo /W4 /Fe:tests\T2AudioSpeakerLogicTest.exe tests\T2AudioSpeakerLogicTest.c
 tests\BceProtocolLogicTest.exe
 tests\T2AudioBufferLogicTest.exe
+tests\T2AudioSpeakerLogicTest.exe
 ```
-The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `src/T2AudioBufferLogic.h`). They cover BCE reply parsing, the `'pft '` descriptor captured on a MacBookPro16,1, ring/copy arithmetic and S24 sample conversion.
+The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `src/T2AudioBufferLogic.h`, `src/T2AudioSpeakerLogic.h`). They cover BCE request tags and reply parsing, incoming `UPDATE_TIMESTAMP`, the `'pft '` descriptor captured on a MacBookPro16,1, ring/copy arithmetic, S24 conversion, the stereo → six-speaker layout, the tweeter filter's response and the T2 clock correction.
 
 ---
 
@@ -102,6 +110,8 @@ The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `s
 2. Install with `tools/Install-T2AudioDriver.ps1`.
 3. Run a staged session with `tools/T2Audio-TestAgent.ps1 -Stage 3` (discovery and stream format only, no audio I/O) and capture the log with `tools/Capture-T2AudioLog.ps1`.
 4. Before any stage-5 run, the stage-3 log must show `pft: rate=48000 ... ch=6 bits=24` and `sample shift=8`.
+5. After updating from an older 6-channel build, Windows may keep the cached 6-channel endpoint format, which this driver rejects (`Validate: 6 channels not offered`). Select 2 channels / 32-bit / 48 kHz in the device's Advanced properties, or reinstall the device.
+6. First audible run: stereo, volume 1–5 %. Check the speaker order only with `-RawChannels`, with a quiet tone of 1 kHz or above, one channel at a time.
 
 ---
 
@@ -115,13 +125,14 @@ The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `s
 
 ## Roadmap
 
-1. Find the root cause of the `START_IO` bugcheck in `AppleUSBVHCI`'s forwarded IRP.
-2. Find a receive path for T2 notifications (alive handshake, `UPDATE_TIMESTAMP`) to get a real hardware clock.
-3. Add power management (remote access OFF before sleep, buffer reset on resume).
-4. Add jack/headphone output and microphone input.
+1. ~~Root cause of the `START_IO` bugcheck~~ — found statically (`0x222020`), handler added; confirm on hardware.
+2. ~~Receive path for T2 notifications / hardware clock~~ — done (`UPDATE_TIMESTAMP`), confirm on hardware.
+3. First sound: stage 5 + `START_IO` at low volume; confirm the speaker order (`-RawChannels`).
+4. Power management (`IAdapterPowerManagement`: STOP_IO before D3).
+5. Optional: closer speaker DSP (EQ/crossover per kaiT2en `dsp/profiles/16_1`), hardware volume (msg 28 controls), jack/headphone output, microphone input.
 
 ## Attributions
 
-* **kaiT2en** — [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (GPL-2.0), and the earlier [kekrby/linux-t2](https://github.com/kekrby/linux-t2) work. The protocol constants, BufferStruct layout and init/quiesce sequence come from there. The code here is an independent Windows implementation; see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+* **kaiT2en** — [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (GPL-2.0), and the earlier [kekrby/linux-t2](https://github.com/kekrby/linux-t2) work. The protocol constants, BufferStruct layout, init/quiesce sequence and timestamp handling come from there. The MacBookPro16,1 speaker channel layout was read from its DSP profile (`dsp/profiles/16_1`, © André Eikmeyer, GPL-3.0-or-later); no filter coefficients or FIR data were copied. The code here is an independent Windows implementation; see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 * **osaul4ik** — [apple-t2-touchid-windows](https://github.com/osaul4ik/apple-t2-touchid-windows) (GPL-2.0). The WDK CI workflow design comes from there.
 * **Apple Boot Camp** — `AppleAudio.sys` / `AppleUSBVHCI.sys`, analyzed for the transport protocol.

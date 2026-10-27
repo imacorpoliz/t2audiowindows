@@ -110,6 +110,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG ClockGeneration;
     ULONG64 ClockAnchorFrames;
     ULONG64 ClockAnchorQpc;
+    // Host time (QPC ns) the anchor stands for: hostTime if plausible, else
+    // the reception time. Streams drop anchors older than their START_IO.
+    ULONG64 ClockAnchorNs;
     // Speaker path options. TweeterMode (Parameters\TweeterMode, default 1 =
     // high-pass, 0 = mute) applies to the stereo format. RawSpeakerChannels
     // (TestSession\RawSpeakerChannels=1) offers the 6 raw ring channels to
