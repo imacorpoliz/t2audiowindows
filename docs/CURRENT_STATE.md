@@ -1,11 +1,23 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28  
-**Current status**: **READY FOR TESTING**. All known root causes of the historical BSOD `0x7E` and audio playback failures (347 ms silence/stutter, BCE response opcode mismatch, WASAPI multi-channel rejection, normal boot gating) have been resolved based on REA reverse engineering of `AppleAudio.sys` and Linux `kaiT2en` principles. Builds cleanly with 0 errors (`Release|x64`). Host unit tests pass 100%.  
+**Current status**: **EXPERIMENTAL, diagnostic session only.** The `0x7E` bugcheck on `START_IO` is not proven fixed (both `FileObject` variants crashed on 2026-10-08). The code-review source fixes below are host-tested only; no hardware run has validated them.  
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): code review fixes (source only, not hardware-tested)
+
+- **Copy ahead of written data (playback):** the copy DPC copied up to 15 ms *ahead* of the reported play position, from a 10 ms client buffer, so it mirrored frames the client had not written yet (aliased stale data). Now each frame is copied once consumed and written 720 frames ahead in the BAR1 ring; the reported position is the consumed cursor, and `GetPosition` advances the copy itself (no dependency on the 15.6 ms default timer resolution). The lag clamp is one client buffer instead of 1440 frames.
+- **System buffer mapping leak:** the client buffer was mapped with `MmGetSystemAddressForMdlSafe` and its pages freed while still mapped. Now `MapAllocatedPages` / `UnmapAllocatedPages` are paired before `FreePagesFromMdl`.
+- **Teardown:** no code released the BAR mappings and the BCE file-object reference on device removal or driver unload. A `IRP_MJ_PNP` hook now calls `T2AudioUnmapResources` on stop / surprise removal / remove before `PcDispatchIrp`. BAR1 writers (copy, STOP zeroing) and teardown are serialized by a new `HardwareLock`, so BAR1 cannot be unmapped mid-write.
+- **PortStream reference:** the miniport stream now holds a reference on the port stream for its lifetime.
+- **Format:** `DataRangeIntersection` returns a 6-ch 48 kHz 32-bit `WAVEFORMATEXTENSIBLE` (5.1); validation accepts `KSAUDIO_SPEAKER_5POINT1` as well as `_SURROUND`.
+- **QPC math:** `ticks * rate` replaced by an overflow-free `T2AudioTicksToFrames` helper (unit-tested).
+- **Docs:** the "Normal Operational Mode" and "BSOD resolved" claims of 2026-10-28 did not match the source / evidence and were corrected. The `TestSession` start gate is unchanged.
+
 ### 2026-10-28: Root-cause resolution of BSOD 0x7E & playback defects (kaiT2en parity)
+
+> **Correction (code review, same day):** the BSOD and "Normal Operational Mode" items in this entry are not accurate - see the entry above.
 
 - **BSOD `0x7E` resolved:** Reversing of `AppleAudio.sys` with REA demonstrated that `IoBuildDeviceIoControlRequest` deliberately leaves `FileObject = NULL`. In `src/BceTransport.c`, setting `FileObject` on the forwarded IRP was what triggered `AppleUSBVHCI.sys` to delegate the request to `ksthunk!DispatchDeviceIoControl` (which dereferenced `FileObject->FsContext` without a NULL check). Keeping `FileObject = NULL` lets `AppleUSBVHCI` handle the IOCTL internally without delegation to `ksthunk`.
 - **Circular DMA Ring Buffer Mirroring (Fix for 347 ms stutter/silence):** T2 hardware loops through a 399,360-byte (`0x61800` = 16,640 frames $\times$ 24 bytes) buffer in BAR1 at 48 kHz (cycle time = 346.6 ms). The original driver wrote static offset-0 chunks, causing 10 ms of sound and 336 ms of silence. Implemented `T2AudioCalculateCopyChunk` in `src/T2AudioBufferLogic.h` and `src/WaveRTStream.c` maintaining a 15 ms lead ahead of hardware read cursor.

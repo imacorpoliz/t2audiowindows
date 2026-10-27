@@ -19,6 +19,34 @@ T2AudioAddDevice(
     _In_ PDRIVER_OBJECT DriverObject,
     _In_ PDEVICE_OBJECT PhysicalDeviceObject);
 
+// PortCls has no "stop/remove" callback for the adapter, so without this hook
+// the BAR mappings and the BCE file-object reference taken in StartDevice were
+// never released on device removal or driver unload. Release them on every
+// stop/removal path, then let PortCls process the IRP as usual.
+static NTSTATUS
+T2AudioPnpHandler(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+    switch (stack->MinorFunction) {
+    case IRP_MN_STOP_DEVICE:
+    case IRP_MN_SURPRISE_REMOVAL:
+    case IRP_MN_REMOVE_DEVICE:
+        if (DeviceObject->DeviceExtension != NULL) {
+            KdPrint(("T2Audio: PnP minor 0x%02X - releasing hardware\n",
+                     stack->MinorFunction));
+            T2AudioUnmapResources(T2AudioGetContext(DeviceObject));
+        }
+        break;
+    default:
+        break;
+    }
+
+    return PcDispatchIrp(DeviceObject, Irp);
+}
+
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT DriverObject,
@@ -36,6 +64,10 @@ DriverEntry(
         KdPrint(("T2Audio: PcInitializeAdapterDriver failed: 0x%08X\n", status));
         return status;
     }
+
+    // Must come after PcInitializeAdapterDriver, which installs PortCls's own
+    // dispatch table; T2AudioPnpHandler forwards to PcDispatchIrp.
+    DriverObject->MajorFunction[IRP_MJ_PNP] = T2AudioPnpHandler;
 
     KdPrint(("T2Audio: PortCls driver initialized\n"));
     return STATUS_SUCCESS;
@@ -135,6 +167,7 @@ T2AudioStartDevice(
 
     RtlZeroMemory(context, sizeof(*context));
     context->DeviceObject = DeviceObject;
+    KeInitializeSpinLock(&context->HardwareLock);
 
     // Never start in Safe Mode. This driver programs device memory, and a fault
     // here must not make the recovery environment unusable. SafeBootMode is set

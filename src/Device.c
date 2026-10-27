@@ -8,6 +8,7 @@ T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     SIZE_T bar1Size;
     PVOID bar2;
     SIZE_T bar2Size;
+    KIRQL oldIrql;
 
     PAGED_CODE();
 
@@ -15,25 +16,14 @@ T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         return;
     }
 
-    // Stop all further device access before tearing anything down. HardwareReady
-    // gates the copy DPC and the I/O paths, so clearing it first stops a tick
-    // from starting a write into a mapping that is about to disappear. This
-    // function is idempotent: a second call finds everything already cleared.
+    // Stop all further device access before tearing anything down. Every BAR1
+    // writer checks HardwareReady and writes under HardwareLock, so once this
+    // lock is released no write is in flight and none can start. Snapshot then
+    // clear the mappings under the same lock so a writer that re-checks the
+    // context sees NULL rather than a freed pointer. This function is
+    // idempotent: a second call finds everything already cleared.
+    KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
     Context->HardwareReady = FALSE;
-
-    // Backstop against a copy DPC that is already executing past its
-    // HardwareReady check: drain queued DPCs on all processors before the
-    // mapping pointers below are cleared and unmapped. In the normal PnP flow no
-    // stream (and therefore no copy DPC) exists while this runs - PortCls tears
-    // streams down before the device is stopped - so this only guards the
-    // invariant should that ordering ever be broken.
-    KeFlushQueuedDpcs();
-
-    T2AudioCloseBceTransport();
-    T2AudioFreeSpeakerMdl(Context);
-
-    // Snapshot then clear the mappings before unmapping, so a concurrent reader
-    // that re-checks the context sees NULL rather than a freed pointer.
     bar1 = Context->Bar1Mapped;
     bar1Size = Context->Bar1Size;
     bar2 = Context->Bar2Mapped;
@@ -46,6 +36,14 @@ T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->BufferStruct = NULL;
     Context->SpeakerBufferOffset = 0;
     Context->SpeakerBufferSize = 0;
+    KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
+
+    // Drain queued copy DPCs as well, so none runs against this context after
+    // teardown.
+    KeFlushQueuedDpcs();
+
+    T2AudioCloseBceTransport();
+    T2AudioFreeSpeakerMdl(Context);
 
     if (bar1 != NULL) {
         MmUnmapIoSpace(bar1, bar1Size);

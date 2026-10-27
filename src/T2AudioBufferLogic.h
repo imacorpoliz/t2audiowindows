@@ -130,8 +130,28 @@ T2AudioDecideBufferRelease(unsigned long held,
     return hardware ? T2AUDIO_RELEASE_HARDWARE : T2AUDIO_RELEASE_SYSTEM;
 }
 
+// Convert an elapsed performance-counter interval into whole audio frames.
+// Split into whole seconds and remainder so Ticks * SampleRate cannot overflow
+// 64 bits however long the stream has been running. Returns 0 for a zero
+// Frequency.
+static __inline unsigned long long
+T2AudioTicksToFrames(unsigned long long Ticks,
+                     unsigned long SampleRate,
+                     unsigned long long Frequency)
+{
+    if (Frequency == 0) {
+        return 0;
+    }
+    return (Ticks / Frequency) * SampleRate +
+           ((Ticks % Frequency) * SampleRate) / Frequency;
+}
+
 // Calculates next contiguous copy chunk from source cyclic buffer to destination cyclic buffer.
-// StartFrame: current frame index from stream start (monotonically increasing)
+// SourceFrame: frame index (from stream start, monotonically increasing) read
+//              from the source ring
+// DestFrame: frame index written into the destination ring. It may run ahead
+//            of SourceFrame by a fixed lead so the hardware read cursor trails
+//            the data written for it.
 // RemainingFrames: frames left to copy in this tick
 // BytesPerFrame: bytes per audio frame (e.g. 6 channels * 4 bytes = 24)
 // SourceBufferSize: size of host cyclic buffer in bytes (e.g. 11520)
@@ -142,7 +162,8 @@ T2AudioDecideBufferRelease(unsigned long held,
 // OutByteLength: bytes to copy in this linear chunk
 // Returns number of frames represented by this chunk, or 0 if nothing to copy.
 static __inline unsigned long
-T2AudioCalculateCopyChunk(unsigned long long StartFrame,
+T2AudioCalculateCopyChunk(unsigned long long SourceFrame,
+                          unsigned long long DestFrame,
                           unsigned long RemainingFrames,
                           unsigned long BytesPerFrame,
                           unsigned long SourceBufferSize,
@@ -168,8 +189,8 @@ T2AudioCalculateCopyChunk(unsigned long long StartFrame,
         return 0;
     }
 
-    srcByteOffset = (unsigned long)(StartFrame % (SourceBufferSize / BytesPerFrame)) * BytesPerFrame;
-    dstByteOffset = (unsigned long)(StartFrame % (DestBufferSize / BytesPerFrame)) * BytesPerFrame;
+    srcByteOffset = (unsigned long)(SourceFrame % (SourceBufferSize / BytesPerFrame)) * BytesPerFrame;
+    dstByteOffset = (unsigned long)(DestFrame % (DestBufferSize / BytesPerFrame)) * BytesPerFrame;
 
     srcBytesAvail = SourceBufferSize - srcByteOffset;
     dstBytesAvail = DestBufferSize - dstByteOffset;

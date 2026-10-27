@@ -6,6 +6,12 @@
 // ~347 ms of audio at 48 kHz/6ch/24-bit, so a few ms keeps the mirror fresh.
 #define T2AUDIO_COPY_PERIOD_MS 2
 
+// How far (in frames) the data written into the BAR1 ring runs ahead of the
+// frame the source cursor has just consumed: 15 ms at 48 kHz. The T2 read
+// cursor is assumed to track the source cursor, so it trails the freshly
+// written data by this lead.
+#define T2AUDIO_LEAD_FRAMES 720u
+
 typedef struct _T2AUDIO_WAVERT_STREAM {
     IMiniportWaveRTStream Interface;
     LONG ReferenceCount;
@@ -27,8 +33,12 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     PVOID SystemBufferVa;
     ULONG SourceSize;
     ULONG CopySize;
+    // Consumed-frame cursor: every source frame before it has already been
+    // mirrored into BAR1 (or skipped when MMIO copy is off). This is the play
+    // position reported to the audio engine, so the engine never reuses a
+    // part of the client buffer that has not been copied yet. Protected by
+    // StreamLock.
     ULONG64 LastCopiedFrame;
-    BOOLEAN FirstTick;
     KTIMER CopyTimer;
     KDPC CopyDpc;
     BOOLEAN TimerActive;
@@ -43,48 +53,125 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
 
 static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
 
-// Byte play cursor derived from QPC, anchored when the stream entered RUN.
-// Used both to answer GetPosition and to advance the memory-mapped position
-// register the audio engine polls. Returns 0 when the stream is stopped.
-static ULONG
-T2AudioStreamPlayPositionBytes(_In_ PT2AUDIO_WAVERT_STREAM instance)
+// Advance the consumed-frame cursor to "now" and mirror the newly consumed
+// source frames into the BAR1 hardware ring. Must be called with StreamLock
+// held (so at DISPATCH_LEVEL); only advances while the stream is in RUN.
+//
+// The source cursor runs at the sample rate from the QPC anchor taken on entry
+// to RUN. Every source frame up to that cursor is copied before the cursor is
+// published as the play position, so the client cannot overwrite a frame
+// before it has been mirrored. Each frame lands T2AUDIO_LEAD_FRAMES ahead in
+// the hardware ring, i.e. ahead of where the T2 is assumed to be reading.
+static VOID
+T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
 {
+    PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
     LARGE_INTEGER qpc, qpcFreq;
-    ULONG64 elapsedTicks, elapsedFrames, playOffset;
-    ULONG bufferSize = instance->AudioBufferSize;
-    KSSTATE state;
-    ULONG64 anchorFrames;
-    ULONG64 anchorQpc;
-    KIRQL oldIrql;
+    ULONG64 playFrame;
+    ULONG64 frame;
+    ULONG64 pendingFrames;
+    ULONG sourceFrames;
+    BOOLEAN canCopy;
 
-    if (bufferSize == 0 || instance->BytesPerFrame == 0 || instance->SampleRate == 0) {
-        return 0;
-    }
-
-    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
-    state = instance->State;
-    anchorFrames = instance->AnchorFrames;
-    anchorQpc = instance->AnchorQpc;
-    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
-
-    if (state == KSSTATE_STOP) {
-        return 0;
-    }
-
-    if (state == KSSTATE_PAUSE || state == KSSTATE_ACQUIRE) {
-        playOffset = anchorFrames * instance->BytesPerFrame;
-        return (ULONG)(playOffset % bufferSize);
+    if (instance->State != KSSTATE_RUN || instance->SystemBufferVa == NULL ||
+        instance->SourceSize == 0 || instance->BytesPerFrame == 0 ||
+        instance->SampleRate == 0) {
+        return;
     }
 
     qpc = KeQueryPerformanceCounter(&qpcFreq);
-    if ((ULONG64)qpc.QuadPart > anchorQpc && qpcFreq.QuadPart > 0) {
-        elapsedTicks = (ULONG64)qpc.QuadPart - anchorQpc;
-        elapsedFrames = (elapsedTicks * instance->SampleRate) / (ULONG64)qpcFreq.QuadPart;
-    } else {
-        elapsedFrames = 0;
+    playFrame = instance->AnchorFrames;
+    if ((ULONG64)qpc.QuadPart > instance->AnchorQpc && qpcFreq.QuadPart > 0) {
+        playFrame += T2AudioTicksToFrames((ULONG64)qpc.QuadPart - instance->AnchorQpc,
+                                          instance->SampleRate,
+                                          (ULONG64)qpcFreq.QuadPart);
     }
-    playOffset = (anchorFrames + elapsedFrames) * instance->BytesPerFrame;
-    return (ULONG)(playOffset % bufferSize);
+
+    frame = instance->LastCopiedFrame;
+    if (playFrame <= frame) {
+        return;
+    }
+
+    // Frames more than one client buffer behind have already been overwritten
+    // by the client; skip them instead of copying stale data.
+    sourceFrames = instance->SourceSize / instance->BytesPerFrame;
+    pendingFrames = playFrame - frame;
+    if (pendingFrames > sourceFrames) {
+        frame = playFrame - sourceFrames;
+        pendingFrames = sourceFrames;
+    }
+
+    if (context == NULL) {
+        instance->LastCopiedFrame = playFrame;
+        return;
+    }
+
+    // Hold the device's hardware lock across the check and the writes so
+    // T2AudioUnmapResources cannot unmap BAR1 underneath the copy.
+    KeAcquireSpinLockAtDpcLevel(&context->HardwareLock);
+    canCopy = context->HardwareReady &&
+              context->MmioCopyEnabled && context->Bar1Mapped != NULL &&
+              context->SpeakerBufferSize != 0 &&
+              context->SpeakerBufferSize <= MAXULONG &&
+              context->SpeakerBufferOffset <= context->Bar1Size &&
+              context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset;
+
+    if (canCopy) {
+        PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
+        PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
+        ULONG remainingFrames = (ULONG)pendingFrames;
+
+        while (remainingFrames > 0) {
+            ULONG srcOffset = 0;
+            ULONG dstOffset = 0;
+            ULONG byteLen = 0;
+            ULONG chunkFrames = T2AudioCalculateCopyChunk(
+                frame,
+                frame + T2AUDIO_LEAD_FRAMES,
+                remainingFrames,
+                instance->BytesPerFrame,
+                instance->SourceSize,
+                (ULONG)context->SpeakerBufferSize,
+                &srcOffset,
+                &dstOffset,
+                &byteLen);
+
+            if (chunkFrames == 0) {
+                break;
+            }
+
+            RtlCopyMemory(hwBufferBase + dstOffset, sourceBase + srcOffset, byteLen);
+
+            frame += chunkFrames;
+            remainingFrames -= chunkFrames;
+        }
+    }
+    KeReleaseSpinLockFromDpcLevel(&context->HardwareLock);
+
+    instance->LastCopiedFrame = playFrame;
+}
+
+// Byte play cursor reported to the audio engine: the consumed-frame cursor,
+// advanced to "now" first while running. Returns 0 when the stream is stopped.
+static ULONG
+T2AudioStreamPlayPositionBytes(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
+{
+    ULONG64 frame;
+    ULONG bufferSize;
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+    bufferSize = instance->AudioBufferSize;
+    if (instance->State == KSSTATE_STOP || bufferSize == 0 ||
+        instance->BytesPerFrame == 0) {
+        KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+        return 0;
+    }
+    T2AudioStreamAdvanceLocked(instance);
+    frame = instance->LastCopiedFrame;
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+
+    return (ULONG)((frame * instance->BytesPerFrame) % bufferSize);
 }
 
 // Release the buffer currently held by the stream (if any). `expected` is the
@@ -97,10 +184,13 @@ T2AudioStreamReleaseBuffer(
     _Inout_ PT2AUDIO_WAVERT_STREAM instance,
     _In_opt_ PMDL expected)
 {
+    PMDL mdl = instance->AudioBufferMdl;
+    PVOID systemVa;
+    KIRQL oldIrql;
     ULONG action = T2AudioDecideBufferRelease(
-        instance->AudioBufferMdl != NULL,
+        mdl != NULL,
         instance->HardwareBuffer,
-        (expected == NULL) || (expected == instance->AudioBufferMdl));
+        (expected == NULL) || (expected == mdl));
 
     // A foreign, unknown, or already-released MDL is not ours to release. Leave
     // the stream completely untouched - including its copy timer - so a bogus
@@ -112,21 +202,33 @@ T2AudioStreamReleaseBuffer(
     // Stop mirroring before the source or destination can go away.
     T2AudioStreamStopCopyTimer(instance);
 
+    // Detach the buffer under the lock so a concurrent GetPosition can no
+    // longer copy from it.
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+    systemVa = instance->SystemBufferVa;
+    instance->AudioBufferMdl = NULL;
+    instance->AudioBufferSize = 0;
+    instance->SystemBufferVa = NULL;
+    instance->SourceSize = 0;
+    instance->CopySize = 0;
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+
     if (action == T2AUDIO_RELEASE_HARDWARE) {
         T2AudioFreeSpeakerMdl(instance->DeviceContext);
     } else { // T2AUDIO_RELEASE_SYSTEM
         if (instance->PortStream != NULL) {
+            // The kernel mapping must be torn down before the pages are freed,
+            // or a system PTE keeps pointing at recycled physical memory.
+            if (systemVa != NULL) {
+                instance->PortStream->lpVtbl->UnmapAllocatedPages(
+                    (PVOID)instance->PortStream, systemVa, mdl);
+            }
             instance->PortStream->lpVtbl->FreePagesFromMdl(
-                (PVOID)instance->PortStream, instance->AudioBufferMdl);
+                (PVOID)instance->PortStream, mdl);
         }
     }
 
-    instance->AudioBufferMdl = NULL;
-    instance->AudioBufferSize = 0;
     instance->HardwareBuffer = FALSE;
-    instance->SystemBufferVa = NULL;
-    instance->SourceSize = 0;
-    instance->CopySize = 0;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -170,6 +272,9 @@ T2AudioStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
         // Defensive: PortCls normally calls FreeAudioBuffer first, but release
         // any buffer still held so a failed/partial lifecycle cannot leak it.
         T2AudioStreamReleaseBuffer(stream, NULL);
+        if (stream->PortStream != NULL) {
+            stream->PortStream->lpVtbl->Release((PVOID)stream->PortStream);
+        }
         ExFreePoolWithTag(stream, '2TAS');
     }
     return (ULONG)references;
@@ -187,7 +292,6 @@ T2AudioStreamCopyTick(
     _In_opt_ PVOID SystemArgument2)
 {
     PT2AUDIO_WAVERT_STREAM instance = (PT2AUDIO_WAVERT_STREAM)DeferredContext;
-    PT2AUDIO_DEVICE_CONTEXT context;
 
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
@@ -196,96 +300,10 @@ T2AudioStreamCopyTick(
     if (instance == NULL) {
         return;
     }
-    context = instance->DeviceContext;
     instance->CopyTickCalls++;
 
-    // Mirror the system buffer into the BAR1 hardware buffer continuously, keeping a
-    // safe lead buffer ahead of T2 hardware's circular read cursor.
-    if (instance->SystemBufferVa != NULL && instance->SourceSize != 0 &&
-        context != NULL && context->HardwareReady && context->MmioCopyEnabled &&
-        context->Bar1Mapped != NULL && context->SpeakerBufferSize != 0 &&
-        context->SpeakerBufferOffset <= context->Bar1Size &&
-        context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset &&
-        instance->BytesPerFrame != 0) {
-
-        PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
-        PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
-        ULONG sourceBufferSize = instance->SourceSize;
-        ULONG hwBufferSize = (ULONG)context->SpeakerBufferSize;
-        ULONG bytesPerFrame = instance->BytesPerFrame;
-
-        // Determine current played frames derived from QPC
-        LARGE_INTEGER qpc, qpcFreq;
-        ULONG64 elapsedFrames = 0;
-        ULONG64 anchorFrames;
-        ULONG64 anchorQpc;
-        KIRQL oldIrql;
-
-        KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
-        anchorFrames = instance->AnchorFrames;
-        anchorQpc = instance->AnchorQpc;
-        KeReleaseSpinLock(&instance->StreamLock, oldIrql);
-
-        qpc = KeQueryPerformanceCounter(&qpcFreq);
-        if ((ULONG64)qpc.QuadPart > anchorQpc && qpcFreq.QuadPart > 0 && instance->SampleRate > 0) {
-            ULONG64 elapsedTicks = (ULONG64)qpc.QuadPart - anchorQpc;
-            elapsedFrames = (elapsedTicks * instance->SampleRate) / (ULONG64)qpcFreq.QuadPart;
-        }
-
-        ULONG64 currentPlayFrame = anchorFrames + elapsedFrames;
-
-        // Keep 15ms lead buffer (720 frames at 48kHz) ahead of hardware play cursor
-        #define T2AUDIO_LEAD_FRAMES 720u
-        ULONG64 targetFrame = currentPlayFrame + T2AUDIO_LEAD_FRAMES;
-
-        if (instance->FirstTick) {
-            instance->FirstTick = FALSE;
-            instance->LastCopiedFrame = currentPlayFrame;
-        }
-
-        if (targetFrame > instance->LastCopiedFrame) {
-            ULONG64 pendingFrames = targetFrame - instance->LastCopiedFrame;
-            ULONG framesToCopy;
-            // Bound copy window to avoid runaway loop on massive lag spikes
-            if (pendingFrames > T2AUDIO_LEAD_FRAMES * 2) {
-                pendingFrames = T2AUDIO_LEAD_FRAMES * 2;
-                instance->LastCopiedFrame = targetFrame - pendingFrames;
-            }
-            framesToCopy = (ULONG)pendingFrames;
-
-            ULONG64 startFrame = instance->LastCopiedFrame;
-            ULONG remainingFrames = framesToCopy;
-
-            while (remainingFrames > 0) {
-                ULONG srcOffset = 0;
-                ULONG dstOffset = 0;
-                ULONG byteLen = 0;
-                ULONG chunkFrames = T2AudioCalculateCopyChunk(
-                    startFrame,
-                    remainingFrames,
-                    bytesPerFrame,
-                    sourceBufferSize,
-                    hwBufferSize,
-                    &srcOffset,
-                    &dstOffset,
-                    &byteLen);
-
-                if (chunkFrames == 0) {
-                    break;
-                }
-
-                RtlCopyMemory(hwBufferBase + dstOffset, sourceBase + srcOffset, byteLen);
-
-                startFrame += chunkFrames;
-                remainingFrames -= chunkFrames;
-            }
-
-            instance->LastCopiedFrame = startFrame;
-        }
-    }
-
-    // Advance the memory-mapped play cursor the audio engine reads, in every
-    // mode, so the engine can drain the buffer.
+    // Backstop for the mirror: GetPosition also advances it, but the engine
+    // may poll rarely. The memory-mapped register is kept for diagnostics.
     instance->PositionRegister = T2AudioStreamPlayPositionBytes(instance);
 }
 
@@ -386,12 +404,9 @@ T2AudioStreamSetState(
 
                 KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
                 instance->AnchorQpc = currentQpc;
-                if (instance->State == KSSTATE_STOP) {
-                    instance->AnchorFrames = 0;
-                    instance->PositionRegister = 0;
-                    instance->LastCopiedFrame = 0;
-                    instance->FirstTick = TRUE;
-                }
+                // Resume from the consumed cursor so no frame is skipped or
+                // copied twice across PAUSE -> RUN.
+                instance->AnchorFrames = instance->LastCopiedFrame;
                 instance->State = KSSTATE_RUN;
                 KeReleaseSpinLock(&instance->StreamLock, oldIrql);
             }
@@ -405,26 +420,18 @@ T2AudioStreamSetState(
             }
         }
     } else {
-        // PAUSE / ACQUIRE / STOP: accumulate played frames before leaving RUN
+        // PAUSE / ACQUIRE / STOP: flush the frames played so far before
+        // leaving RUN, so the consumed cursor is exact at the transition.
         KIRQL oldIrql;
-        LARGE_INTEGER qpcFreq;
-        ULONG64 currentQpc = (ULONG64)KeQueryPerformanceCounter(&qpcFreq).QuadPart;
 
-        // The DPC also owns FirstTick/LastCopiedFrame; drain it before reset.
         T2AudioStreamStopCopyTimer(instance);
         KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
-        if (instance->State == KSSTATE_RUN) {
-            if (currentQpc > instance->AnchorQpc && qpcFreq.QuadPart > 0 && instance->SampleRate > 0) {
-                ULONG64 elapsedTicks = currentQpc - instance->AnchorQpc;
-                ULONG64 elapsedFrames = (elapsedTicks * instance->SampleRate) / (ULONG64)qpcFreq.QuadPart;
-                instance->AnchorFrames += elapsedFrames;
-            }
-        }
+        T2AudioStreamAdvanceLocked(instance);
+        instance->AnchorFrames = instance->LastCopiedFrame;
         if (State == KSSTATE_STOP) {
             instance->AnchorFrames = 0;
             instance->PositionRegister = 0;
             instance->LastCopiedFrame = 0;
-            instance->FirstTick = TRUE;
         }
         instance->State = State;
         KeReleaseSpinLock(&instance->StreamLock, oldIrql);
@@ -433,16 +440,23 @@ T2AudioStreamSetState(
                  State, instance->GetPositionCalls,
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
-        if (State == KSSTATE_STOP && instance->DeviceContext != NULL &&
-            instance->DeviceContext->HardwareReady &&
-            instance->DeviceContext->MmioCopyEnabled &&
-            instance->DeviceContext->Bar1Mapped != NULL &&
-            instance->DeviceContext->SpeakerBufferSize != 0 &&
-            instance->DeviceContext->SpeakerBufferOffset <= instance->DeviceContext->Bar1Size &&
-            instance->DeviceContext->SpeakerBufferSize <= instance->DeviceContext->Bar1Size - instance->DeviceContext->SpeakerBufferOffset) {
-            RtlZeroMemory((PUCHAR)instance->DeviceContext->Bar1Mapped +
-                          instance->DeviceContext->SpeakerBufferOffset,
-                          instance->DeviceContext->SpeakerBufferSize);
+        if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
+            PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
+
+            // Silence the hardware ring under the hardware lock, so a
+            // concurrent teardown cannot unmap BAR1 mid-write.
+            KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
+            if (context->HardwareReady &&
+                context->MmioCopyEnabled &&
+                context->Bar1Mapped != NULL &&
+                context->SpeakerBufferSize != 0 &&
+                context->SpeakerBufferOffset <= context->Bar1Size &&
+                context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset) {
+                RtlZeroMemory((PUCHAR)context->Bar1Mapped +
+                              context->SpeakerBufferOffset,
+                              context->SpeakerBufferSize);
+            }
+            KeReleaseSpinLock(&context->HardwareLock, oldIrql);
         }
         if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u)) {
             NTSTATUS status;
@@ -486,6 +500,8 @@ T2AudioStreamGetPosition(
     }
 
     instance->GetPositionCalls++;
+    // Advances the mirror first, so the reported position never runs ahead of
+    // what has been copied out of the client buffer.
     playOffset = T2AudioStreamPlayPositionBytes(instance);
 
     Position->PlayOffset = playOffset;
@@ -577,7 +593,10 @@ T2AudioStreamAllocateAudioBuffer(
                 (PVOID)instance->PortStream, mdl);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
-        systemVa = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+        // Map through the port so FreeAudioBuffer can pair it with
+        // UnmapAllocatedPages before the pages are released.
+        systemVa = instance->PortStream->lpVtbl->MapAllocatedPages(
+            (PVOID)instance->PortStream, mdl, MmCached);
         if (systemVa == NULL) {
             instance->PortStream->lpVtbl->FreePagesFromMdl(
                 (PVOID)instance->PortStream, mdl);
@@ -723,7 +742,11 @@ T2AudioCreateStream(
     instance->SampleRate = 48000;
     instance->BytesPerFrame = 24;
     instance->State = KSSTATE_STOP;
-    instance->FirstTick = TRUE;
+    // The stream uses PortStream until it is destroyed (FreeAudioBuffer and the
+    // final Release), so hold a reference for its lifetime.
+    if (PortStream != NULL) {
+        PortStream->lpVtbl->AddRef((PVOID)PortStream);
+    }
     KeInitializeSpinLock(&instance->StreamLock);
     KeInitializeTimer(&instance->CopyTimer);
     KeInitializeDpc(&instance->CopyDpc, T2AudioStreamCopyTick, instance);

@@ -25,6 +25,11 @@ static const GUID g_T2AudioSubtypeAnalog = {
     0x6dba3190, 0x67bd, 0x11cf,
     { 0xa0, 0xf7, 0x00, 0x20, 0xaf, 0xd1, 0x56, 0xe4 }
 };
+// KSDATAFORMAT_TYPE/SUBTYPE/SPECIFIER_WILDCARD are all GUID_NULL.
+static const GUID g_T2AudioWildcard = {
+    0x00000000, 0x0000, 0x0000,
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
+};
 static const GUID g_T2AudioSpecifierNone = {
     0x0f6417d6, 0xc318, 0x11d0,
     { 0xa4, 0x3f, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
@@ -238,11 +243,10 @@ T2AudioMiniportDataRangeIntersection(
         PVOID ResultantFormat,
     _Out_ PULONG ResultantFormatLength)
 {
+    PKSDATAFORMAT_WAVEFORMATEXTENSIBLE result;
+
     UNREFERENCED_PARAMETER(Miniport);
-    UNREFERENCED_PARAMETER(DataRange);
     UNREFERENCED_PARAMETER(MatchingDataRange);
-    UNREFERENCED_PARAMETER(OutputBufferLength);
-    UNREFERENCED_PARAMETER(ResultantFormat);
 
     KdPrint(("T2Audio: DataRangeIntersection pin=%u outLen=%u\n",
              PinId, OutputBufferLength));
@@ -252,14 +256,77 @@ T2AudioMiniportDataRangeIntersection(
     }
     *ResultantFormatLength = 0;
 
-    if (PinId == T2AUDIO_WAVE_PIN_RENDER_SINK ||
-        PinId == T2AUDIO_WAVE_PIN_BRIDGE) {
-        // PortCls performs the intersection against the advertised pin ranges.
-        // Do not claim an unconditional match for an incompatible client range.
+    if (PinId == T2AUDIO_WAVE_PIN_BRIDGE) {
+        // Analog bridge: let PortCls run its default intersection.
         return STATUS_NOT_IMPLEMENTED;
     }
+    if (PinId != T2AUDIO_WAVE_PIN_RENDER_SINK || DataRange == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
 
-    return STATUS_INVALID_PARAMETER;
+    // The client range must be audio/PCM with a WAVEFORMATEX specifier (or
+    // wildcards) and, if it is an audio range, cover 6ch/32-bit/48 kHz.
+    if (!IsEqualGUIDAligned(&DataRange->MajorFormat, &g_T2AudioTypeAudio) &&
+        !IsEqualGUIDAligned(&DataRange->MajorFormat, &g_T2AudioWildcard)) {
+        return STATUS_NO_MATCH;
+    }
+    if (!IsEqualGUIDAligned(&DataRange->SubFormat, &g_T2AudioSubtypePcm) &&
+        !IsEqualGUIDAligned(&DataRange->SubFormat, &g_T2AudioWildcard)) {
+        return STATUS_NO_MATCH;
+    }
+    if (!IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioSpecifierWaveformex) &&
+        !IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioWildcard)) {
+        return STATUS_NO_MATCH;
+    }
+    if (IsEqualGUIDAligned(&DataRange->Specifier, &g_T2AudioSpecifierWaveformex) &&
+        DataRange->FormatSize >= sizeof(KSDATARANGE_AUDIO)) {
+        PKSDATARANGE_AUDIO audioRange = (PKSDATARANGE_AUDIO)DataRange;
+
+        if (audioRange->MaximumChannels < 6 ||
+            audioRange->MinimumBitsPerSample > 32 ||
+            audioRange->MaximumBitsPerSample < 32 ||
+            audioRange->MinimumSampleFrequency > 48000 ||
+            audioRange->MaximumSampleFrequency < 48000) {
+            return STATUS_NO_MATCH;
+        }
+    }
+
+    // Size query, or a buffer too small for the result.
+    if (OutputBufferLength == 0) {
+        *ResultantFormatLength = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    if (OutputBufferLength < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE) ||
+        ResultantFormat == NULL) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    // Multichannel formats must be described with WAVEFORMATEXTENSIBLE; a
+    // plain 6-channel WAVE_FORMAT_PCM has no channel mask and the audio engine
+    // does not accept it for a 5.1 endpoint.
+    result = (PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)ResultantFormat;
+    RtlZeroMemory(result, sizeof(*result));
+    result->DataFormat.FormatSize = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
+    result->DataFormat.Flags = 0;
+    result->DataFormat.SampleSize = 24;
+    result->DataFormat.Reserved = 0;
+    result->DataFormat.MajorFormat = g_T2AudioTypeAudio;
+    result->DataFormat.SubFormat = g_T2AudioSubtypePcm;
+    result->DataFormat.Specifier = g_T2AudioSpecifierWaveformex;
+    result->WaveFormatExt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    result->WaveFormatExt.Format.nChannels = 6;
+    result->WaveFormatExt.Format.nSamplesPerSec = 48000;
+    result->WaveFormatExt.Format.wBitsPerSample = 32;
+    result->WaveFormatExt.Format.nBlockAlign = 24;
+    result->WaveFormatExt.Format.nAvgBytesPerSec = 48000 * 24;
+    result->WaveFormatExt.Format.cbSize =
+        sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    result->WaveFormatExt.Samples.wValidBitsPerSample = 32;
+    result->WaveFormatExt.dwChannelMask = KSAUDIO_SPEAKER_5POINT1_SURROUND;
+    result->WaveFormatExt.SubFormat = g_T2AudioSubtypePcm;
+
+    *ResultantFormatLength = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -386,7 +453,8 @@ T2AudioValidateSixChannelFormat(_In_ PKSDATAFORMAT DataFormat)
             wfext->WaveFormatExt.Format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) ||
             wfext->WaveFormatExt.Samples.wValidBitsPerSample == 0 ||
             wfext->WaveFormatExt.Samples.wValidBitsPerSample > 32 ||
-            wfext->WaveFormatExt.dwChannelMask != KSAUDIO_SPEAKER_5POINT1_SURROUND) {
+            (wfext->WaveFormatExt.dwChannelMask != KSAUDIO_SPEAKER_5POINT1_SURROUND &&
+             wfext->WaveFormatExt.dwChannelMask != KSAUDIO_SPEAKER_5POINT1)) {
             KdPrint(("T2Audio: Validate: wfext ch=%u rate=%u bits=%u block=%u\n",
                      wfext->WaveFormatExt.Format.nChannels,
                      wfext->WaveFormatExt.Format.nSamplesPerSec,

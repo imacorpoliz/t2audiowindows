@@ -73,6 +73,12 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     SIZE_T SpeakerBufferSize;
     ULONG64 SpeakerDeviceId;
     PMDL SpeakerBufferMdl;
+    // Guards HardwareReady and the BAR mappings against teardown while a
+    // writer (copy path, STOP zeroing) is touching BAR1. Any code that writes
+    // device memory checks HardwareReady and writes under this lock;
+    // T2AudioUnmapResources clears both under it before unmapping. A zeroed
+    // KSPIN_LOCK is a valid released lock, so a fresh extension is usable.
+    KSPIN_LOCK HardwareLock;
     BOOLEAN HardwareReady;
     ULONG64 BceSpeakerDeviceId;
     BOOLEAN BceProbed;
