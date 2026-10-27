@@ -243,6 +243,8 @@ function Get-T2Endpoint {
         if (-not (Test-Path $propsPath)) { continue }
         $p = Get-ItemProperty -Path $propsPath -ErrorAction SilentlyContinue
         $v = $p.$prop
+        $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
+        if ($st -ne 1) { continue }
         if (-not $v) { continue }
         if ($v -eq $HardwareId -or $v.StartsWith($HardwareId) -or
             $v -eq $InstanceId -or $v.StartsWith($InstanceId)) {
