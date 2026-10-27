@@ -163,7 +163,7 @@ static const IMiniportTopologyVtbl g_T2AudioTopologyVtbl = {
 static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
     // Pin 0: bridge input from the WaveRT filter (physical connection).
     {
-        0, 0, 0, NULL,
+        1, 1, 0, NULL,
         {
             0, NULL,
             0, NULL,
@@ -178,7 +178,7 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
     },
     // Pin 1: speaker output (physical connector).
     {
-        0, 0, 0, NULL,
+        1, 1, 0, NULL,
         {
             0, NULL,
             0, NULL,

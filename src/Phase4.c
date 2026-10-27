@@ -191,11 +191,9 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_DEVICE_NOT_READY;
     }
 
-    // KNOWN BSOD: on this build, sending START_IO has twice produced a 0x7E
-    // in ks!DispatchDeviceIoControl through AppleUSBVHCI/ksthunk. Keep this
-    // path in the published reproducer; the manual agent refuses -BceIo so it
-    // cannot be triggered accidentally through the normal test workflow.
-    status = T2AudioBuildIoCommand(0, Context->SpeakerDeviceId,
+    // Opcode verified with REA against AppleAudio.sys FUN_1400048b0:
+    // sends T2AUDIO_MSG_START_IO (0), checks reply opcode T2AUDIO_MSG_START_IO_RESPONSE (1).
+    status = T2AudioBuildIoCommand(T2AUDIO_MSG_START_IO, Context->SpeakerDeviceId,
                                    message, sizeof(message), &length);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -208,7 +206,8 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return status;
     }
 
-    if (!T2AudioBceParseCommandResponse(reply, replySize, 0,
+    if (!T2AudioBceParseCommandResponse(reply, replySize,
+                                        T2AUDIO_MSG_START_IO_RESPONSE,
                                         Context->SpeakerDeviceId)) {
         KdPrint(("T2Audio: START_IO response invalid (size=%u)\n", replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;
@@ -244,7 +243,9 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_NOT_SUPPORTED;
     }
 
-    status = T2AudioBuildIoCommand(2, Context->SpeakerDeviceId,
+    // Opcode verified with REA against AppleAudio.sys FUN_140004970:
+    // sends T2AUDIO_MSG_STOP_IO (2), checks reply opcode T2AUDIO_MSG_STOP_IO_RESPONSE (3).
+    status = T2AudioBuildIoCommand(T2AUDIO_MSG_STOP_IO, Context->SpeakerDeviceId,
                                    message, sizeof(message), &length);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -259,7 +260,8 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     // Validate the whole reply: tag, response type, echoed device id, message id
     // and protocol status. A malformed or mismatched reply is a protocol error.
-    if (!T2AudioBceParseCommandResponse(reply, replySize, 2,
+    if (!T2AudioBceParseCommandResponse(reply, replySize,
+                                        T2AUDIO_MSG_STOP_IO_RESPONSE,
                                         Context->SpeakerDeviceId)) {
         KdPrint(("T2Audio: STOP_IO response invalid (size=%u)\n", replySize));
         return STATUS_DEVICE_PROTOCOL_ERROR;

@@ -18,6 +18,18 @@
 //     obj (u64), element (u32), scope (u32), selector (u32),
 //     data_size (u64), then data_size bytes
 
+// Protocol message IDs and responses (verified against AppleAudio.sys reverse engineering)
+#define T2AUDIO_MSG_START_IO                  0u
+#define T2AUDIO_MSG_START_IO_RESPONSE         1u
+#define T2AUDIO_MSG_STOP_IO                   2u
+#define T2AUDIO_MSG_STOP_IO_RESPONSE          3u
+#define T2AUDIO_MSG_GET_PROPERTY              7u
+#define T2AUDIO_MSG_GET_PROPERTY_RESPONSE     8u
+#define T2AUDIO_MSG_SET_REMOTE_ACCESS         32u
+#define T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE 33u
+#define T2AUDIO_MSG_GET_DEVICE_LIST           101u
+#define T2AUDIO_MSG_GET_DEVICE_LIST_RESPONSE  102u
+
 #define T2AUDIO_BCE_HEADER_SIZE      13u
 #define T2AUDIO_BCE_BASE_SIZE        8u
 #define T2AUDIO_BCE_U64_SIZE         8u

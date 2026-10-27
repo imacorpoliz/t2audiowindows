@@ -63,13 +63,11 @@ T2AudioDeviceTableFits(unsigned long long NumDevices,
                        unsigned long long DeviceStride,
                        unsigned long long AvailableSize)
 {
-    unsigned long long need;
-
-    if (NumDevices > MaxDevices) {
+    if (NumDevices > MaxDevices || HeaderSize > AvailableSize) {
         return 0;
     }
-    need = HeaderSize + NumDevices * DeviceStride;
-    return need <= AvailableSize;
+    return DeviceStride == 0 ||
+           NumDevices <= (AvailableSize - HeaderSize) / DeviceStride;
 }
 
 // Returns 1 if a stream entering RUN must issue START_IO to the hardware,
@@ -130,6 +128,64 @@ T2AudioDecideBufferRelease(unsigned long held,
         return T2AUDIO_RELEASE_NONE;
     }
     return hardware ? T2AUDIO_RELEASE_HARDWARE : T2AUDIO_RELEASE_SYSTEM;
+}
+
+// Calculates next contiguous copy chunk from source cyclic buffer to destination cyclic buffer.
+// StartFrame: current frame index from stream start (monotonically increasing)
+// RemainingFrames: frames left to copy in this tick
+// BytesPerFrame: bytes per audio frame (e.g. 6 channels * 4 bytes = 24)
+// SourceBufferSize: size of host cyclic buffer in bytes (e.g. 11520)
+// DestBufferSize: size of hardware cyclic buffer in bytes (e.g. 399360)
+// Both buffer sizes must be multiples of BytesPerFrame.
+// OutSourceOffset: byte offset in source buffer
+// OutDestOffset: byte offset in destination buffer
+// OutByteLength: bytes to copy in this linear chunk
+// Returns number of frames represented by this chunk, or 0 if nothing to copy.
+static __inline unsigned long
+T2AudioCalculateCopyChunk(unsigned long long StartFrame,
+                          unsigned long RemainingFrames,
+                          unsigned long BytesPerFrame,
+                          unsigned long SourceBufferSize,
+                          unsigned long DestBufferSize,
+                          unsigned long *OutSourceOffset,
+                          unsigned long *OutDestOffset,
+                          unsigned long *OutByteLength)
+{
+    unsigned long srcByteOffset;
+    unsigned long dstByteOffset;
+    unsigned long srcBytesAvail;
+    unsigned long dstBytesAvail;
+    unsigned long bytesToCopy;
+    unsigned long framesCopied;
+
+    if (RemainingFrames == 0 || BytesPerFrame == 0 ||
+        SourceBufferSize == 0 || DestBufferSize == 0 ||
+        OutSourceOffset == 0 || OutDestOffset == 0 || OutByteLength == 0) {
+        return 0;
+    }
+    if (SourceBufferSize % BytesPerFrame != 0 ||
+        DestBufferSize % BytesPerFrame != 0) {
+        return 0;
+    }
+
+    srcByteOffset = (unsigned long)(StartFrame % (SourceBufferSize / BytesPerFrame)) * BytesPerFrame;
+    dstByteOffset = (unsigned long)(StartFrame % (DestBufferSize / BytesPerFrame)) * BytesPerFrame;
+
+    srcBytesAvail = SourceBufferSize - srcByteOffset;
+    dstBytesAvail = DestBufferSize - dstByteOffset;
+
+    framesCopied = srcBytesAvail / BytesPerFrame;
+    if (framesCopied > dstBytesAvail / BytesPerFrame) {
+        framesCopied = dstBytesAvail / BytesPerFrame;
+    }
+    if (framesCopied > RemainingFrames) {
+        framesCopied = RemainingFrames;
+    }
+    bytesToCopy = framesCopied * BytesPerFrame;
+    *OutSourceOffset = srcByteOffset;
+    *OutDestOffset = dstByteOffset;
+    *OutByteLength = bytesToCopy;
+    return framesCopied;
 }
 
 #endif

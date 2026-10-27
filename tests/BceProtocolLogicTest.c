@@ -230,42 +230,47 @@ static void test_parse_command_response(void)
 
     printf("T2AudioBceParseCommandResponse\n");
 
-    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("valid START_IO ack -> ok",
-          T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
+
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_STOP_IO_RESPONSE, 0);
+    T2AudioBceWriteU64(b + 5, 0x39);
+    check("valid STOP_IO ack -> ok",
+          T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_STOP_IO_RESPONSE, 0x39));
 
     check("short reply -> fail",
-          !T2AudioBceParseCommandResponse(b, 20, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 20, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
     build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 2, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("wrong message id -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
-    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x3A);
     check("wrong echoed device id -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
-    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0x80000000ul);
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0x80000000ul);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("non-zero status -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
-    build_reply(b, T2AUDIO_BCE_MSG_COMMAND, 0, 0);
+    build_reply(b, T2AUDIO_BCE_MSG_COMMAND, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     check("command type (not response) -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
-    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, 0, 0);
+    build_reply(b, T2AUDIO_BCE_MSG_RESPONSE, T2AUDIO_MSG_START_IO_RESPONSE, 0);
     T2AudioBceWriteU64(b + 5, 0x39);
     b[0] = 'X';
     check("bad tag -> fail",
-          !T2AudioBceParseCommandResponse(b, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(b, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 
     check("NULL reply -> fail",
-          !T2AudioBceParseCommandResponse(NULL, 21, 0, 0x39));
+          !T2AudioBceParseCommandResponse(NULL, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 }
 
 int main(void)

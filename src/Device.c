@@ -65,6 +65,7 @@ T2AudioMapResources(
     ULONG version;
     ULONG signature;
     ULONG bufferOffset;
+    ULONG numDevices;
     ULONG memoryResourceCount;
     ULONG i;
     NTSTATUS status;
@@ -256,21 +257,20 @@ T2AudioMapResources(
 
     Context->BufferStruct = (T2AUDIO_BUFFER_STRUCT *)
         ((PUCHAR)Context->Bar1Mapped + bufferOffset);
+    numDevices = READ_REGISTER_UCHAR(&Context->BufferStruct->NumDevices);
     KdPrint(("T2Audio: BufferStruct at offset 0x%X\n", bufferOffset));
 
-    // FAIL_M only proved the fixed header fits. Before FindSpeakerBuffer walks
-    // the table, prove the entire header + NumDevices entries fit inside the
-    // mapped BAR, so a corrupt device count cannot make the driver read past
-    // the mapping (and fault). FindSpeakerBuffer repeats the count-vs-max check
-    // but has no way to know how much of the BAR is actually mapped.
+    // Validate the same count snapshot used by FindSpeakerBuffer. The count is
+    // in device memory and may change between reads; rereading it after this
+    // bounds check would allow the walker to exceed the validated table.
     if (!T2AudioDeviceTableFits(
-            Context->BufferStruct->NumDevices,
+            numDevices,
             T2AUDIO_MAX_DEVICES,
             FIELD_OFFSET(T2AUDIO_BUFFER_STRUCT, Devices),
             sizeof(T2AUDIO_DEVICE_METADATA),
             (unsigned long long)(Context->Bar1Size - bufferOffset))) {
         KdPrint(("T2Audio: MapResources FAIL_M2: device table NumDevices=%u does not fit in 0x%IX bytes\n",
-                 Context->BufferStruct->NumDevices,
+                 numDevices,
                  Context->Bar1Size - bufferOffset));
         status = STATUS_DEVICE_CONFIGURATION_ERROR;
         goto Exit;
@@ -278,6 +278,7 @@ T2AudioMapResources(
 
     status = T2AudioFindSpeakerBuffer(Context->BufferStruct,
                                       Context->Bar1Size,
+                                      numDevices,
                                       &Context->SpeakerBufferOffset,
                                       &Context->SpeakerBufferSize);
     if (!NT_SUCCESS(status)) {
@@ -305,6 +306,7 @@ NTSTATUS
 T2AudioFindSpeakerBuffer(
     _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,
     _In_ SIZE_T Bar1Size,
+    _In_ ULONG NumDevices,
     _Out_ SIZE_T *BufferOffset,
     _Out_ SIZE_T *BufferSize)
 {
@@ -322,7 +324,7 @@ T2AudioFindSpeakerBuffer(
     }
     
     KdPrint(("T2Audio: BufferStruct: Signature=0x%08X Version=%u NumDevices=%u\n",
-             BufferStruct->Signature, BufferStruct->Version, BufferStruct->NumDevices));
+             BufferStruct->Signature, BufferStruct->Version, NumDevices));
     
     if (BufferStruct->Signature != T2AUDIO_SIG) {
         KdPrint(("T2Audio: FindSpeaker FAIL_C: Signature mismatch (expected 0x%08X)\n",
@@ -334,13 +336,13 @@ T2AudioFindSpeakerBuffer(
                  BufferStruct->Version));
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
-    if (BufferStruct->NumDevices > T2AUDIO_MAX_DEVICES) {
+    if (NumDevices > T2AUDIO_MAX_DEVICES) {
         KdPrint(("T2Audio: FindSpeaker FAIL_E: NumDevices %u > max %u\n",
-                 BufferStruct->NumDevices, T2AUDIO_MAX_DEVICES));
+                 NumDevices, T2AUDIO_MAX_DEVICES));
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
-    for (index = 0; index < BufferStruct->NumDevices; ++index) {
+    for (index = 0; index < NumDevices; ++index) {
         const T2AUDIO_DEVICE_METADATA *device = &BufferStruct->Devices[index];
         const T2AUDIO_STREAM_METADATA *stream;
         SIZE_T nameMatch;
@@ -396,6 +398,6 @@ T2AudioFindSpeakerBuffer(
     }
     
     KdPrint(("T2Audio: FindSpeaker FAIL_L: Speaker device not found among %u devices\n",
-             BufferStruct->NumDevices));
+             NumDevices));
     return STATUS_OBJECT_NAME_NOT_FOUND;
 }

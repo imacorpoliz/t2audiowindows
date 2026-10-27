@@ -110,17 +110,19 @@ T2AudioStartDevice(
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList)
 {
-    PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
+    PT2AUDIO_DEVICE_CONTEXT context;
     NTSTATUS status;
 
     PAGED_CODE();
     KdPrint(("T2Audio: StartDevice entry\n"));
 
     // Validate parameters
-    if (DeviceObject == NULL || Irp == NULL || ResourceList == NULL || context == NULL) {
+    if (DeviceObject == NULL || Irp == NULL || ResourceList == NULL ||
+        DeviceObject->DeviceExtension == NULL) {
         KdPrint(("T2Audio: Invalid parameters\n"));
         return STATUS_INVALID_PARAMETER;
     }
+    context = T2AudioGetContext(DeviceObject);
 
     KdPrint(("T2Audio: All parameters valid\n"));
 
@@ -142,46 +144,39 @@ T2AudioStartDevice(
         return STATUS_UNSUCCESSFUL;
     }
 
-    // Test-session gate. The driver maps and writes device memory and drives the
-    // audio engine, so it must never activate on its own. A session only exists
-    // while the user runs the test agent, and its key is VOLATILE: a reboot or
-    // bugcheck erases it. On the next normal boot we refuse here, before mapping
-    // any BAR, opening the BCE transport, or registering an endpoint.
-    context->TestModeEnabled =
-        (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
-                                   L"EnableTestMode", 0) != 0);
-    if (!context->TestModeEnabled) {
-        KdPrint(("T2Audio: test session absent - refusing to start device\n"));
-        return STATUS_UNSUCCESSFUL;
+    // The experimental driver must not activate hardware on a normal boot.
+    // Only an explicitly enabled volatile diagnostic session may start it.
+    {
+        ULONG sessionFlag = T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
+                                                      L"EnableTestMode", 0);
+        context->TestModeEnabled = (sessionFlag != 0);
+        if (!context->TestModeEnabled) {
+            KdPrint(("T2Audio: test session disabled - refusing to start device\n"));
+            return STATUS_UNSUCCESSFUL;
+        }
+        context->DiagStage =
+            T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY, L"DiagStage",
+                                      T2AUDIO_STAGE_RAM_ONLY);
+        context->MmioCopyEnabled =
+            (context->DiagStage >= T2AUDIO_STAGE_MMIO) &&
+            (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
+                                       L"EnableMmioCopy", 0) != 0);
+        context->BceIoEnabled =
+            (context->DiagStage >= T2AUDIO_STAGE_HW_IO) &&
+            (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
+                                       L"EnableBceIo", 0) != 0);
+        KdPrint(("T2Audio: diagnostic session active stage=%u mmioCopy=%u bceIo=%u\n",
+                 context->DiagStage,
+                 context->MmioCopyEnabled ? 1u : 0u,
+                 context->BceIoEnabled ? 1u : 0u));
     }
-
-    // Diagnostic stage. Defaults to RAM-only so a bare test session (no stage
-    // value) never maps device memory. The agent sets this explicitly.
-    context->DiagStage =
-        T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY, L"DiagStage",
-                                  T2AUDIO_STAGE_RAM_ONLY);
-    // Device-memory writes need BOTH stage 5 and the explicit opt-in flag.
-    context->MmioCopyEnabled =
-        (context->DiagStage >= T2AUDIO_STAGE_MMIO) &&
-        (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
-                                   L"EnableMmioCopy", 0) != 0);
-    // Hardware I/O commands (START_IO/STOP_IO) need stage 4 AND the explicit
-    // opt-in flag. Off by default so a stage-4 run can wire the speaker and hold
-    // the transport open without sending anything, isolating the send path.
-    context->BceIoEnabled =
-        (context->DiagStage >= T2AUDIO_STAGE_HW_IO) &&
-        (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
-                                   L"EnableBceIo", 0) != 0);
 
     context->ForceSystemBuffer =
         (T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY,
                                    L"ForceSystemBuffer", 0) != 0);
     context->MdlVariant =
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MdlVariant", 0);
-    KdPrint(("T2Audio: test session active stage=%u mmioCopy=%u bceIo=%u ForceSystemBuffer=%u MdlVariant=%u\n",
-             context->DiagStage,
-             context->MmioCopyEnabled ? 1u : 0u,
-             context->BceIoEnabled ? 1u : 0u,
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant));
 

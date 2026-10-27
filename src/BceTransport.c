@@ -6,17 +6,7 @@
 #define T2AUDIO_MSG_TYPE_COMMAND 1
 #define T2AUDIO_MSG_TYPE_RESPONSE 2
 
-#define T2AUDIO_MSG_GET_PROPERTY 7
-#define T2AUDIO_MSG_GET_PROPERTY_RESPONSE 8
-#define T2AUDIO_MSG_GET_DEVICE_LIST 101
-#define T2AUDIO_MSG_GET_DEVICE_LIST_RESPONSE 102
-
-// Remote-access handshake. kaiT2en issues SET_REMOTE_ACCESS(ON) at device init
-// (t2audio_cmd_set_remote_access, message 32, mode 2) so the T2 hands audio
-// control to the host. The command is device-independent (device_id 0) and its
-// payload is a single u64 mode; the reply is a plain command response (33).
-#define T2AUDIO_MSG_SET_REMOTE_ACCESS 32
-#define T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE 33
+// Remote-access handshake values
 #define T2AUDIO_REMOTE_ACCESS_OFF 0
 #define T2AUDIO_REMOTE_ACCESS_ON 2
 
@@ -317,11 +307,9 @@ T2AudioSendBceMessage(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // Associate the opened transport file object with the outgoing request;
-    // the transport lock retains its reference through completion. Note: this
-    // does NOT fix AppleUSBVHCI's separate forwarded IRP that bugchecks in KS
-    // when START_IO is sent. That command is blocked in T2AudioStartIo.
-    IoGetNextIrpStackLocation(irp)->FileObject = g_BceTransport.FileObject;
+    // Leave the outgoing IRP FileObject unset, as in the current experiment.
+    // This has NOT been validated as a fix: the previous bugcheck involved a
+    // forwarded IRP, whose construction and routing remain unproven.
 
     // Phase diagnostics: record exactly what leaves the driver and how far the
     // send gets. If a bugcheck occurs while a specific command is in flight, the
@@ -376,9 +364,11 @@ T2AudioSendBceMessage(
             return STATUS_IO_TIMEOUT;
         }
         status = context->Iosb.Status;
-    } else {
+    } else if (NT_SUCCESS(status)) {
+        // Completed synchronously with success; read final status from IOSB
         status = context->Iosb.Status;
     }
+    // If IoCallDriver returned a synchronous failure, preserve that failure status.
 
     if (NT_SUCCESS(status)) {
         // The lower driver must never report more bytes than we provided; a

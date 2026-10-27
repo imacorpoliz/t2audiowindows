@@ -138,6 +138,80 @@ static void test_device_table_fits(void)
     check("huge count cannot overflow into fit",
           !T2AudioDeviceTableFits(0xFFFFFFFFFFFFFFFFull, maxd, hdr, stride,
                                   0xFFFFFFFFFFFFFFFFull));
+    check("entry multiplication cannot overflow into fit",
+          !T2AudioDeviceTableFits(0x8000000000000000ull, 0xFFFFFFFFFFFFFFFFull,
+                                  0, 2, 16));
+    check("header addition cannot overflow into fit",
+          !T2AudioDeviceTableFits(1, 1, 0xFFFFFFFFFFFFFFFFull, 1, 16));
+}
+
+static void test_calculate_copy_chunk(void)
+{
+    unsigned long srcOff = 0, dstOff = 0, byteLen = 0, frames = 0;
+    // Source: 480 frames * 24 = 11520 bytes (10ms @ 48kHz)
+    // Dest: 16640 frames * 24 = 399360 bytes (346.6ms hardware ring)
+    const unsigned long srcBuf = 11520;
+    const unsigned long dstBuf = 399360;
+    const unsigned long bpf = 24;
+
+    printf("T2AudioCalculateCopyChunk\n");
+
+    // 1. Initial 96 frames from frame 0
+    frames = T2AudioCalculateCopyChunk(0, 96, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen);
+    check("initial 96 frames -> frames==96", frames == 96);
+    check("initial 96 frames -> srcOff==0", srcOff == 0);
+    check("initial 96 frames -> dstOff==0", dstOff == 0);
+    check("initial 96 frames -> byteLen==2304", byteLen == 2304);
+
+    // 2. Near end of source buffer (frame 470, request 20 frames)
+    // Source buffer has only 10 frames remaining (470..479). First chunk should copy 10 frames.
+    frames = T2AudioCalculateCopyChunk(470, 20, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen);
+    check("source wrap chunk 1 -> frames==10", frames == 10);
+    check("source wrap chunk 1 -> srcOff==11280", srcOff == 470 * 24);
+    check("source wrap chunk 1 -> byteLen==240", byteLen == 240);
+
+    // Following chunk starts at frame 480, should wrap source offset to 0
+    frames = T2AudioCalculateCopyChunk(480, 10, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen);
+    check("source wrap chunk 2 -> frames==10", frames == 10);
+    check("source wrap chunk 2 -> srcOff==0", srcOff == 0);
+    check("source wrap chunk 2 -> dstOff==11520", dstOff == 480 * 24);
+
+    // 3. Near end of destination buffer (frame 16630, request 20 frames)
+    // Dest has only 10 frames remaining (16630..16639). First chunk should copy 10 frames.
+    frames = T2AudioCalculateCopyChunk(16630, 20, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen);
+    check("dest wrap chunk 1 -> frames==10", frames == 10);
+    check("dest wrap chunk 1 -> dstOff==399120", dstOff == 16630 * 24);
+    check("dest wrap chunk 1 -> byteLen==240", byteLen == 240);
+
+    // Following chunk starts at frame 16640, should wrap dest offset to 0
+    frames = T2AudioCalculateCopyChunk(16640, 10, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen);
+    check("dest wrap chunk 2 -> frames==10", frames == 10);
+    check("dest wrap chunk 2 -> dstOff==0", dstOff == 0);
+
+    // 4. Boundary and invalid conditions
+    check("0 remaining frames -> 0",
+          T2AudioCalculateCopyChunk(0, 0, bpf, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen) == 0);
+    check("0 bpf -> 0",
+          T2AudioCalculateCopyChunk(0, 96, 0, srcBuf, dstBuf, &srcOff, &dstOff, &byteLen) == 0);
+    check("0 srcBuf -> 0",
+          T2AudioCalculateCopyChunk(0, 96, bpf, 0, dstBuf, &srcOff, &dstOff, &byteLen) == 0);
+    check("NULL output -> 0",
+          T2AudioCalculateCopyChunk(0, 96, bpf, srcBuf, dstBuf, NULL, &dstOff, &byteLen) == 0);
+    frames = T2AudioCalculateCopyChunk(0, 0x20000000ul, bpf, srcBuf, dstBuf,
+                                       &srcOff, &dstOff, &byteLen);
+    check("large frame count copies up to ring boundary without overflow",
+          frames == 480 && srcOff == 0 && dstOff == 0 && byteLen == srcBuf);
+    check("unaligned source ring -> 0",
+          T2AudioCalculateCopyChunk(0, 1, bpf, 25, dstBuf,
+                                    &srcOff, &dstOff, &byteLen) == 0);
+    check("unaligned destination ring -> 0",
+          T2AudioCalculateCopyChunk(0, 1, bpf, srcBuf, 25,
+                                    &srcOff, &dstOff, &byteLen) == 0);
+    frames = T2AudioCalculateCopyChunk(0x100000000ull, 1, bpf, srcBuf, dstBuf,
+                                       &srcOff, &dstOff, &byteLen);
+    check("frame cursor beyond 32 bits uses the full ring position",
+          frames == 1 && srcOff == (0x100000000ull % 480) * bpf &&
+          dstOff == (0x100000000ull % 16640) * bpf && byteLen == bpf);
 }
 
 int main(void)
@@ -147,6 +221,7 @@ int main(void)
     test_release_decision();
     test_hardware_io_decision();
     test_device_table_fits();
+    test_calculate_copy_chunk();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

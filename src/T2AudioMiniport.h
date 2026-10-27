@@ -151,6 +151,7 @@ VOID T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioFindSpeakerBuffer(
     _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,
     _In_ SIZE_T Bar1Size,
+    _In_ ULONG NumDevices,
     _Out_ SIZE_T *BufferOffset,
     _Out_ SIZE_T *BufferSize);
 

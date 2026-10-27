@@ -13,6 +13,10 @@ static const GUID g_T2AudioSpecifierWaveformex = {
     0x05589f81, 0xc356, 0x11ce,
     { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a }
 };
+static const GUID g_T2AudioSpecifierWaveformextensible = {
+    0x05589f82, 0xc356, 0x11ce,
+    { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a }
+};
 static const GUID g_T2AudioCategoryAudio = {
     0x6994ad04, 0x93ef, 0x11d0,
     { 0xa3, 0xcc, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 }
@@ -140,8 +144,8 @@ static PCPIN_DESCRIPTOR g_T2AudioPins[] = {
     },
     // Pin 1: bridge pin to the topology filter (physical connection).
     {
-        0,
-        0,
+        1,
+        1,
         0,
         NULL,
         {
@@ -237,6 +241,8 @@ T2AudioMiniportDataRangeIntersection(
     UNREFERENCED_PARAMETER(Miniport);
     UNREFERENCED_PARAMETER(DataRange);
     UNREFERENCED_PARAMETER(MatchingDataRange);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    UNREFERENCED_PARAMETER(ResultantFormat);
 
     KdPrint(("T2Audio: DataRangeIntersection pin=%u outLen=%u\n",
              PinId, OutputBufferLength));
@@ -244,47 +250,13 @@ T2AudioMiniportDataRangeIntersection(
     if (ResultantFormatLength == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
+    *ResultantFormatLength = 0;
 
-    if (PinId == T2AUDIO_WAVE_PIN_RENDER_SINK) {
-        KSDATAFORMAT_WAVEFORMATEX format;
-
-        *ResultantFormatLength = sizeof(format);
-        if (OutputBufferLength < sizeof(format) || ResultantFormat == NULL) {
-            return STATUS_BUFFER_TOO_SMALL;
-        }
-
-        RtlZeroMemory(&format, sizeof(format));
-        format.DataFormat.FormatSize = sizeof(format);
-        format.DataFormat.MajorFormat = g_T2AudioTypeAudio;
-        format.DataFormat.SubFormat = g_T2AudioSubtypePcm;
-        format.DataFormat.Specifier = g_T2AudioSpecifierWaveformex;
-        format.WaveFormatEx.wFormatTag = WAVE_FORMAT_PCM;
-        format.WaveFormatEx.nChannels = 6;
-        format.WaveFormatEx.nSamplesPerSec = 48000;
-        format.WaveFormatEx.wBitsPerSample = 32;
-        format.WaveFormatEx.nBlockAlign = 24;
-        format.WaveFormatEx.nAvgBytesPerSec = 48000 * 24;
-
-        RtlCopyMemory(ResultantFormat, &format, sizeof(format));
-        return STATUS_SUCCESS;
-    }
-
-    if (PinId == T2AUDIO_WAVE_PIN_BRIDGE) {
-        KSDATAFORMAT format;
-
-        *ResultantFormatLength = sizeof(format);
-        if (OutputBufferLength < sizeof(format) || ResultantFormat == NULL) {
-            return STATUS_BUFFER_TOO_SMALL;
-        }
-
-        RtlZeroMemory(&format, sizeof(format));
-        format.FormatSize = sizeof(format);
-        format.MajorFormat = g_T2AudioTypeAudio;
-        format.SubFormat = g_T2AudioSubtypeAnalog;
-        format.Specifier = g_T2AudioSpecifierNone;
-
-        RtlCopyMemory(ResultantFormat, &format, sizeof(format));
-        return STATUS_SUCCESS;
+    if (PinId == T2AUDIO_WAVE_PIN_RENDER_SINK ||
+        PinId == T2AUDIO_WAVE_PIN_BRIDGE) {
+        // PortCls performs the intersection against the advertised pin ranges.
+        // Do not claim an unconditional match for an incompatible client range.
+        return STATUS_NOT_IMPLEMENTED;
     }
 
     return STATUS_INVALID_PARAMETER;
@@ -373,38 +345,83 @@ T2AudioValidateSixChannelFormat(_In_ PKSDATAFORMAT DataFormat)
         return STATUS_INVALID_PARAMETER;
     }
 
-    waveFormat = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
-
     if (!IsEqualGUIDAligned(&DataFormat->MajorFormat,
                             &g_T2AudioTypeAudio)) {
         KdPrint(("T2Audio: Validate: major=%08X != audio\n",
                  DataFormat->MajorFormat.Data1));
         return STATUS_INVALID_PARAMETER;
     }
-    if (!IsEqualGUIDAligned(&DataFormat->SubFormat,
-                            &g_T2AudioSubtypePcm)) {
-        KdPrint(("T2Audio: Validate: sub=%08X != PCM(00000001)\n",
-                 DataFormat->SubFormat.Data1));
+    if (!IsEqualGUIDAligned(&DataFormat->SubFormat, &g_T2AudioSubtypePcm)) {
         return STATUS_INVALID_PARAMETER;
     }
+
     if (!IsEqualGUIDAligned(&DataFormat->Specifier,
-                            &g_T2AudioSpecifierWaveformex)) {
-        KdPrint(("T2Audio: Validate: spec=%08X != WFEX(05589F81)\n",
+                            &g_T2AudioSpecifierWaveformex) &&
+        !IsEqualGUIDAligned(&DataFormat->Specifier,
+                            &g_T2AudioSpecifierWaveformextensible)) {
+        KdPrint(("T2Audio: Validate: spec=%08X != WFEX\n",
                  DataFormat->Specifier.Data1));
         return STATUS_INVALID_PARAMETER;
     }
-    if (waveFormat->WaveFormatEx.nChannels != 6 ||
-        waveFormat->WaveFormatEx.nSamplesPerSec != 48000 ||
-        waveFormat->WaveFormatEx.wBitsPerSample != 32 ||
-        waveFormat->WaveFormatEx.nBlockAlign != 24) {
-        KdPrint(("T2Audio: Validate: wfx ch=%u rate=%u bits=%u block=%u != 6/48000/32/24\n",
-                 waveFormat->WaveFormatEx.nChannels,
-                 waveFormat->WaveFormatEx.nSamplesPerSec,
-                 waveFormat->WaveFormatEx.wBitsPerSample,
-                 waveFormat->WaveFormatEx.nBlockAlign));
-        return STATUS_INVALID_PARAMETER;
+
+    waveFormat = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
+
+    // Support both WAVEFORMATEXTENSIBLE (standard for 6-channel audio) and WAVEFORMATEX
+    if (waveFormat->WaveFormatEx.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        PKSDATAFORMAT_WAVEFORMATEXTENSIBLE wfext;
+
+        if (DataFormat->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE)) {
+            KdPrint(("T2Audio: Validate: wfext size=%u < %u\n",
+                     DataFormat->FormatSize,
+                     (ULONG)sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE)));
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        wfext = (PKSDATAFORMAT_WAVEFORMATEXTENSIBLE)DataFormat;
+        if (wfext->WaveFormatExt.Format.nChannels != 6 ||
+            wfext->WaveFormatExt.Format.nSamplesPerSec != 48000 ||
+            wfext->WaveFormatExt.Format.wBitsPerSample != 32 ||
+            wfext->WaveFormatExt.Format.nBlockAlign != 24 ||
+            wfext->WaveFormatExt.Format.nAvgBytesPerSec != 48000 * 24 ||
+            wfext->WaveFormatExt.Format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) ||
+            wfext->WaveFormatExt.Samples.wValidBitsPerSample == 0 ||
+            wfext->WaveFormatExt.Samples.wValidBitsPerSample > 32 ||
+            wfext->WaveFormatExt.dwChannelMask != KSAUDIO_SPEAKER_5POINT1_SURROUND) {
+            KdPrint(("T2Audio: Validate: wfext ch=%u rate=%u bits=%u block=%u\n",
+                     wfext->WaveFormatExt.Format.nChannels,
+                     wfext->WaveFormatExt.Format.nSamplesPerSec,
+                     wfext->WaveFormatExt.Format.wBitsPerSample,
+                     wfext->WaveFormatExt.Format.nBlockAlign));
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (!IsEqualGUIDAligned(&wfext->WaveFormatExt.SubFormat,
+                                &g_T2AudioSubtypePcm)) {
+            KdPrint(("T2Audio: Validate: wfext subformat != PCM\n"));
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        return STATUS_SUCCESS;
+    } else if (waveFormat->WaveFormatEx.wFormatTag == WAVE_FORMAT_PCM) {
+        if (waveFormat->WaveFormatEx.nChannels != 6 ||
+            waveFormat->WaveFormatEx.nSamplesPerSec != 48000 ||
+            waveFormat->WaveFormatEx.wBitsPerSample != 32 ||
+            waveFormat->WaveFormatEx.nBlockAlign != 24 ||
+            waveFormat->WaveFormatEx.nAvgBytesPerSec != 48000 * 24) {
+            KdPrint(("T2Audio: Validate: wfx ch=%u rate=%u bits=%u block=%u != 6/48000/32/24\n",
+                     waveFormat->WaveFormatEx.nChannels,
+                     waveFormat->WaveFormatEx.nSamplesPerSec,
+                     waveFormat->WaveFormatEx.wBitsPerSample,
+                     waveFormat->WaveFormatEx.nBlockAlign));
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        return STATUS_SUCCESS;
     }
-    return STATUS_SUCCESS;
+
+    KdPrint(("T2Audio: Validate: unsupported format tag %u\n",
+             waveFormat->WaveFormatEx.wFormatTag));
+    return STATUS_INVALID_PARAMETER;
 }
 
 NTSTATUS
