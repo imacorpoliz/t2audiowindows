@@ -230,15 +230,26 @@ Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
 | `HardwareLock`, `HardwareReady` | защита MMIO от teardown (§7) |
 | `BceSpeakerDeviceId`, `SpeakerDeviceId` | найденный / «подключённый» speaker (второе — только на стадии ≥ 4) |
 | `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | результат запроса потока (§5.3) |
-| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `ForceSystemBuffer`, `MdlVariant` | гейты и параметры (§8) |
+| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode` | гейты и параметры (§8) |
+| `ClockLock`, `ClockGeneration`, `ClockAnchorFrames/Qpc` | якорь часов T2 из `UPDATE_TIMESTAMP` (§6.3) |
 
 ### 4.3 Формат на пине
 
-* Data range: `KSDATARANGE_AUDIO`, PCM, 6 каналов, 32 бита, 48 000 Гц.
-* `DataRangeIntersection` (pin 0) возвращает **`KSDATAFORMAT_WAVEFORMATEXTENSIBLE`**: 6 каналов, 48 кГц, 32/32 бита, `nBlockAlign` 24, маска `KSAUDIO_SPEAKER_5POINT1_SURROUND` (`0x60F`), subformat PCM. При `OutputBufferLength == 0` возвращается требуемый размер и `STATUS_BUFFER_OVERFLOW`.
-* `T2AudioValidateSixChannelFormat` принимает этот формат с маской `0x60F` или `0x3F` и `wValidBitsPerSample` от 1 до 32, а также «плоский» `WAVE_FORMAT_PCM` 6/48000/32.
+* Endpoint — **стерео**: `KSDATARANGE_AUDIO`, PCM, `MaximumChannels` 2, 32 бита, 48 000 Гц. При `TestSession\RawSpeakerChannels=1` — 6 (диапазон правится в `T2AudioMiniportInit`).
+* `DataRangeIntersection` (pin 0) возвращает **`KSDATAFORMAT_WAVEFORMATEXTENSIBLE`**: 2 канала, 48 кГц, 32/32 бита, `nBlockAlign` 8, маска `KSAUDIO_SPEAKER_STEREO`, subformat PCM. В режиме raw — 6 каналов, `nBlockAlign` 24, маска `0x60F`. При `OutputBufferLength == 0` возвращается требуемый размер и `STATUS_BUFFER_OVERFLOW`.
+* `T2AudioValidateRenderFormat(format, allowRaw, &channels)` принимает:
+  * стерео (маска `0x3`);
+  * в режиме raw — 6 каналов (маска `0x60F` или `0x3F`);
+  * `wValidBitsPerSample` от 1 до 32 и «плоский» `WAVE_FORMAT_PCM` с тем же числом каналов.
 
-Порядок каналов 5.1 Windows: FL, FR, C, LFE, SL/BL, SR/BR. Как каналы кольца соответствуют физическим динамикам (вуферы/твитеры), ещё не подтверждено — см. заметки DSP в `planning/CURRENT_STATE.md`. Эквализацию по динамикам, которую на macOS делает DSP, драйвер не воспроизводит.
+Раскладка динамиков MacBookPro16,1 (по DSP-профилю kaiT2en, [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md)):
+
+| Канал кольца | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| Динамик | вуфер L | вуфер L | **твитер L** | вуфер R | вуфер R | **твитер R** |
+| Из стерео | L | L | L через ФВЧ 3 кГц | R | R | R через ФВЧ 3 кГц |
+
+Почему не 5.1: Windows не размножает стерео на 5.1, поэтому стерео играло бы только на каналах 0 и 1 (оба левых вуфера). Твитерам нельзя отдавать полный диапазон: у Apple на 500 Гц там −90 дБ. Остальную эквализацию Apple (компрессоры, XTC, виртуальный бас) драйвер не воспроизводит. На стерео-endpoint можно поставить Equalizer APO.
 
 ---
 
@@ -302,6 +313,8 @@ PortCls мапит буфер WaveRT в user mode через `MmMapLockedPagesSp
 * При входе в RUN фиксируется `AnchorQpc` — **до** `START_IO`, потому что T2 не может начать читать раньше. Вместе с ним задаётся `AnchorFrames = LastCopiedFrame`.
 * Текущий кадр источника: `playFrame = AnchorFrames + TicksToFrames(QPC − AnchorQpc)`. `T2AudioTicksToFrames` не переполняется при любой длительности.
 * `LastCopiedFrame` — **потреблённый курсор**: все кадры до него уже скопированы в BAR0 (или пропущены, если MMIO выключен). Именно он сообщается движку как позиция воспроизведения.
+* Кадр источника `N` пишется в кадр кольца `N + DestOffset` (по модулю 16 640). При входе в RUN `DestOffset` выбирается так, чтобы следующая запись была на 1000 кадров (~21 мс) впереди слота 0, с которого T2 начинает читать после `START_IO`.
+* **Часы T2.** Каждое `UPDATE_TIMESTAMP` (≈ раз за круг кольца) даёт якорь: `sampleTime` плюс задержка доставки `now_ns − hostTime`, если она в пределах 0…50 мс. `hostTime` — наносекунды QPC: их публикует для T2 сам AppleUSBVHCI. На новом якоре DPC экстраполирует позицию чтения T2 по QPC и, если опережение вышло из 1000 ± 500, переприцеливает `DestOffset` (так делает AppleAudio). Слоты, пропущенные прыжком вперёд, обнуляются. Без этого расхождение кварцев (~50 ppm) съело бы опережение за минуты.
 
 ### 6.3 Алгоритм `T2AudioStreamAdvanceLocked`
 
@@ -316,11 +329,14 @@ pending = playFrame - frame
     frame = playFrame - кадров_в_буфере_клиента
 если можно писать в MMIO (под HardwareLock):
     пока остались кадры:
+    если пришёл новый якорь T2 → T2AudioClockCorrection(frame, DestOffset, readT2)
+    пока остались кадры:
         кусок = T2AudioCalculateCopyChunk(
-                    src = frame,
-                    dst = frame + LEAD (720),    # +15 мс в кольце T2
+                    src = frame,      (кадр клиента: 8 байт стерео / 24 raw)
+                    dst = frame + DestOffset,   (кадр кольца: 24 байта)
                     …)                           # не пересекает конец ни одного кольца
-        T2AudioConvertSamples(dst, src, кусок, SpeakerSampleShift)
+        стерео: T2AudioRenderStereoToSpeakers(dst, src, кусок, shift, TweeterMode)
+        raw:    T2AudioConvertSamples(dst, src, кусок, SpeakerSampleShift)
     _mm_sfence()                                 # слить WC-буферы
 LastCopiedFrame = playFrame
 ```
@@ -328,7 +344,7 @@ LastCopiedFrame = playFrame
 Свойства алгоритма:
 
 * **Движок не может перезаписать кадр раньше, чем тот скопирован.** Позиция, которую он видит, — это уже скопированный курсор, и `GetPosition` сам докопирует данные перед ответом. Поэтому тракт не зависит от того, что системный таймер по умолчанию тикает раз в 15,6 мс, а не каждые 2 мс.
-* Кадр источника `F` попадает в кольцо T2 по индексу `(F + 720) mod 16640`. Если T2 читает кольцо с той же скоростью от момента `START_IO`, данные опережают его на ~15 мс.
+* Кадр источника `F` попадает в кольцо T2 по индексу `(F + DestOffset) mod 16640`. Данные опережают чтение T2 на ~21 мс, и это опережение держится по часам T2.
 * На PAUSE → RUN продолжение идёт ровно с `LastCopiedFrame`: ни пропусков, ни повторов.
 
 ### 6.4 Состояния (`SetState`)
@@ -352,9 +368,9 @@ LastCopiedFrame = playFrame
 
 ### 6.6 Позиция и латентность
 
-* `GetPosition`: `PlayOffset = (LastCopiedFrame × 24) mod размер_буфера`, `WriteOffset = PlayOffset + 512 кадров`.
+* `GetPosition`: `PlayOffset = (LastCopiedFrame × размер кадра клиента) mod размер_буфера`, `WriteOffset = PlayOffset + 512 кадров`.
 * `GetPositionRegister` / `GetClockRegister` → `STATUS_NOT_SUPPORTED`: регистр в обычной памяти ядра пришлось бы отдавать в user mode, поэтому движок опрашивает `GetPosition`.
-* `GetHWLatency`: `FifoSize = 720 × 24` байт (опережение в кольце), `CodecDelay = (latency потока + latency устройства) × 10⁷ / 48000` в единицах 100 нс.
+* `GetHWLatency`: `FifoSize = 1000 × размер кадра клиента` (опережение в кольце), `CodecDelay = (latency потока + latency устройства) × 10⁷ / 48000` в единицах 100 нс.
 
 ### 6.7 Числа на одном примере
 
@@ -362,7 +378,7 @@ LastCopiedFrame = playFrame
 
 * через 100 мс после старта `playFrame = 4800`;
 * кадр источника 4800 лежит по смещению `(4800 mod 480) × 24 = 0`;
-* в кольцо он пишется по смещению `((4800 + 720) mod 16640) × 24 = 132 480`;
+* при свежем запуске `DestOffset = 1000`, и кадр пишется по смещению `((4800 + 1000) mod 16640) × 24 = 139 200` (пока часы T2 не потребовали поправки);
 * после кадра 16 639 запись в кольцо идёт снова с 0 — `T2AudioCalculateCopyChunk` режет кусок на границе.
 
 ---
@@ -375,7 +391,9 @@ LastCopiedFrame = playFrame
 | `StreamLock` (на поток) | spin lock | `State`, якоря, `LastCopiedFrame`, указатели буфера | `GetPosition`, DPC, `SetState`, освобождение буфера |
 | `HardwareLock` (на устройство) | spin lock | `HardwareReady` + маппинги BAR0 во время записи | копирование, обнуление кольца, `T2AudioUnmapResources` |
 
-* Порядок захвата: **`StreamLock` → `HardwareLock`**. Обратного порядка нигде нет.
+| `ClockLock` (на устройство) | spin lock | якорь часов T2 | обработчик `0x222020` (PASSIVE), DPC копирования |
+
+* Порядок захвата: **`StreamLock` → `HardwareLock` → `ClockLock`**. Обработчик VHCI берёт только `ClockLock`. Обратного порядка нигде нет.
 * Все BCE-отправки — только на `PASSIVE_LEVEL` (проверяется явно).
 * Запись в BAR0 — только под `HardwareLock` и только при `HardwareReady`. Teardown снимает флаг под тем же локом до `MmUnmapIoSpace`, поэтому размаппинг посреди записи невозможен.
 * Таймер копирования: `KeSetTimerEx` с периодом 2 мс. Остановка — `KeCancelTimer` + `KeFlushQueuedDpcs` на PASSIVE (`SetState` и `FreeAudioBuffer` — PASSIVE-колбэки).
@@ -395,6 +413,7 @@ LastCopiedFrame = playFrame
 | `DiagStage` | 1–5, стадии накопительные | 1 |
 | `EnableMmioCopy` | 1 = разрешить запись PCM в BAR0 (только стадия 5) | 0 |
 | `EnableBceIo` | 1 = разрешить `START_IO`, `STOP_IO` (стадия ≥ 4) | 0 |
+| `RawSpeakerChannels` | 1 = endpoint с 6 сырыми каналами кольца вместо стерео (агент: `-RawChannels`). **Твитеры без защиты** — только тихие пробы по одному каналу | 0 |
 
 ### 8.2 Стадии
 
@@ -416,6 +435,7 @@ LastCopiedFrame = playFrame
 |---|---|
 | `ForceSystemBuffer` | 1 = никогда не делать hardware I/O (чисто программный поток) |
 | `MdlVariant` | эксперименты с MDL на BAR (`Phase4.c`). Текущий тракт всегда использует системный буфер, так что практически не используется. |
+| `TweeterMode` | стерео-путь: 1 (по умолчанию) = твитеры через ФВЧ 4-го порядка 3 кГц, 0 = твитеры молчат (звук только из вуферов) |
 
 ### 8.4 Почему нет «нормального режима»
 
@@ -589,7 +609,7 @@ gcc -Wall -Wextra -o /tmp/buf tests/T2AudioBufferLogicTest.c && /tmp/buf
 | **`BufferStruct`** | таблица устройств/потоков/буферов в BAR0, которую заполняет bridgeOS |
 | **WaveRT** | модель аудиодрайвера Windows: движок пишет в циклический буфер и опрашивает позицию |
 | **Потреблённый курсор** | `LastCopiedFrame`: кадры до него уже скопированы в кольцо T2; сообщается движку как позиция |
-| **Lead** | опережение записи в кольце T2 относительно курсора, 720 кадров = 15 мс |
+| **Lead** | опережение записи в кольце T2 относительно позиции чтения T2: 1000 кадров ≈ 21 мс, держится по `UPDATE_TIMESTAMP` |
 | **S24_LE** | 24-битный сэмпл в младших трёх байтах 32-битного контейнера |
 | **Стадия (DiagStage)** | уровень разрешённого доступа к железу в тестовой сессии, 1–5 |
 | **Poisoned transport** | транспорт BCE после таймаута: не принимает новых команд до перезагрузки драйвера |

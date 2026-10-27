@@ -88,11 +88,10 @@ Windows PortCls (`PortWaveRT`) отображает буфер в память �
 2. **Аппаратное кольцо T2 (`context->Bar1Mapped + context->SpeakerBufferOffset`)**:
    Имеет размер $S_{\text{hw}} = 399\,360$ байт.
 3. **Алгоритм `T2AudioCalculateCopyChunk`**:
-   Каждые 2 мс DPC-таймер вычисляет текущий фрейм воспроизведения $F_{\text{play}}$ на основе QPC и целевой фрейм с опережением:
-   $$F_{\text{target}} = F_{\text{play}} + 720\text{ (15 ms)}$$
-   Все промежуточные фреймы от $F_{\text{last}}$ до $F_{\text{target}}$ копируются линейными порциями (чанками):
-   $$\text{SrcOffset} = (F \times 24) \pmod{S_{\text{client}}}$$
-   $$\text{DstOffset} = (F \times 24) \pmod{S_{\text{hw}}}$$
+   DPC-таймер (2 мс) и `GetPosition` вычисляют по QPC текущий кадр клиента $F_{\text{play}}$ и копируют все кадры от $F_{\text{last}}$ до него линейными порциями (чанками). Кадр $F$ попадает в кадр кольца $F + \text{DestOffset}$: опережение ~1000 кадров (21 мс) над позицией чтения T2, которое переприцеливается по `UPDATE_TIMESTAMP` (окно ±500):
+   $$\text{SrcOffset} = (F \times B_{\text{client}}) \pmod{S_{\text{client}}},\quad B_{\text{client}} = 8\ \text{(стерео)}$$
+   $$\text{DstOffset} = ((F + \text{DestOffset}) \times 24) \pmod{S_{\text{hw}}}$$
+   Стерео раскладывается на 6 динамиков: L → 0, 1 и через ФВЧ в 2; R → 3, 4 и через ФВЧ в 5 (см. `docs/analysis/RE_speaker_layout_and_clock.md`).
    Обеспечивается гладкое циклическое сшивание на границах обоих буферов.
 
 ---

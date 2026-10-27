@@ -29,7 +29,7 @@
 
 ## 2. Задачи (по приоритету)
 
-> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R9 и часть R7 (формат сэмплов) — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). Осталось: R6 (часы), R7 (раскладка стерео → 6 каналов, коэффициенты фильтров), R8 (питание в AppleAudio), msg 28 и свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`.
+> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R8, R9, msg 28 — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). R6 (часы) и R7 (раскладка динамиков) — [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md), уже в коде (стерео-endpoint, ФВЧ твитеров, коррекция по `UPDATE_TIMESTAMP`). Осталось (не блокирует первый звук): нужен ли `SET_PROPERTY 'nsrt'` перед START_IO; свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`; номера каналов в цикле копирования AppleAudio (подтвердить раскладку статически); `IAdapterPowerManagement` в нашем драйвере.
 
 ### R1. Подтвердить причину BSOD по минидампам — **первым делом**
 

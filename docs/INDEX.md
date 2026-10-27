@@ -10,7 +10,8 @@
 | :--- | :--- |
 | **[DRIVER_GUIDE.md](DRIVER_GUIDE.md)** | **Подробное руководство по текущему коду**: железо T2, протокол BCE, архитектура, потоковый тракт, синхронизация, стадии и реестр, сборка/CI, тест на железе, справочник по логу, известные проблемы. |
 | **[REVERSE_PLAN.md](REVERSE_PLAN.md)** | План реверса для Gemini: задачи R1–R9 (минидампы, тег сообщений, ответ на `UPDATE_TIMESTAMP`, jack, инициализация, часы, формат/каналы, питание). |
-| **[analysis/RE_appleaudio_protocol.md](analysis/RE_appleaudio_protocol.md)** | Полный набор команд AppleAudio → T2, handshake и remote access в AppleUSBVHCI (`mode 1`), формат сэмплов S24_LE из цикла копирования, DSP на CPU, jack, выбор получателя `0x222020`. |
+| **[analysis/RE_appleaudio_protocol.md](analysis/RE_appleaudio_protocol.md)** | Полный набор команд AppleAudio → T2, handshake и remote access в AppleUSBVHCI (`mode 1`), формат сэмплов S24_LE из цикла копирования, DSP на CPU, jack, выбор получателя `0x222020`, питание (R8), msg 28 (список controls). |
+| **[analysis/RE_speaker_layout_and_clock.md](analysis/RE_speaker_layout_and_clock.md)** | Часы T2 (`UPDATE_TIMESTAMP` = QPC-нс хоста, модель опережения AppleAudio 1000 ± 500) и раскладка 6 динамиков MacBookPro16,1 (вуферы 0/1 и 3/4, твитеры 2/5); что сделано в коде. |
 | **[analysis/START_IO_BSOD_ROOT_CAUSE.md](analysis/START_IO_BSOD_ROOT_CAUSE.md)** | Корневая причина BSOD `0x7E` при `START_IO` (IOCTL `0x222020` от AppleUSBVHCI) и исправление. |
 | **[CURRENT_STATE.md](CURRENT_STATE.md)** | Единственный авторитетный статус-документ с хронологией и доказательствами с железа. |
 | **[AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md)** | **Мастер-руководство по передаче контекста**: Аппаратная архитектура T2, спецификация протокола BCE, матрица всех исправленных критических дефектов, математика циклического кольцевого DMA зеркалирования, инструкции по сборке и тестам. |

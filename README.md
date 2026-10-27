@@ -16,17 +16,19 @@
 
 ```
  Windows audio engine
-        │  32-bit PCM, 6 ch, 48 kHz (WAVEFORMATEXTENSIBLE 5.1)
+        │  32-bit PCM, stereo, 48 kHz (WAVEFORMATEXTENSIBLE)
         ▼
  WaveRT cyclic buffer (system RAM, mapped to the engine)
-        │  copy DPC + GetPosition: consumed frames → S24_LE, +15 ms lead
+        │  copy DPC + GetPosition: consumed frames → S24_LE,
+        │  L → woofers 0,1 + tweeter 2 (3 kHz high-pass), R → 3,4 + 5;
+        │  ~21 ms lead, kept on the T2 clock (UPDATE_TIMESTAMP)
         ▼
  BAR0 speaker ring (399,360 B = 16,640 frames, located via BufferStruct)
         │  read by bridgeOS once START_IO is sent
         ▼
  T2 audio DSP → speakers
 
- Control path: IOCTL 0x222018 on \Device\AppleUSBVHCI  (BCE "Audt" messages:
+ Control path: IOCTL 0x222018 on \Device\AppleUSBVHCI  (BCE messages:
  GET_DEVICE_LIST, GET_PROPERTY, GET_OUTPUT_STREAM_LIST,
  START_IO / STOP_IO)
 ```
@@ -34,7 +36,8 @@
 * **Buffer discovery (`src/Device.c`).** The driver maps BAR0 (the ring memory) and finds the config BAR by its GPR signature `0x19870423` at `+0xC000`. It then walks the `BufferStruct` to the `"Speaker"` output buffer, bounds-checking everything against the mapped size. BAR0 is mapped write-combining when the BAR is prefetchable, as kaiT2en does.
 * **Control (`src/BceTransport.c`, `src/Phase4.c`).** The speaker device is found by its UID. The driver then reads the stream's physical format (`'pft '`), latency (`'ltnc'`) and safety offset (`'saft'`) from the T2. Remote access is left to AppleUSBVHCI, which manages it itself.
 * **Streaming (`src/WaveRTStream.c`).** PortCls cannot map BAR pages to user mode, so the engine writes to RAM and the driver mirrors it. The engine is only ever told a frame was played after that frame has been copied.
-* **Formats (`src/WaveRTMiniport.c`).** The render pin offers a single format, 6 ch / 48 kHz / 32-bit. It is negotiated as `WAVEFORMATEXTENSIBLE` with a 5.1 mask.
+* **Formats (`src/WaveRTMiniport.c`).** The render pin offers stereo 48 kHz / 32-bit (`WAVEFORMATEXTENSIBLE`). Windows does not upmix stereo to 5.1, so the driver itself lays stereo over the six speakers (`src/T2AudioSpeakerLogic.h`, layout from kaiT2en's MacBookPro16,1 DSP profile): ring channels 0/1 and 3/4 are the left/right woofer pairs, 2/5 the tweeters, which get a 4th-order 3 kHz high-pass (`Parameters\TweeterMode=0` mutes them). Apple's speaker EQ is not reproduced; Equalizer APO works on the stereo endpoint. `TestSession\RawSpeakerChannels=1` exposes the raw 6 channels for per-speaker diagnostics (no tweeter protection).
+* **Clock.** bridgeOS sends `UPDATE_TIMESTAMP` (via IOCTL `0x222020`, handled by `T2AudioDeviceControl`) with the T2 read position and host QPC time. As AppleAudio does, the driver keeps its write position 1000 frames ahead of it and re-aims when the lead drifts out of ±500 frames. Analysis: `docs/analysis/RE_speaker_layout_and_clock.md`.
 
 ### Safety gates
 
