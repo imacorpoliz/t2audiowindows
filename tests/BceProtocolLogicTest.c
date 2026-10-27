@@ -273,6 +273,69 @@ static void test_parse_command_response(void)
           !T2AudioBceParseCommandResponse(NULL, 21, T2AUDIO_MSG_START_IO_RESPONSE, 0x39));
 }
 
+static void test_physical_format(void)
+{
+    // Speaker stream 0x3A 'pft ' payload captured on MacBookPro16,1
+    // (docs/planning/NOTES.md, base64 AAAAAABw50Bt...).
+    static const unsigned char kSpeaker[40] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0xE7, 0x40, 0x6D, 0x63,
+        0x70, 0x6C, 0x04, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x06, 0x00,
+        0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    T2AUDIO_BCE_PHYS_FORMAT f;
+    unsigned long v = 0;
+    unsigned char bad[40];
+
+    printf("T2AudioBceParsePhysicalFormat / DeviceSampleShift\n");
+
+    check("hardware descriptor parses",
+          T2AudioBceParsePhysicalFormat(kSpeaker, sizeof(kSpeaker), &f));
+    check("rate 48000", f.SampleRate == 48000);
+    check("format lpcm", f.FormatId == T2AUDIO_BCE_FORMAT_LPCM);
+    check("flags SIGNED only", f.FormatFlags == T2AUDIO_BCE_FORMAT_FLAG_SIGNED);
+    check("6 ch, 24 B/frame, 24 bits",
+          f.ChannelsPerFrame == 6 && f.BytesPerFrame == 24 &&
+          f.BytesPerPacket == 24 && f.FramesPerPacket == 1 &&
+          f.BitsPerChannel == 24);
+    check("speaker ring is S24_LE -> shift 8",
+          T2AudioBceDeviceSampleShift(&f, 6, 48000) == 8);
+    check("too short -> fail",
+          !T2AudioBceParsePhysicalFormat(kSpeaker, 39, &f));
+
+    T2AudioBceParsePhysicalFormat(kSpeaker, sizeof(kSpeaker), &f);
+    f.FormatFlags |= T2AUDIO_BCE_FORMAT_FLAG_ALIGNED_HIGH;
+    check("24-bit aligned high -> shift 0", T2AudioBceDeviceSampleShift(&f, 6, 48000) == 0);
+    f.FormatFlags = T2AUDIO_BCE_FORMAT_FLAG_SIGNED;
+    f.BitsPerChannel = 32;
+    check("32-bit -> shift 0", T2AudioBceDeviceSampleShift(&f, 6, 48000) == 0);
+    f.FormatFlags = T2AUDIO_BCE_FORMAT_FLAG_SIGNED | T2AUDIO_BCE_FORMAT_FLAG_FLOAT;
+    check("float -> unsupported", T2AudioBceDeviceSampleShift(&f, 6, 48000) == -1);
+    f.FormatFlags = T2AUDIO_BCE_FORMAT_FLAG_SIGNED;
+    check("wrong channel count -> unsupported", T2AudioBceDeviceSampleShift(&f, 2, 48000) == -1);
+    check("wrong rate -> unsupported", T2AudioBceDeviceSampleShift(&f, 6, 44100) == -1);
+    f.FormatFlags = 0;
+    check("unsigned -> unsupported", T2AudioBceDeviceSampleShift(&f, 6, 48000) == -1);
+    check("NULL format -> unsupported", T2AudioBceDeviceSampleShift(0, 6, 48000) == -1);
+
+    // 44100.0 = 0x40E5888000000000, 1.5 = 0x3FF8000000000000.
+    check("double 44100 -> 44100",
+          T2AudioBceDecodeIntegralDouble(0x40E5888000000000ull, &v) && v == 44100);
+    check("double 1.5 (fractional) -> fail",
+          !T2AudioBceDecodeIntegralDouble(0x3FF8000000000000ull, &v));
+    check("double -48000 -> fail",
+          !T2AudioBceDecodeIntegralDouble(0xC0E7700000000000ull, &v));
+    check("double 2^32 -> fail",
+          !T2AudioBceDecodeIntegralDouble(0x41F0000000000000ull, &v));
+    check("double 0 -> 0",
+          T2AudioBceDecodeIntegralDouble(0, &v) && v == 0);
+
+    memcpy(bad, kSpeaker, sizeof(bad));
+    bad[7] = 0xBF;  // negative sample rate
+    check("negative rate descriptor -> fail",
+          !T2AudioBceParsePhysicalFormat(bad, sizeof(bad), &f));
+}
+
 int main(void)
 {
     test_scalar_roundtrip();
@@ -282,6 +345,7 @@ int main(void)
     test_parse_device_list_response();
     test_parse_property_response();
     test_parse_command_response();
+    test_physical_format();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

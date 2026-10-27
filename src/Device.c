@@ -119,16 +119,25 @@ T2AudioMapResources(
     // The T2 audio engine reads PCM straight out of this region, so the copy
     // DPC must be able to write it. Mapping it PAGE_READONLY made the first
     // RtlCopyMemory in T2AudioStreamCopyTick fault with
-    // 0xBE ATTEMPTED_WRITE_TO_READONLY_MEMORY. PAGE_NOCACHE keeps the writes
-    // immediately visible to the engine (no write-combining buffers to flush).
+    // 0xBE ATTEMPTED_WRITE_TO_READONLY_MEMORY. Like kaiT2en (pci_iomap_wc when
+    // the BAR is IORESOURCE_PREFETCH), map a prefetchable BAR write-combining:
+    // the copy path issues one 32-bit store per sample, which is far cheaper
+    // combined, and it drains the WC buffers with an sfence after each pass.
+    // A non-prefetchable BAR stays uncached.
+    Context->Bar1WriteCombined =
+        (descriptor->Flags & CM_RESOURCE_MEMORY_PREFETCHABLE) != 0;
     Context->Bar1Mapped = MmMapIoSpaceEx(descriptor->u.Memory.Start,
                                          Context->Bar1Size,
-                                         PAGE_READWRITE | PAGE_NOCACHE);
+                                         PAGE_READWRITE |
+                                         (Context->Bar1WriteCombined
+                                              ? PAGE_WRITECOMBINE
+                                              : PAGE_NOCACHE));
     if (Context->Bar1Mapped == NULL) {
         KdPrint(("T2Audio: MapResources FAIL_E: MmMapIoSpaceEx failed for Resource[0]\n"));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    KdPrint(("T2Audio: Resource[0] mapped at %p\n", Context->Bar1Mapped));
+    KdPrint(("T2Audio: Resource[0] mapped at %p (%s)\n", Context->Bar1Mapped,
+             Context->Bar1WriteCombined ? "write-combining" : "uncached"));
 
     // Log every memory resource with both its translated and raw (BAR) address.
     // Windows does not guarantee that the translated resource order matches PCI

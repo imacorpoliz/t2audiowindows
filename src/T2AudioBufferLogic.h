@@ -209,4 +209,29 @@ T2AudioCalculateCopyChunk(unsigned long long SourceFrame,
     return framesCopied;
 }
 
+// Copy SampleCount 32-bit little-endian signed samples from Source to Dest,
+// arithmetic-shifting each right by Shift (0..31). Used to turn Windows'
+// MSB-aligned 32-bit PCM into the T2's S24_LE ring layout (24 bits in the low
+// three bytes, sign-extended). Dest may be device memory: each sample is a
+// single aligned 32-bit store. `unsigned int` is 32 bits on every target.
+static __inline void
+T2AudioConvertSamples(volatile unsigned int *Dest,
+                      const unsigned int *Source,
+                      unsigned long SampleCount,
+                      unsigned int Shift)
+{
+    unsigned long i;
+
+    for (i = 0; i < SampleCount; i++) {
+        unsigned int v = Source[i];
+
+        // Portable arithmetic shift: shifting a negative int is
+        // implementation-defined in C, so shift the complement instead.
+        if (Shift != 0) {
+            v = (v & 0x80000000u) ? ~((~v) >> Shift) : (v >> Shift);
+        }
+        Dest[i] = v;
+    }
+}
+
 #endif

@@ -247,6 +247,36 @@ static void test_ticks_to_frames(void)
               ((0x0010000000000000ull % 3000000000ull) * 48000ull) / 3000000000ull);
 }
 
+static void test_convert_samples(void)
+{
+    // Windows hands MSB-aligned 32-bit samples; the T2 speaker ring is S24_LE.
+    const unsigned int src[5] = {
+        0x7FFFFF00u,   // +full scale
+        0x80000000u,   // -full scale
+        0xFFFFFF00u,   // -1 LSB of 24-bit
+        0x00000100u,   // +1 LSB of 24-bit
+        0x123456FFu    // low byte dropped
+    };
+    unsigned int dst[5] = { 0, 0, 0, 0, 0 };
+
+    printf("T2AudioConvertSamples\n");
+
+    T2AudioConvertSamples(dst, src, 5, 8);
+    check("+full scale -> 0x007FFFFF", dst[0] == 0x007FFFFFu);
+    check("-full scale -> sign-extended 0xFF800000", dst[1] == 0xFF800000u);
+    check("-1 LSB -> 0xFFFFFFFF", dst[2] == 0xFFFFFFFFu);
+    check("+1 LSB -> 1", dst[3] == 1u);
+    check("low byte dropped -> 0x00123456", dst[4] == 0x00123456u);
+
+    T2AudioConvertSamples(dst, src, 5, 0);
+    check("shift 0 copies unchanged",
+          dst[0] == src[0] && dst[1] == src[1] && dst[4] == src[4]);
+
+    dst[0] = 0xDEADBEEFu;
+    T2AudioConvertSamples(dst, src, 0, 8);
+    check("zero count writes nothing", dst[0] == 0xDEADBEEFu);
+}
+
 int main(void)
 {
     test_align();
@@ -256,6 +286,7 @@ int main(void)
     test_device_table_fits();
     test_calculate_copy_chunk();
     test_ticks_to_frames();
+    test_convert_samples();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

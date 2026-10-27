@@ -25,6 +25,8 @@
 #define T2AUDIO_MSG_STOP_IO_RESPONSE          3u
 #define T2AUDIO_MSG_GET_PROPERTY              7u
 #define T2AUDIO_MSG_GET_PROPERTY_RESPONSE     8u
+#define T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST    26u
+#define T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE 27u
 #define T2AUDIO_MSG_SET_REMOTE_ACCESS         32u
 #define T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE 33u
 #define T2AUDIO_MSG_GET_DEVICE_LIST           101u
@@ -306,6 +308,126 @@ T2AudioBceUidIsSpeaker(const char *Uid, unsigned long long UidLength)
         }
     }
     return 1;
+}
+
+// Stream physical format ('pft ' property), the 40-byte CoreAudio-style
+// descriptor bridgeOS returns for a stream object:
+//   sample_rate (IEEE-754 double, u64 bits), format_id (u32, 'lpcm'),
+//   format_flags, bytes_per_packet, frames_per_packet, bytes_per_frame,
+//   channels_per_frame, bits_per_channel, reserved (all u32).
+#define T2AUDIO_BCE_PHYS_FORMAT_SIZE      40u
+#define T2AUDIO_BCE_FORMAT_LPCM           0x6c70636du  // 'lpcm'
+
+#define T2AUDIO_BCE_FORMAT_FLAG_FLOAT           0x01u
+#define T2AUDIO_BCE_FORMAT_FLAG_BIG_ENDIAN      0x02u
+#define T2AUDIO_BCE_FORMAT_FLAG_SIGNED          0x04u
+#define T2AUDIO_BCE_FORMAT_FLAG_PACKED          0x08u
+#define T2AUDIO_BCE_FORMAT_FLAG_ALIGNED_HIGH    0x10u
+#define T2AUDIO_BCE_FORMAT_FLAG_NON_INTERLEAVED 0x20u
+#define T2AUDIO_BCE_FORMAT_FLAG_NON_MIXABLE     0x40u
+
+typedef struct _T2AUDIO_BCE_PHYS_FORMAT {
+    unsigned long SampleRate;        // integral Hz, decoded from the double
+    unsigned long FormatId;
+    unsigned long FormatFlags;
+    unsigned long BytesPerPacket;
+    unsigned long FramesPerPacket;
+    unsigned long BytesPerFrame;
+    unsigned long ChannelsPerFrame;
+    unsigned long BitsPerChannel;
+} T2AUDIO_BCE_PHYS_FORMAT;
+
+// Decode a nonnegative, integral IEEE-754 double (given as its raw bits)
+// without floating point, which kernel code must avoid. Returns 1 and writes
+// *Out when the value is an integer in [0, 2^32), otherwise 0.
+static __inline int
+T2AudioBceDecodeIntegralDouble(unsigned long long Bits, unsigned long *Out)
+{
+    unsigned int exponent = (unsigned int)((Bits >> 52) & 0x7ffu);
+    unsigned long long mantissa = Bits & ((1ull << 52) - 1);
+    unsigned int shift;
+
+    if (Out == 0) {
+        return 0;
+    }
+    if (Bits == 0) {
+        *Out = 0;
+        return 1;
+    }
+    // Negative, below 1.0, or 2^32 and above.
+    if ((Bits >> 63) != 0 || exponent < 1023 || exponent > 1023 + 31) {
+        return 0;
+    }
+    mantissa |= 1ull << 52;
+    shift = 1075 - exponent;   // 52 - (exponent - 1023), always 21..52
+    if ((mantissa & ((1ull << shift) - 1)) != 0) {
+        return 0;              // fractional rate
+    }
+    *Out = (unsigned long)(mantissa >> shift);
+    return 1;
+}
+
+// Parse a 'pft ' property payload. Returns 1 on success.
+static __inline int
+T2AudioBceParsePhysicalFormat(const unsigned char *Data,
+                              unsigned long long DataSize,
+                              T2AUDIO_BCE_PHYS_FORMAT *Out)
+{
+    if (Data == 0 || Out == 0 || DataSize < T2AUDIO_BCE_PHYS_FORMAT_SIZE) {
+        return 0;
+    }
+    if (!T2AudioBceDecodeIntegralDouble(T2AudioBceReadU64(Data), &Out->SampleRate)) {
+        return 0;
+    }
+    Out->FormatId         = T2AudioBceReadU32(Data + 8);
+    Out->FormatFlags      = T2AudioBceReadU32(Data + 12);
+    Out->BytesPerPacket   = T2AudioBceReadU32(Data + 16);
+    Out->FramesPerPacket  = T2AudioBceReadU32(Data + 20);
+    Out->BytesPerFrame    = T2AudioBceReadU32(Data + 24);
+    Out->ChannelsPerFrame = T2AudioBceReadU32(Data + 28);
+    Out->BitsPerChannel   = T2AudioBceReadU32(Data + 32);
+    return 1;
+}
+
+// Decide how a host sample (signed 32-bit, MSB-aligned, as Windows delivers
+// 32-bit PCM) must be shifted to land in the device ring for the given
+// physical format, matching how kaiT2en maps the descriptor to an ALSA
+// format. Only the interleaved, little-endian, signed integer layouts with
+// 4-byte containers and the expected channel count / rate are accepted:
+//   bits 32                      -> shift 0  (S32_LE)
+//   bits 24, ALIGNED_HIGH        -> shift 0  (24 bits in the high bytes)
+//   bits 24, not packed          -> shift 8  (S24_LE: low 3 bytes)
+// Returns the shift (0 or 8), or -1 if the format is not supported.
+static __inline int
+T2AudioBceDeviceSampleShift(const T2AUDIO_BCE_PHYS_FORMAT *Format,
+                            unsigned long ExpectedChannels,
+                            unsigned long ExpectedRate)
+{
+    unsigned long flags;
+
+    if (Format == 0 || Format->FormatId != T2AUDIO_BCE_FORMAT_LPCM ||
+        Format->SampleRate != ExpectedRate ||
+        Format->ChannelsPerFrame != ExpectedChannels ||
+        Format->FramesPerPacket != 1 ||
+        Format->BytesPerFrame != ExpectedChannels * 4u ||
+        Format->BytesPerPacket != Format->BytesPerFrame) {
+        return -1;
+    }
+    flags = Format->FormatFlags;
+    if ((flags & (T2AUDIO_BCE_FORMAT_FLAG_FLOAT |
+                  T2AUDIO_BCE_FORMAT_FLAG_BIG_ENDIAN |
+                  T2AUDIO_BCE_FORMAT_FLAG_NON_INTERLEAVED |
+                  T2AUDIO_BCE_FORMAT_FLAG_PACKED)) != 0 ||
+        (flags & T2AUDIO_BCE_FORMAT_FLAG_SIGNED) == 0) {
+        return -1;
+    }
+    if (Format->BitsPerChannel == 32) {
+        return 0;
+    }
+    if (Format->BitsPerChannel == 24) {
+        return (flags & T2AUDIO_BCE_FORMAT_FLAG_ALIGNED_HIGH) ? 0 : 8;
+    }
+    return -1;
 }
 
 #endif

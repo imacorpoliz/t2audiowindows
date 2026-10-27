@@ -5,6 +5,19 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (later): kaiT2en parity pass (source only, not hardware-tested)
+
+Compared against `kaiT2en/KaiT2en-Fedora` `modules/t2bce_audio` (audio.c, pcm.c, protocol.h):
+
+- **Sample layout (likely audible defect):** the Speaker stream's `'pft '` (flags `0x4`, 24 bits, 4-byte container; NOTES.md) is `S24_LE` in kaiT2en's mapping, i.e. 24 bits in the **low** bytes. The driver copied Windows' MSB-aligned 32-bit samples verbatim. The copy now shifts each sample `>> 8` (sign-extended), via `T2AudioConvertSamples`.
+- **Stream format read from the T2:** stage-3 probe now sends `GET_OUTPUT_STREAM_LIST` (26) for the speaker and `GET_PROPERTY` `'pft '` / `'ltnc'` on the stream plus `'ltnc'` / `'saft'` (`outp`) on the device. `T2AudioBceDeviceSampleShift` derives the shift. MMIO copy is refused unless the format was read and is supported (`SpeakerFormatValid`). Latency is reported via `GetHWLatency`. Parser is tested against the captured hardware descriptor.
+- **Start sequence:** the ring is zeroed before a fresh run, and the QPC anchor is taken before `START_IO` (the T2 cannot read earlier).
+- **BAR0 write-combining** when the resource is prefetchable (`pci_iomap_wc` equivalent), with `_mm_sfence` after each copy pass.
+- **`SET_REMOTE_ACCESS(OFF)`** on PnP stop/remove (not surprise removal) before the transport closes.
+- **CI:** `.github/workflows/build.yml` builds the driver with the WDK on `windows-2022` (approach from `osaul4ik/apple-t2-touchid-windows`) and runs the host tests on MSVC/gcc/clang.
+- **Not ported (blocked):** `NOTIFICATION_ALIVE` handshake and `UPDATE_TIMESTAMP` hardware clock need a T2→host receive path through AppleUSBVHCI; sleep handling (remote access OFF in prepare, GPR sleep marker `0x19770525` at `+0x10`). Do not sleep the machine during a stage-4+ session.
+- **Next hardware step:** a stage-3 run should log `pft: rate=48000 ... ch=6 bits=24` and `sample shift=8`.
+
 ### 2026-10-28 (later): code review fixes (source only, not hardware-tested)
 
 - **Copy ahead of written data (playback):** the copy DPC copied up to 15 ms *ahead* of the reported play position, from a 10 ms client buffer, so it mirrored frames the client had not written yet (aliased stale data). Now each frame is copied once consumed and written 720 frames ahead in the BAR1 ring; the reported position is the consumed cursor, and `GetPosition` advances the copy itself (no dependency on the 15.6 ms default timer resolution). The lag clamp is one client buffer instead of 1440 frames.

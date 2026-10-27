@@ -10,9 +10,13 @@
 #define T2AUDIO_REMOTE_ACCESS_OFF 0
 #define T2AUDIO_REMOTE_ACCESS_ON 2
 
-// Property scope/selector values ('glob', 'uid ').
-#define T2AUDIO_PROP_SCOPE_GLOBAL 0x676c6f62u
-#define T2AUDIO_PROP_UID          0x75696420u
+// Property scope/selector values (kaiT2en modules/t2bce_audio/protocol.h).
+#define T2AUDIO_PROP_SCOPE_GLOBAL 0x676c6f62u   // 'glob'
+#define T2AUDIO_PROP_SCOPE_OUTPUT 0x6f757470u   // 'outp'
+#define T2AUDIO_PROP_UID          0x75696420u   // 'uid '
+#define T2AUDIO_PROP_LATENCY      0x6c746e63u   // 'ltnc'
+#define T2AUDIO_PROP_SAFETY_OFFSET 0x73616674u  // 'saft'
+#define T2AUDIO_PROP_PHYS_FORMAT  0x70667420u   // 'pft '
 
 // GET_PROPERTY request payload after the base: obj(8) element(4) scope(4)
 // selector(4) qualifier_size(8).
@@ -393,14 +397,18 @@ T2AudioSendBceMessage(
     return status;
 }
 
-// Send a GET_PROPERTY command for the device UID and copy the raw (not
-// NUL-terminated) UID bytes into UidBuffer.
+// Send a GET_PROPERTY command for (ObjectId, Scope, Selector, element 0) on
+// DeviceId and copy the raw property data into DataBuffer. The reply must echo
+// the requested object and address.
 static NTSTATUS
-T2AudioGetDeviceUid(
+T2AudioGetProperty(
     _In_ ULONG64 DeviceId,
-    _Out_writes_bytes_(UidBufferSize) CHAR *UidBuffer,
-    _In_ ULONG UidBufferSize,
-    _Out_ PULONG UidLength)
+    _In_ ULONG64 ObjectId,
+    _In_ ULONG Scope,
+    _In_ ULONG Selector,
+    _Out_writes_bytes_(DataBufferSize) PVOID DataBuffer,
+    _In_ ULONG DataBufferSize,
+    _Out_ PULONG DataLength)
 {
     UCHAR requestBuffer[T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE +
                         T2AUDIO_PROP_REQUEST_PAYLOAD_SIZE];
@@ -431,10 +439,10 @@ T2AudioGetDeviceUid(
     base->Status = 0;
 
     // obj, element, scope, selector, qualifier_size (no qualifier).
-    T2AudioBceWriteU64(payload + 0, DeviceId);
+    T2AudioBceWriteU64(payload + 0, ObjectId);
     T2AudioBceWriteU32(payload + 8, 0);
-    T2AudioBceWriteU32(payload + 12, T2AUDIO_PROP_SCOPE_GLOBAL);
-    T2AudioBceWriteU32(payload + 16, T2AUDIO_PROP_UID);
+    T2AudioBceWriteU32(payload + 12, Scope);
+    T2AudioBceWriteU32(payload + 16, Selector);
     T2AudioBceWriteU64(payload + 20, 0);
 
     status = T2AudioSendBceMessage(
@@ -456,25 +464,189 @@ T2AudioGetDeviceUid(
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    // The reply must echo the property we asked for on the same device.
-    if (obj != DeviceId || element != 0 ||
-        scope != T2AUDIO_PROP_SCOPE_GLOBAL || selector != T2AUDIO_PROP_UID) {
+    // The reply must echo the property we asked for on the same object.
+    if (obj != ObjectId || element != 0 ||
+        scope != Scope || selector != Selector) {
         KdPrint(("T2Audio: GET_PROPERTY reply mismatch: obj=0x%I64X el=%u "
                  "scope=0x%08X sel=0x%08X\n",
                  obj, element, scope, selector));
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    if (dataSize > UidBufferSize) {
-        // UID longer than we accept: treat as a non-matching device.
-        KdPrint(("T2Audio: device 0x%I64X UID too long: %I64u\n",
-                 DeviceId, dataSize));
+    if (dataSize > DataBufferSize) {
+        // Longer than the caller accepts (e.g. an oversized UID): treat as a
+        // non-matching object.
+        KdPrint(("T2Audio: obj 0x%I64X property 0x%08X too long: %I64u\n",
+                 ObjectId, Selector, dataSize));
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    RtlCopyMemory(UidBuffer, replyBuffer + dataOffset, (SIZE_T)dataSize);
-    *UidLength = (ULONG)dataSize;
+    RtlCopyMemory(DataBuffer, replyBuffer + dataOffset, (SIZE_T)dataSize);
+    *DataLength = (ULONG)dataSize;
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+T2AudioGetDeviceUid(
+    _In_ ULONG64 DeviceId,
+    _Out_writes_bytes_(UidBufferSize) CHAR *UidBuffer,
+    _In_ ULONG UidBufferSize,
+    _Out_ PULONG UidLength)
+{
+    return T2AudioGetProperty(DeviceId, DeviceId, T2AUDIO_PROP_SCOPE_GLOBAL,
+                              T2AUDIO_PROP_UID, UidBuffer, UidBufferSize,
+                              UidLength);
+}
+
+// Read a 4-byte property (latency / safety offset, in frames).
+static NTSTATUS
+T2AudioGetU32Property(
+    _In_ ULONG64 DeviceId,
+    _In_ ULONG64 ObjectId,
+    _In_ ULONG Scope,
+    _In_ ULONG Selector,
+    _Out_ PULONG Value)
+{
+    UCHAR data[4];
+    ULONG length = 0;
+    NTSTATUS status;
+
+    *Value = 0;
+    status = T2AudioGetProperty(DeviceId, ObjectId, Scope, Selector,
+                                data, sizeof(data), &length);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    if (length != sizeof(data)) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    *Value = T2AudioBceReadU32(data);
+    return STATUS_SUCCESS;
+}
+
+// GET_OUTPUT_STREAM_LIST (26 -> 27). The reply has the same shape as the
+// device list (count u64, then ids), so the same parser validates it.
+static NTSTATUS
+T2AudioGetOutputStreamList(
+    _In_ ULONG64 DeviceId,
+    _Out_writes_(MaxStreams) ULONG64 *StreamList,
+    _In_ ULONG MaxStreams,
+    _Out_ PULONG StreamCount)
+{
+    UCHAR requestBuffer[T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE];
+    UCHAR replyBuffer[256];
+    T2AUDIO_MSG_HEADER *header;
+    T2AUDIO_MSG_BASE *base;
+    ULONG replySize;
+    ULONG outCount;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    *StreamCount = 0;
+    RtlZeroMemory(requestBuffer, sizeof(requestBuffer));
+    header = (T2AUDIO_MSG_HEADER *)requestBuffer;
+    base = (T2AUDIO_MSG_BASE *)(header + 1);
+    RtlCopyMemory(header->Tag, T2AUDIO_BCE_TAG, 4);
+    header->Type = T2AUDIO_MSG_TYPE_COMMAND;
+    header->DeviceId = DeviceId;
+    base->Message = T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST;
+    base->Status = 0;
+
+    status = T2AudioSendBceMessage(requestBuffer, (ULONG)sizeof(requestBuffer),
+                                   replyBuffer, sizeof(replyBuffer), &replySize);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("T2Audio: GET_OUTPUT_STREAM_LIST send failed: 0x%08X\n", status));
+        return status;
+    }
+
+    if (!T2AudioBceParseDeviceListResponse(replyBuffer, replySize,
+                                           T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE,
+                                           StreamList, MaxStreams, &outCount)) {
+        KdPrint(("T2Audio: GET_OUTPUT_STREAM_LIST reply invalid: size=%u\n", replySize));
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    *StreamCount = outCount;
+    return STATUS_SUCCESS;
+}
+
+// Query what the device itself says about the speaker output, as kaiT2en's
+// t2audio_init_dev / t2audio_init_stream_info do: the output stream id, its
+// physical format ('pft '), the stream and device output latency ('ltnc') and
+// the device output safety offset ('saft'). The physical format decides how
+// samples are laid out in the BAR1 ring; MMIO copy stays off unless it was
+// read and is supported (Context->SpeakerFormatValid).
+static VOID
+T2AudioQuerySpeakerStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG64 streams[4];
+    ULONG streamCount = 0;
+    UCHAR formatData[T2AUDIO_BCE_PHYS_FORMAT_SIZE];
+    ULONG formatLength = 0;
+    T2AUDIO_BCE_PHYS_FORMAT format;
+    ULONG64 deviceId = Context->BceSpeakerDeviceId;
+    ULONG deviceLatency = 0;
+    ULONG streamLatency = 0;
+    ULONG safetyOffset = 0;
+    int shift;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    Context->SpeakerStreamId = 0;
+    Context->SpeakerFormatValid = FALSE;
+    Context->SpeakerSampleShift = 0;
+    Context->SpeakerLatencyFrames = 0;
+    Context->SpeakerSafetyOffsetFrames = 0;
+
+    status = T2AudioGetOutputStreamList(deviceId, streams, ARRAYSIZE(streams),
+                                        &streamCount);
+    if (!NT_SUCCESS(status) || streamCount == 0) {
+        KdPrint(("T2Audio: speaker 0x%I64X: no output stream (0x%08X, n=%u)\n",
+                 deviceId, status, streamCount));
+        return;
+    }
+    Context->SpeakerStreamId = streams[0];
+
+    status = T2AudioGetProperty(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_PHYS_FORMAT, formatData,
+                                sizeof(formatData), &formatLength);
+    if (!NT_SUCCESS(status) ||
+        !T2AudioBceParsePhysicalFormat(formatData, formatLength, &format)) {
+        KdPrint(("T2Audio: speaker stream 0x%I64X: 'pft ' unavailable (0x%08X, len=%u)\n",
+                 streams[0], status, formatLength));
+        return;
+    }
+
+    KdPrint(("T2Audio: speaker stream 0x%I64X pft: rate=%u id=0x%08X flags=0x%X "
+             "bpp=%u fpp=%u bpf=%u ch=%u bits=%u\n",
+             streams[0], format.SampleRate, format.FormatId, format.FormatFlags,
+             format.BytesPerPacket, format.FramesPerPacket, format.BytesPerFrame,
+             format.ChannelsPerFrame, format.BitsPerChannel));
+
+    // The WaveRT pin is fixed at 6 ch / 48 kHz / 32-bit containers.
+    shift = T2AudioBceDeviceSampleShift(&format, 6, 48000);
+    if (shift < 0) {
+        KdPrint(("T2Audio: speaker stream format unsupported; MMIO copy disabled\n"));
+        return;
+    }
+    Context->SpeakerSampleShift = (ULONG)shift;
+    Context->SpeakerFormatValid = TRUE;
+
+    // Latencies are informational (reported through GetHWLatency); a failed
+    // query only leaves them at zero.
+    (VOID)T2AudioGetU32Property(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_LATENCY, &streamLatency);
+    (VOID)T2AudioGetU32Property(deviceId, deviceId, T2AUDIO_PROP_SCOPE_OUTPUT,
+                                T2AUDIO_PROP_LATENCY, &deviceLatency);
+    (VOID)T2AudioGetU32Property(deviceId, deviceId, T2AUDIO_PROP_SCOPE_OUTPUT,
+                                T2AUDIO_PROP_SAFETY_OFFSET, &safetyOffset);
+    Context->SpeakerLatencyFrames = streamLatency + deviceLatency;
+    Context->SpeakerSafetyOffsetFrames = safetyOffset;
+
+    KdPrint(("T2Audio: speaker sample shift=%u latency=%u+%u frames safety=%u frames\n",
+             Context->SpeakerSampleShift, streamLatency, deviceLatency, safetyOffset));
 }
 
 NTSTATUS
@@ -701,9 +873,14 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         }
     }
 
+    if (Context->BceSpeakerDeviceId != 0) {
+        T2AudioQuerySpeakerStream(Context);
+    }
+
     Context->BceProbed = TRUE;
-    KdPrint(("T2Audio: BCE probe done; speaker id 0x%I64X\n",
-             Context->BceSpeakerDeviceId));
+    KdPrint(("T2Audio: BCE probe done; speaker id 0x%I64X stream 0x%I64X format=%u\n",
+             Context->BceSpeakerDeviceId, Context->SpeakerStreamId,
+             Context->SpeakerFormatValid ? 1u : 0u));
 
     // Transport intentionally left open for START_IO/STOP_IO.
     return STATUS_SUCCESS;

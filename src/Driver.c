@@ -35,9 +35,27 @@ T2AudioPnpHandler(
     case IRP_MN_SURPRISE_REMOVAL:
     case IRP_MN_REMOVE_DEVICE:
         if (DeviceObject->DeviceExtension != NULL) {
+            PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
+
             KdPrint(("T2Audio: PnP minor 0x%02X - releasing hardware\n",
                      stack->MinorFunction));
-            T2AudioUnmapResources(T2AudioGetContext(DeviceObject));
+
+            // Hand audio control back to bridgeOS while the BCE transport is
+            // still open, as kaiT2en's quiesce path does before the bus goes
+            // away; otherwise the T2 keeps waiting for a host that is gone
+            // (and AppleAudio cannot take over cleanly). Not on surprise
+            // removal: the device is already gone and the send would only
+            // run into its timeout.
+            if (context->BceRemoteAccess &&
+                stack->MinorFunction != IRP_MN_SURPRISE_REMOVAL) {
+                NTSTATUS status = T2AudioSetRemoteAccess(FALSE);
+
+                KdPrint(("T2Audio: SET_REMOTE_ACCESS(OFF) on teardown: 0x%08X\n",
+                         status));
+            }
+            context->BceRemoteAccess = FALSE;
+
+            T2AudioUnmapResources(context);
         }
         break;
     default:

@@ -1,0 +1,92 @@
+name: Build
+
+# Compiles the kernel driver with the WDK and runs the host-side unit tests on
+# every push / pull request, so a change that does not build is caught before
+# anyone installs it. Modeled on the WDK workflow of
+# osaul4ik/apple-t2-touchid-windows. The built .sys is unsigned (test-sign it
+# locally before installing); no secrets are used.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests-linux:
+    name: Host tests (gcc, clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: |
+          set -e
+          for cc in gcc clang; do
+            for t in BceProtocolLogicTest T2AudioBufferLogicTest; do
+              $cc -Wall -Wextra -Werror -o "$t-$cc" "tests/$t.c"
+              "./$t-$cc"
+            done
+          done
+
+  driver:
+    name: Driver (WDK, Release x64) + host tests (MSVC)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Official WDK installer, as in osaul4ik/apple-t2-touchid-windows.
+      - name: Install WDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = "$env:TEMP\wdksetup.exe"
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2085767" -OutFile $installer
+          $proc = Start-Process -FilePath $installer -ArgumentList "/quiet /norestart" -Wait -PassThru
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            Write-Error "WDK installer exited with code $($proc.ExitCode)"
+          }
+
+      - name: Build driver
+        shell: pwsh
+        run: |
+          msbuild src\T2AudioMiniport.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /nologo /verbosity:minimal /clp:Summary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path src\bin\Release\T2AudioMiniport.sys)) {
+            Write-Error "T2AudioMiniport.sys was not produced"
+          }
+
+      - name: Host tests (MSVC)
+        shell: cmd
+        run: |
+          cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe tests\BceProtocolLogicTest.c || exit /b 1
+          tests\BceProtocolLogicTest.exe || exit /b 1
+          cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c || exit /b 1
+          tests\T2AudioBufferLogicTest.exe || exit /b 1
+
+      - name: Upload unsigned driver
+        uses: actions/upload-artifact@v4
+        with:
+          name: T2AudioMiniport-unsigned-${{ github.sha }}
+          path: |
+            src/bin/Release/T2AudioMiniport.sys
+            src/bin/Release/T2AudioMiniport.pdb
+          if-no-files-found: warn

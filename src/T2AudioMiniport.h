@@ -66,6 +66,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     PVOID Bar1Mapped;
     PHYSICAL_ADDRESS Bar1Physical;
     SIZE_T Bar1Size;
+    BOOLEAN Bar1WriteCombined;
     PVOID Bar2Mapped;
     SIZE_T Bar2Size;
     T2AUDIO_BUFFER_STRUCT *BufferStruct;
@@ -82,6 +83,16 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     BOOLEAN HardwareReady;
     ULONG64 BceSpeakerDeviceId;
     BOOLEAN BceProbed;
+    // Speaker output stream as reported by the T2 (BCE probe, stage 3+).
+    // SpeakerFormatValid is set only when its 'pft ' physical format was read
+    // and is a layout the copy path can produce; SpeakerSampleShift is the
+    // right shift applied to each 32-bit host sample (8 for the S24_LE ring
+    // the T2 speaker uses). The copy DPC never writes BAR1 without it.
+    ULONG64 SpeakerStreamId;
+    BOOLEAN SpeakerFormatValid;
+    ULONG SpeakerSampleShift;
+    ULONG SpeakerLatencyFrames;
+    ULONG SpeakerSafetyOffsetFrames;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;
     // Test-session gates. Both are read from the VOLATILE registry key

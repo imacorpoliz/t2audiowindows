@@ -1,90 +1,122 @@
 # T2AudioPort — Apple T2 Audio Driver for Windows (WaveRT)
 
-> **Status (October 2026):** **Experimental, diagnostic-session only.**  
-> The driver has been audited against the Linux reference (`kaiT2en`) and REA reverse-engineering analysis of `AppleAudio.sys`.  
-> The BSOD `0x7E` on `START_IO` is **not proven fixed**: both the `FileObject = NULL` and the `FileObject` = transport variants crashed on hardware on 2026-10-08 (see `docs/CURRENT_STATE.md`). No hardware run has validated the current source.  
-> The driver still starts **only** inside a volatile `TestSession` (see below). Host unit tests pass with 0 failures.
+> **Status (October 2026): experimental, diagnostic-session only — not usable as a daily audio driver.**
+>
+> * Starting `START_IO` has bugchecked the machine (`0x7E` in `ks!DispatchDeviceIoControl`, reached through `AppleUSBVHCI` → `ksthunk`). Two different `FileObject` strategies both crashed on 2026-10-08, so this is **not fixed**. See [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md).
+> * The driver only starts inside a **volatile** `TestSession`, so a normal boot (or the boot after a crash) never activates it.
+> * The current source has been unit-tested on a host and checked by CI, but **no hardware run has validated it yet**.
+
+`T2AudioPort` (`T2AudioMiniport.sys`) is a PortCls / WaveRT miniport for the Apple T2 audio controller (`PCI\VEN_106B&DEV_1803`) on Intel Macs with a T2 chip (MacBookPro15,x, 16,1, 16,2, 16,4, iMac Pro, Mac mini 2018; hardware testing so far only on MacBookPro16,1). The goal is to drive the internal **6-channel speaker array** directly. Boot Camp's `AppleAudio.sys` only exposes a stereo endpoint.
 
 ---
 
-## Overview
+## How it works
 
-`T2AudioPort` (`T2AudioMiniport.sys`) is an open-source Windows Kernel-Mode WDM / WaveRT audio miniport driver for the Apple T2 audio coprocessor (`PCI\VEN_106B&DEV_1803`) on Apple Intel Macs (MacBookPro16,1, MacBookPro15,x, 16,2, 16,4, iMac Pro, Mac mini 2018).
-
-It interfaces directly with:
-1. **BAR0/BAR1 Shared Memory (`BufferStruct`)** — for hardware audio buffers and device discovery.
-2. **AppleUSBVHCI IPC Gateway (`IOCTL 0x222018`)** — for BridgeOS Mailbox communication (device enumeration, `SET_REMOTE_ACCESS`, `START_IO`, `STOP_IO`).
-
-For complete developer onboarding and hardware details, see:
-👉 **[`docs/AGENT_HANDOVER_GUIDE.md`](docs/AGENT_HANDOVER_GUIDE.md)**
-
----
-
-## Key Breakthroughs & Resolved Defects
-
-### 1. BSOD `0x7E` in `AppleUSBVHCI.sys` / `ksthunk` (hypothesis, unverified)
-* **Root Cause:** In earlier builds, assigning `FileObject` to `IoGetNextIrpStackLocation(irp)->FileObject` caused `AppleUSBVHCI.sys` to delegate the IRP to `ksthunk!DispatchDeviceIoControl`, which accessed `FileObject->FsContext` without a NULL guard on a system worker thread, triggering bugcheck `0x7E`.
-* **Current source:** Disassembly of official `AppleAudio.sys` via REA shows that it leaves `FileObject = NULL` in `IoBuildDeviceIoControlRequest`, and `BceTransport.c` does the same. **This is not a validated fix:** the 2026-10-08 01:35 crash happened with `FileObject = NULL`, and the 01:48 crash with `FileObject` set; both dumps are identical. The forwarded-IRP path inside `AppleUSBVHCI` remains the open root cause.
-
-### 2. Circular DMA Ring Buffer Mirroring (Fix for 347 ms Stutter / Silence)
-* **Root Cause:** T2 hardware plays speaker audio from a fixed 399,360-byte (`0x61800` = 16,640 frames $\times$ 24 bytes) cyclic buffer in BAR1, completing a full cycle every 346.6 ms at 48 kHz. Earlier builds repeatedly copied client PCM to offset 0, causing 10 ms of sound followed by 336 ms of silence/clicks.
-* **Resolution:** [`src/WaveRTStream.c`](src/WaveRTStream.c) mirrors the client buffer into the BAR1 ring with `T2AudioCalculateCopyChunk` ([`src/T2AudioBufferLogic.h`](src/T2AudioBufferLogic.h)). Each source frame is copied once it has been consumed at the sample rate and written `T2AUDIO_LEAD_FRAMES` (720 = 15 ms) ahead in the hardware ring. The play position reported to the audio engine is the consumed (already copied) cursor, and `GetPosition` advances the copy itself, so the engine can never overwrite a frame before it was mirrored. (The 2026-10-28 version copied 15 ms *ahead* of the reported position, i.e. frames the client had not written yet, from a 10 ms client buffer.)
-
-### 3. Startup gate (unchanged, intentional)
-* `Driver.c` still refuses to start (Code 10) unless the **volatile** `TestSession\EnableTestMode=1` key exists; stage, MMIO copy and BCE I/O are opt-in through `DiagStage`, `EnableMmioCopy` and `EnableBceIo`. Earlier versions of this README claimed a "Normal Operational Mode" default; that change was never in the source, and with the `0x7E` bugcheck unresolved it is deliberately not enabled, so a crash cannot turn into a boot loop.
-
-### 4. BCE Response Opcode Alignment
-* **Root Cause:** `Phase4.c` expected response message IDs 0 and 2, but BridgeOS returns `START_IO_RESPONSE (1)` and `STOP_IO_RESPONSE (3)`, triggering `STATUS_DEVICE_PROTOCOL_ERROR`.
-* **Resolution:** Aligned opcodes in `src/BceProtocolLogic.h` and verified via unit tests.
-
-### 5. Multi-Channel `WAVEFORMATEXTENSIBLE`
-* **Root Cause:** Windows Audio Engine (WASAPI) rejected formats with >2 channels when exposed as basic `WAVE_FORMAT_PCM`.
-* **Resolution:** `DataRangeIntersection` in `src/WaveRTMiniport.c` now returns a `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` (6 channels, 48 kHz, 32-bit, 5.1 Surround mask) instead of deferring to the PortCls default; format validation accepts both 5.1 masks (`0x60F` and `0x3F`).
-
-### 6. Hardware Buffer Zeroing on Stop
-* BAR1 speaker buffer memory is zeroed (`RtlZeroMemory`) on `KSSTATE_STOP` in `WaveRTStream.c` to prevent residual audio loops and buzzing.
-
-### 7. Stream State Synchronization
-* Synchronized `AnchorQpc`, `AnchorFrames`, and stream state between the 2 ms copy DPC and `SetState` using a `KSPIN_LOCK`.
-
----
-
-## Building and Testing
-
-### 1. Compiling the Driver
-```powershell
-& 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe' `
-  'src\T2AudioMiniport.vcxproj' /p:Configuration=Release /p:Platform=x64 /t:Rebuild
 ```
-Output: `src/bin/Release/T2AudioMiniport.sys`
+ Windows audio engine
+        │  32-bit PCM, 6 ch, 48 kHz (WAVEFORMATEXTENSIBLE 5.1)
+        ▼
+ WaveRT cyclic buffer (system RAM, mapped to the engine)
+        │  copy DPC + GetPosition: consumed frames → S24_LE, +15 ms lead
+        ▼
+ BAR0 speaker ring (399,360 B = 16,640 frames, located via BufferStruct)
+        │  read by bridgeOS once START_IO is sent
+        ▼
+ T2 audio DSP → speakers
 
-### 2. Running Host Unit Tests
+ Control path: IOCTL 0x222018 on \Device\AppleUSBVHCI  (BCE "Audt" messages:
+ GET_DEVICE_LIST, GET_PROPERTY, GET_OUTPUT_STREAM_LIST, SET_REMOTE_ACCESS,
+ START_IO / STOP_IO)
+```
+
+* **Buffer discovery (`src/Device.c`).** The driver maps BAR0 (the ring memory) and finds the config BAR by its GPR signature `0x19870423` at `+0xC000`. It then walks the `BufferStruct` to the `"Speaker"` output buffer, bounds-checking everything against the mapped size. BAR0 is mapped write-combining when the BAR is prefetchable, as kaiT2en does.
+* **Control (`src/BceTransport.c`, `src/Phase4.c`).** The speaker device is found by its UID. The driver then reads the stream's physical format (`'pft '`), latency (`'ltnc'`) and safety offset (`'saft'`) from the T2. It takes host control with `SET_REMOTE_ACCESS(ON)` and returns it on stop/remove.
+* **Streaming (`src/WaveRTStream.c`).** PortCls cannot map BAR pages to user mode, so the engine writes to RAM and the driver mirrors it. The engine is only ever told a frame was played after that frame has been copied.
+* **Formats (`src/WaveRTMiniport.c`).** The render pin offers a single format, 6 ch / 48 kHz / 32-bit. It is negotiated as `WAVEFORMATEXTENSIBLE` with a 5.1 mask.
+
+### Safety gates
+
+| Gate | Registry value (`HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\TestSession`, **volatile**) | Default |
+|---|---|---|
+| Start at all | `EnableTestMode=1` | off → Code 10 |
+| Stage | `DiagStage` = 1 RAM only · 2 map BARs · 3 BCE discovery + stream format · 4 wire speaker, `SET_REMOTE_ACCESS` · 5 MMIO copy | 1 |
+| Write PCM into BAR0 | `EnableMmioCopy=1` (stage 5) **and** a supported `'pft '` format read from the T2 | off |
+| Send `START_IO`/`STOP_IO` | `EnableBceIo=1` (stage 4+) | off |
+
+Safe Mode never starts the driver. `tools/T2Audio-TestAgent.ps1` creates the session (`-Stage N`, `-Mmio`, `-BceIo`). The agent currently refuses `-BceIo` because of the open BSOD.
+
+---
+
+## Parity with kaiT2en (Linux `t2bce_audio`)
+
+[kaiT2en](https://github.com/kaiT2en/KaiT2en-Fedora) (`modules/t2bce_audio`) is the reference implementation. Here is what this driver does the same way, and what it cannot do yet:
+
+| kaiT2en behaviour | Here | Notes |
+|---|---|---|
+| BufferStruct via GPR `+0xC000` (version, signature, offset) | ✅ | |
+| Speaker found by UID, not by index | ✅ | |
+| `'pft '` → sample layout (`S24_LE` for the speaker: flags `0x4`, 24 bits in a 4-byte container) | ✅ new | Samples are shifted `>> 8` while copying. The earlier raw 32-bit copy put the wrong bytes in front of the DSP. MMIO copy stays off if the format cannot be read or is unsupported. |
+| Stream + device latency, safety offset | ✅ new | Reported through `GetHWLatency`. |
+| Ring zeroed before a run; clock anchored **before** `START_IO` | ✅ new | |
+| `pci_iomap_wc` for a prefetchable BAR | ✅ new | WC mapping + `sfence` after each copy. |
+| `SET_REMOTE_ACCESS(ON)` before I/O, `OFF` on quiesce | ✅ (OFF new) | OFF is sent on PnP stop/remove. |
+| `NOTIFICATION_ALIVE` handshake before commands | ❌ | Needs a receive path for T2→host messages through `AppleUSBVHCI`, which is not known yet. |
+| Hardware position from `UPDATE_TIMESTAMP` (sampleTime/hostTime) | ❌ | Same blocker. The position is extrapolated from QPC since the anchor, which can drift against the T2 clock over long runs. |
+| Exposing the bridge ring itself as the PCM buffer | ❌ | PortCls refuses BAR MDLs for WaveRT (0x8007001F), hence the RAM mirror. |
+| Sleep: remote access OFF in `prepare`, GPR sleep marker `0x19770525` at `+0x10`, buffer reset on resume | ❌ | Power handling is not implemented. kaiT2en notes that bridgeOS stops answering if remote access is still ON while VHCI suspends, so do not sleep the machine during a stage-4+ session. |
+| Jack detection, mic / codec input, volume properties | ❌ | Speaker output only. |
+
+---
+
+## Building
+
+### CI
+[`.github/workflows/build.yml`](.github/workflows/build.yml) runs on every push and pull request. It is modeled on [osaul4ik/apple-t2-touchid-windows](https://github.com/osaul4ik/apple-t2-touchid-windows).
+* **Windows (windows-2022):** installs the WDK, builds `src/T2AudioMiniport.vcxproj` (Release x64), builds and runs the host tests with MSVC, and uploads the **unsigned** `.sys`.
+* **Linux:** builds and runs the host tests with gcc and clang using `-Werror`.
+
+### Locally
 ```powershell
-# Compile and run protocol & buffer logic tests
+msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild
+# -> src\bin\Release\T2AudioMiniport.sys  (test-sign before installing)
+
 cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe tests\BceProtocolLogicTest.c
 cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c
-
-& 'tests\BceProtocolLogicTest.exe'
-& 'tests\T2AudioBufferLogicTest.exe'
+tests\BceProtocolLogicTest.exe
+tests\T2AudioBufferLogicTest.exe
 ```
+The tests compile the same headers the driver uses (`src/BceProtocolLogic.h`, `src/T2AudioBufferLogic.h`). They cover BCE reply parsing, the `'pft '` descriptor captured on a MacBookPro16,1, ring/copy arithmetic and S24 sample conversion.
 
 ---
 
-## Project Structure
+## Installing and testing on hardware
 
-* **`src/`**: PortCls WaveRT miniport, DMA circular buffer, BCE transport, PnP device logic.
-* **`tests/`**: Host-side unit tests for protocol serialization and circular DMA math.
-* **`packaging/`**: INF, CDF, and CAT packaging files for driver deployment.
-* **`tools/`**: Diagnostic, test signal, and validation scripts (`Test-WasapiTone.ps1`, `Set-DefaultAudioDevice.ps1`).
-* **`docs/`**: Comprehensive documentation, including:
-  * [`docs/AGENT_HANDOVER_GUIDE.md`](docs/AGENT_HANDOVER_GUIDE.md) — Master developer and AI agent handover guide.
-  * [`docs/INDEX.md`](docs/INDEX.md) — Documentation index.
-  * [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) — Detailed development log and state.
-  * [`docs/analysis/`](docs/analysis/) — REA reverse-engineering reports and disassembly analysis of `AppleAudio.sys`.
+**Read [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) first.** Keep `AppleAudio.sys` restorable: `tools/Restore-AppleAudioDriver.ps1` and `tools/Rollback-T2AudioDriver.ps1` are provided.
+
+1. Enable test signing and sign the package (`packaging/`).
+2. Install with `tools/Install-T2AudioDriver.ps1`.
+3. Run a staged session with `tools/T2Audio-TestAgent.ps1 -Stage 3` (discovery and stream format only, no audio I/O) and capture the log with `tools/Capture-T2AudioLog.ps1`.
+4. Before any stage-5 run, the stage-3 log must show `pft: rate=48000 ... ch=6 bits=24` and `sample shift=8`.
 
 ---
 
-## Attributions & References
+## Project structure
 
-* **[kaiT2en](https://github.com/kaiT2en)**: Reference Linux driver for Apple T2 audio (`t2bce_audio`).
-* **Apple Bootcamp**: Official `AppleAudio.sys` analyzed for hardware registers and transport protocol.
+* `src/` — PortCls WaveRT + topology miniports, BAR/BufferStruct discovery, BCE transport, stream mirror.
+* `tests/` — host unit tests for the pure protocol and buffer helpers.
+* `packaging/` — INF/CAT for test installs.
+* `tools/` — install, rollback, staged test agent, log capture, WASAPI tone tests.
+* `docs/` — [`CURRENT_STATE.md`](docs/CURRENT_STATE.md) (authoritative status), [`AGENT_HANDOVER_GUIDE.md`](docs/AGENT_HANDOVER_GUIDE.md), [`INDEX.md`](docs/INDEX.md), reverse-engineering notes in `docs/analysis/`.
+
+## Roadmap
+
+1. Find the root cause of the `START_IO` bugcheck in `AppleUSBVHCI`'s forwarded IRP.
+2. Find a receive path for T2 notifications (alive handshake, `UPDATE_TIMESTAMP`) to get a real hardware clock.
+3. Add power management (remote access OFF before sleep, buffer reset on resume).
+4. Add jack/headphone output and microphone input.
+
+## Attributions
+
+* **kaiT2en** — [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (GPL-2.0), and the earlier [kekrby/linux-t2](https://github.com/kekrby/linux-t2) work. The protocol constants, BufferStruct layout and init/quiesce sequence come from there. The code here is an independent Windows implementation; see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+* **osaul4ik** — [apple-t2-touchid-windows](https://github.com/osaul4ik/apple-t2-touchid-windows) (GPL-2.0). The WDK CI workflow design comes from there.
+* **Apple Boot Camp** — `AppleAudio.sys` / `AppleUSBVHCI.sys`, analyzed for the transport protocol.
