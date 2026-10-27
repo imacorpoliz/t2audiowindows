@@ -22,6 +22,13 @@
 
 ## 1. Жёсткие правила (нарушать нельзя)
 
+0. **Тишина: никакого воспроизведения звука.** Дома все спят. Это значит:
+   * не запускай `tools/Test-WasapiTone.ps1` и любые тоны, музыку, системные звуки, «проверку динамиков» Windows;
+   * не проверяй AppleAudio «на слух» после отката — только состояние устройства (`Get-PnpDevice`);
+   * перед любым прогоном на железе выключи звук: Mute в Windows и громкость на 0.
+
+   Проба агента `tools/Test-WasapiRender.ps1` допустима: она только открывает поток (`Initialize`/`Start`/`Stop`) и не пишет сэмплы. Задачу D5 (тоны по каналам) не выполняй, пока владелец явно не разрешит.
+
 1. **Никогда не запускай `-BceIo`** и не обходи блокировку в агенте. Не отправляй `START_IO` никаким другим способом: ни своим скриптом, ни через реестр (`EnableBceIo`).
 2. **Не убирай гейт `TestSession`** в `src/Driver.c` и не делай автозапуск драйвера при обычной загрузке.
 3. **Не уводи Mac в сон** во время сессии стадии ≥ 3 с установленным T2AudioMiniport.
@@ -137,12 +144,11 @@ $h = '<SHA256 из A3>'
 Цель: убедиться, что запись в BAR0 (конверсия + WC + `sfence`) и обнуление кольца не роняют систему. Звука **не будет** — `START_IO` заблокирован, и это ожидаемо.
 
 ```powershell
-.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -ExpectedSysHash $h
-# во время прогона: .\tools\Test-WasapiTone.ps1 (тон на T2-endpoint)
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -ExpectedSysHash $h   # без тона: звук не воспроизводить
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
 ```
 
-Критерии: нет BSOD; лог `AllocateAudioBuffer: system … size=…`, `SetState 3 …`, на стопе `SetState 0 … ticks=N` с N > 0. После Recover AppleAudio работает и **звук через него нормальный**: запись в кольцо не должна ломать штатный тракт. Отчёт — как в B4.
+Критерии: нет BSOD; лог `AllocateAudioBuffer: system … size=…`, `SetState 3 …`, на стопе `SetState 0 … ticks=N` с N > 0. После Recover устройство снова на AppleAudio, `Started`, без ошибок в `Get-PnpDevice`. **Проверку «на слух» не делать** (правило 0). Отчёт — как в B4.
 
 ---
 
@@ -151,6 +157,8 @@ $h = '<SHA256 из A3>'
 Каждая задача — отдельная ветка и PR. Код сначала пишется и тестируется на хосте, железо — только по этапам A–C. Все новые доступы к железу — за гейтом стадии.
 
 ### D1–D2. Реверс: BSOD при `START_IO` и приём уведомлений T2 → **[`docs/REVERSE_PLAN.md`](docs/REVERSE_PLAN.md)**
+
+* **Инструмент — REA** (Reverse Engineer Anything) вместе с Ghidra, как в прежних отчётах (`docs/analysis/AppleAudio_Reverse_Engineering_Report.md`). Подробнее — `docs/REVERSE_PLAN.md` §0.
 
 * **Причина BSOD найдена статически** ([`docs/analysis/START_IO_BSOD_ROOT_CAUSE.md`](docs/analysis/START_IO_BSOD_ROOT_CAUSE.md)). AppleUSBVHCI сам шлёт каждое сообщение bridgeOS (например, `UPDATE_TIMESTAMP` после `START_IO`) как `IOCTL 0x222020` в первый `KSCATEGORY_AUDIO`-интерфейс с `VEN_106B`, то есть в наш драйвер, без `FileObject`. AppleAudio перехватывает этот IOCTL в своём `IRP_MJ_DEVICE_CONTROL`, а у нас он уходил в PortCls/KS → разыменование `NULL`.
 * **Исправление уже в коде:** `T2AudioDeviceControl` (`src/Driver.c`) + `T2AudioHandleVhciMessage` (`src/BceTransport.c`). Это же и есть путь приёма уведомлений (`UPDATE_TIMESTAMP` сохраняется в контексте).
@@ -170,7 +178,7 @@ $h = '<SHA256 из A3>'
 * Добавить в `build.yml` шаг: копировать `.sys` в `packaging/`, проставлять `DriverVer` (дата + версия из номера сборки, как в `BuildT2TouchId.yml` у osaul4ik), прогонять `InfVerif`, собирать неподписанный каталог. Подпись — только локально; секреты в CI не добавлять без владельца.
 * Привести `WindowsTargetPlatformVersion` в `src/T2AudioMiniport.vcxproj` к реально доступной версии SDK (сейчас `10.0.28000.0`, CI переопределяет на `10.0.26100.0`).
 
-### D5. Раскладка каналов и звук (после D1)
+### D5. Раскладка каналов и звук (после D1) — **отложено: только с явного разрешения владельца, когда можно шуметь**
 
 * Тон по каждому из 6 каналов (`tools/Test-WasapiTone.ps1`, расширить выбором канала). Записать, какой физический динамик звучит. Сверить с 5.1-маской и DSP-заметками (`docs/planning/CURRENT_STATE.md`, `kait2en/dsp/`).
 * Если нужно — переставлять каналы при копировании в `T2AudioConvertSamples` (чистая функция, тесты).
