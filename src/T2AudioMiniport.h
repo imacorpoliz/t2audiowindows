@@ -95,13 +95,28 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG SpeakerSafetyOffsetFrames;
     // Messages bridgeOS pushed to us through AppleUSBVHCI (IOCTL 0x222020):
     // counters and the latest UPDATE_TIMESTAMP for the speaker. Written by
-    // T2AudioHandleVhciMessage only; informational until the stream clock
-    // uses them.
+    // T2AudioHandleVhciMessage only.
     volatile LONG VhciMessageCount;
     volatile LONG VhciTimestampCount;
     ULONG64 LastT2Timestamp;
     ULONG64 LastT2SampleFrames;
     ULONG64 LastT2UpdateSeed;
+    // T2 clock anchor for the copy path: the T2 read position ClockAnchorFrames
+    // (sampleTime, advanced to the moment of reception) at QPC ClockAnchorQpc.
+    // ClockGeneration increments on every new anchor, so the copy DPC knows
+    // when to re-check its lead. Guarded by ClockLock (taken inside
+    // StreamLock, never the other way round).
+    KSPIN_LOCK ClockLock;
+    ULONG ClockGeneration;
+    ULONG64 ClockAnchorFrames;
+    ULONG64 ClockAnchorQpc;
+    // Speaker path options. TweeterMode (Parameters\TweeterMode, default 1 =
+    // high-pass, 0 = mute) applies to the stereo format. RawSpeakerChannels
+    // (TestSession\RawSpeakerChannels=1) offers the 6 raw ring channels to
+    // Windows instead of stereo, for per-speaker diagnostics only: the
+    // client then drives the tweeters directly, with no protection filter.
+    ULONG TweeterMode;
+    BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;
     // Test-session gates. Both are read from the VOLATILE registry key
@@ -176,8 +191,10 @@ NTSTATUS T2AudioFindSpeakerBuffer(
     _Out_ SIZE_T *BufferOffset,
     _Out_ SIZE_T *BufferSize);
 
-NTSTATUS T2AudioValidateSixChannelFormat(
-    _In_ PKSDATAFORMAT DataFormat);
+NTSTATUS T2AudioValidateRenderFormat(
+    _In_ PKSDATAFORMAT DataFormat,
+    _In_ BOOLEAN AllowRawChannels,
+    _Out_opt_ PULONG Channels);
 
 VOID T2AudioLogFormat(
     _In_z_ PCSTR Tag,

@@ -28,8 +28,8 @@ jobs:
         run: |
           set -e
           for cc in gcc clang; do
-            for t in BceProtocolLogicTest T2AudioBufferLogicTest; do
-              $cc -Wall -Wextra -Werror -o "$t-$cc" "tests/$t.c"
+            for t in BceProtocolLogicTest T2AudioBufferLogicTest T2AudioSpeakerLogicTest; do
+              $cc -Wall -Wextra -Werror -o "$t-$cc" "tests/$t.c" -lm
               "./$t-$cc"
             done
           done
@@ -81,6 +81,8 @@ jobs:
           tests\BceProtocolLogicTest.exe || exit /b 1
           cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c || exit /b 1
           tests\T2AudioBufferLogicTest.exe || exit /b 1
+          cl /nologo /W4 /Fe:tests\T2AudioSpeakerLogicTest.exe tests\T2AudioSpeakerLogicTest.c || exit /b 1
+          tests\T2AudioSpeakerLogicTest.exe || exit /b 1
 
       - name: Upload unsigned driver
         uses: actions/upload-artifact@v4

@@ -153,19 +153,22 @@ T2AudioTicksToFrames(unsigned long long Ticks,
 //            of SourceFrame by a fixed lead so the hardware read cursor trails
 //            the data written for it.
 // RemainingFrames: frames left to copy in this tick
-// BytesPerFrame: bytes per audio frame (e.g. 6 channels * 4 bytes = 24)
+// SourceBytesPerFrame: bytes per frame in the source (client) ring
+//                      (2 channels * 4 = 8 for stereo, 24 for raw 6-channel)
+// DestBytesPerFrame: bytes per frame in the destination ring (6 * 4 = 24)
 // SourceBufferSize: size of host cyclic buffer in bytes (e.g. 11520)
 // DestBufferSize: size of hardware cyclic buffer in bytes (e.g. 399360)
-// Both buffer sizes must be multiples of BytesPerFrame.
+// Each buffer size must be a multiple of its own frame size.
 // OutSourceOffset: byte offset in source buffer
 // OutDestOffset: byte offset in destination buffer
-// OutByteLength: bytes to copy in this linear chunk
+// OutByteLength: source bytes covered by this linear chunk
 // Returns number of frames represented by this chunk, or 0 if nothing to copy.
 static __inline unsigned long
 T2AudioCalculateCopyChunk(unsigned long long SourceFrame,
                           unsigned long long DestFrame,
                           unsigned long RemainingFrames,
-                          unsigned long BytesPerFrame,
+                          unsigned long SourceBytesPerFrame,
+                          unsigned long DestBytesPerFrame,
                           unsigned long SourceBufferSize,
                           unsigned long DestBufferSize,
                           unsigned long *OutSourceOffset,
@@ -179,30 +182,30 @@ T2AudioCalculateCopyChunk(unsigned long long SourceFrame,
     unsigned long bytesToCopy;
     unsigned long framesCopied;
 
-    if (RemainingFrames == 0 || BytesPerFrame == 0 ||
+    if (RemainingFrames == 0 || SourceBytesPerFrame == 0 || DestBytesPerFrame == 0 ||
         SourceBufferSize == 0 || DestBufferSize == 0 ||
         OutSourceOffset == 0 || OutDestOffset == 0 || OutByteLength == 0) {
         return 0;
     }
-    if (SourceBufferSize % BytesPerFrame != 0 ||
-        DestBufferSize % BytesPerFrame != 0) {
+    if (SourceBufferSize % SourceBytesPerFrame != 0 ||
+        DestBufferSize % DestBytesPerFrame != 0) {
         return 0;
     }
 
-    srcByteOffset = (unsigned long)(SourceFrame % (SourceBufferSize / BytesPerFrame)) * BytesPerFrame;
-    dstByteOffset = (unsigned long)(DestFrame % (DestBufferSize / BytesPerFrame)) * BytesPerFrame;
+    srcByteOffset = (unsigned long)(SourceFrame % (SourceBufferSize / SourceBytesPerFrame)) * SourceBytesPerFrame;
+    dstByteOffset = (unsigned long)(DestFrame % (DestBufferSize / DestBytesPerFrame)) * DestBytesPerFrame;
 
     srcBytesAvail = SourceBufferSize - srcByteOffset;
     dstBytesAvail = DestBufferSize - dstByteOffset;
 
-    framesCopied = srcBytesAvail / BytesPerFrame;
-    if (framesCopied > dstBytesAvail / BytesPerFrame) {
-        framesCopied = dstBytesAvail / BytesPerFrame;
+    framesCopied = srcBytesAvail / SourceBytesPerFrame;
+    if (framesCopied > dstBytesAvail / DestBytesPerFrame) {
+        framesCopied = dstBytesAvail / DestBytesPerFrame;
     }
     if (framesCopied > RemainingFrames) {
         framesCopied = RemainingFrames;
     }
-    bytesToCopy = framesCopied * BytesPerFrame;
+    bytesToCopy = framesCopied * SourceBytesPerFrame;
     *OutSourceOffset = srcByteOffset;
     *OutDestOffset = dstByteOffset;
     *OutByteLength = bytesToCopy;

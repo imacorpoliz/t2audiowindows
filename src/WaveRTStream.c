@@ -1,5 +1,6 @@
 #include "T2AudioMiniport.h"
 #include "T2AudioBufferLogic.h"
+#include "T2AudioSpeakerLogic.h"
 #include <intrin.h>
 
 // How often the system-memory WaveRT buffer is mirrored into the BAR1 hardware
@@ -8,10 +9,12 @@
 #define T2AUDIO_COPY_PERIOD_MS 2
 
 // How far (in frames) the data written into the BAR1 ring runs ahead of the
-// frame the source cursor has just consumed: 15 ms at 48 kHz. The T2 read
-// cursor is assumed to track the source cursor, so it trails the freshly
-// written data by this lead.
-#define T2AUDIO_LEAD_FRAMES 720u
+// T2 read position: 1000 frames (~21 ms at 48 kHz), AppleAudio's target lead.
+// At RUN the T2 is assumed to start reading at slot 0; every UPDATE_TIMESTAMP
+// then re-checks the lead against the T2's real read position and re-aims it
+// when it drifts out of +-T2AUDIO_CLOCK_TOLERANCE (see
+// docs/analysis/RE_speaker_layout_and_clock.md).
+#define T2AUDIO_LEAD_FRAMES T2AUDIO_CLOCK_TARGET_LEAD
 
 typedef struct _T2AUDIO_WAVERT_STREAM {
     IMiniportWaveRTStream Interface;
@@ -20,6 +23,9 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     PPORTWAVERTSTREAM PortStream;
     KSSTATE State;
     ULONG SampleRate;
+    // Client format: 2 channels (stereo, laid out over the six speakers) or 6
+    // (raw ring channels, diagnostic). BytesPerFrame is the client frame size.
+    ULONG Channels;
     ULONG BytesPerFrame;
     KSPIN_LOCK StreamLock;
     ULONG64 AnchorQpc;
@@ -40,6 +46,14 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // part of the client buffer that has not been copied yet. Protected by
     // StreamLock.
     ULONG64 LastCopiedFrame;
+    // Source frame N is written to ring frame N + DestOffset (mod ring), kept
+    // in 0..ringFrames-1. Re-aimed from the T2 clock; protected by StreamLock.
+    ULONG64 DestOffset;
+    // ClockGeneration of the last T2 anchor this stream checked its lead with.
+    ULONG ClockGenerationSeen;
+    ULONG ClockCorrections;
+    // Tweeter high-pass state of the stereo path; reset on a fresh run.
+    T2AUDIO_SPEAKER_STATE SpeakerState;
     KTIMER CopyTimer;
     KDPC CopyDpc;
     BOOLEAN TimerActive;
@@ -54,6 +68,94 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
 
 static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
 
+// Zero Count ring frames starting at ring frame FirstFrame (mod HwFrames).
+// Caller holds the device's HardwareLock and has validated the mapping.
+static VOID
+T2AudioStreamZeroRingLocked(
+    _In_ PUCHAR HwBufferBase,
+    _In_ ULONG HwFrames,
+    _In_ ULONG64 FirstFrame,
+    _In_ ULONG64 Count)
+{
+    ULONG64 zeroFrames;
+
+    if (HwFrames == 0) {
+        return;
+    }
+    zeroFrames = (Count < HwFrames) ? Count : HwFrames;
+    while (zeroFrames != 0) {
+        ULONG slot = (ULONG)(FirstFrame % HwFrames);
+        ULONG run = HwFrames - slot;
+
+        if (run > zeroFrames) {
+            run = (ULONG)zeroFrames;
+        }
+        RtlZeroMemory(HwBufferBase + (SIZE_T)slot * T2AUDIO_RING_BYTES_PER_FRAME,
+                      (SIZE_T)run * T2AUDIO_RING_BYTES_PER_FRAME);
+        FirstFrame += run;
+        zeroFrames -= run;
+    }
+}
+
+// If a new T2 clock anchor arrived since the last check, compare the lead of
+// the next write (source frame NextFrame) over the T2's current read position
+// and re-aim DestOffset when it left the tolerance window, as AppleAudio does.
+// Ring slots skipped by a forward jump are silenced. Caller holds StreamLock
+// and HardwareLock (lock order StreamLock -> HardwareLock -> ClockLock).
+static VOID
+T2AudioStreamFollowT2ClockLocked(
+    _Inout_ PT2AUDIO_WAVERT_STREAM instance,
+    _In_ PT2AUDIO_DEVICE_CONTEXT context,
+    _In_ PUCHAR HwBufferBase,
+    _In_ ULONG HwFrames,
+    _In_ ULONG64 NextFrame,
+    _In_ ULONG64 NowQpc)
+{
+    LARGE_INTEGER qpcFreq;
+    ULONG generation;
+    ULONG64 anchorFrames;
+    ULONG64 anchorQpc;
+    ULONG64 readFrame;
+    ULONG64 newOffset;
+    LONGLONG jump;
+
+    if (HwFrames == 0 || !instance->HardwareIoStarted) {
+        return;
+    }
+    KeAcquireSpinLockAtDpcLevel(&context->ClockLock);
+    generation = context->ClockGeneration;
+    anchorFrames = context->ClockAnchorFrames;
+    anchorQpc = context->ClockAnchorQpc;
+    KeReleaseSpinLockFromDpcLevel(&context->ClockLock);
+
+    if (generation == instance->ClockGenerationSeen) {
+        return;
+    }
+    instance->ClockGenerationSeen = generation;
+
+    KeQueryPerformanceCounter(&qpcFreq);
+    readFrame = anchorFrames;
+    if (NowQpc > anchorQpc && qpcFreq.QuadPart > 0) {
+        readFrame += T2AudioTicksToFrames(NowQpc - anchorQpc, instance->SampleRate,
+                                          (ULONG64)qpcFreq.QuadPart);
+    }
+
+    if (!T2AudioClockCorrection(NextFrame, instance->DestOffset, readFrame,
+                                HwFrames, &newOffset, &jump)) {
+        return;
+    }
+    if (jump > 0) {
+        T2AudioStreamZeroRingLocked(HwBufferBase, HwFrames,
+                                    NextFrame + instance->DestOffset, (ULONG64)jump);
+    }
+    instance->ClockCorrections++;
+    if (instance->ClockCorrections <= 8 || (instance->ClockCorrections % 100) == 0) {
+        KdPrint(("T2Audio: T2 clock: re-aimed lead by %I64d frames (#%u, read=%I64u next=%I64u)\n",
+                 jump, instance->ClockCorrections, readFrame, NextFrame));
+    }
+    instance->DestOffset = newOffset;
+}
+
 // Advance the consumed-frame cursor to "now" and mirror the newly consumed
 // source frames into the BAR1 hardware ring. Must be called with StreamLock
 // held (so at DISPATCH_LEVEL); only advances while the stream is in RUN.
@@ -61,8 +163,9 @@ static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
 // The source cursor runs at the sample rate from the QPC anchor taken on entry
 // to RUN. Every source frame up to that cursor is copied before the cursor is
 // published as the play position, so the client cannot overwrite a frame
-// before it has been mirrored. Each frame lands T2AUDIO_LEAD_FRAMES ahead in
-// the hardware ring, i.e. ahead of where the T2 is assumed to be reading.
+// before it has been mirrored. Source frame N lands at ring frame
+// N + DestOffset, about T2AUDIO_LEAD_FRAMES ahead of where the T2 reads; each
+// new UPDATE_TIMESTAMP re-checks that lead against the T2 clock.
 static VOID
 T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
 {
@@ -126,28 +229,21 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
         PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
         ULONG remainingFrames = (ULONG)pendingFrames;
+        ULONG hwFrames = (ULONG)context->SpeakerBufferSize / T2AUDIO_RING_BYTES_PER_FRAME;
 
         // Silence the ring slots of skipped frames. Left alone they still hold
         // audio from the previous lap (~347 ms earlier), which the T2 would
         // play again as an echo/stutter.
         if (skippedFrames != 0) {
-            ULONG hwFrames = (ULONG)context->SpeakerBufferSize / instance->BytesPerFrame;
-            ULONG64 zeroFrames = (skippedFrames < hwFrames) ? skippedFrames : hwFrames;
-            ULONG64 dstFrame = skipStart + T2AUDIO_LEAD_FRAMES;
-
-            while (zeroFrames != 0 && hwFrames != 0) {
-                ULONG slot = (ULONG)(dstFrame % hwFrames);
-                ULONG run = hwFrames - slot;
-
-                if (run > zeroFrames) {
-                    run = (ULONG)zeroFrames;
-                }
-                RtlZeroMemory(hwBufferBase + (SIZE_T)slot * instance->BytesPerFrame,
-                              (SIZE_T)run * instance->BytesPerFrame);
-                dstFrame += run;
-                zeroFrames -= run;
-            }
+            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames,
+                                        skipStart + instance->DestOffset,
+                                        skippedFrames);
         }
+
+        // A new T2 clock anchor arrived: re-check the lead of the next write
+        // against the T2's read position and re-aim it if it drifted.
+        T2AudioStreamFollowT2ClockLocked(instance, context, hwBufferBase,
+                                         hwFrames, frame, (ULONG64)qpc.QuadPart);
 
         while (remainingFrames > 0) {
             ULONG srcOffset = 0;
@@ -155,9 +251,10 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             ULONG byteLen = 0;
             ULONG chunkFrames = T2AudioCalculateCopyChunk(
                 frame,
-                frame + T2AUDIO_LEAD_FRAMES,
+                frame + instance->DestOffset,
                 remainingFrames,
                 instance->BytesPerFrame,
+                T2AUDIO_RING_BYTES_PER_FRAME,
                 instance->SourceSize,
                 (ULONG)context->SpeakerBufferSize,
                 &srcOffset,
@@ -172,12 +269,24 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // T2 speaker is S24_LE (24 bits in the low bytes), while Windows
             // delivers MSB-aligned 32-bit samples, so each sample is shifted
             // (kaiT2en maps the same descriptor to SNDRV_PCM_FORMAT_S24_LE).
-            // Frames are 4-byte aligned in both rings.
-            T2AudioConvertSamples(
-                (volatile unsigned int *)(hwBufferBase + dstOffset),
-                (const unsigned int *)(sourceBase + srcOffset),
-                byteLen / sizeof(unsigned int),
-                context->SpeakerSampleShift);
+            // Stereo is laid out over the woofer pairs and the high-passed
+            // tweeters; the raw 6-channel format is copied as is. Frames are
+            // 4-byte aligned in both rings.
+            if (instance->Channels == 2) {
+                T2AudioRenderStereoToSpeakers(
+                    (volatile unsigned int *)(hwBufferBase + dstOffset),
+                    (const unsigned int *)(sourceBase + srcOffset),
+                    chunkFrames,
+                    context->SpeakerSampleShift,
+                    context->TweeterMode,
+                    &instance->SpeakerState);
+            } else {
+                T2AudioConvertSamples(
+                    (volatile unsigned int *)(hwBufferBase + dstOffset),
+                    (const unsigned int *)(sourceBase + srcOffset),
+                    byteLen / sizeof(unsigned int),
+                    context->SpeakerSampleShift);
+            }
 
             frame += chunkFrames;
             remainingFrames -= chunkFrames;
@@ -379,14 +488,31 @@ T2AudioStreamSetFormat(
 {
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
-    NTSTATUS status = T2AudioValidateSixChannelFormat(DataFormat);
+    ULONG channels = 0;
+    NTSTATUS status;
+
+    // The client buffer was sized for the current frame size; a format with
+    // another frame size would need a new buffer.
+    status = T2AudioValidateRenderFormat(
+        DataFormat,
+        (instance->DeviceContext != NULL && instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+        &channels);
+    if (NT_SUCCESS(status) && instance->AudioBufferMdl != NULL &&
+        channels != instance->Channels) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+    }
 
     T2AudioLogFormat("SetFormat", DataFormat);
     KdPrint(("T2Audio: SetFormat status=0x%08X\n", status));
 
     if (NT_SUCCESS(status)) {
+        KIRQL oldIrql;
+
+        KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
         instance->SampleRate = 48000;
-        instance->BytesPerFrame = 24;
+        instance->Channels = channels;
+        instance->BytesPerFrame = channels * 4u;
+        KeReleaseSpinLock(&instance->StreamLock, oldIrql);
     }
     return status;
 }
@@ -467,13 +593,37 @@ T2AudioStreamSetState(
             }
 
             // Publish the anchor taken above.
-            KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
-            instance->AnchorQpc = currentQpc;
-            // Resume from the consumed cursor so no frame is skipped or
-            // copied twice across PAUSE -> RUN.
-            instance->AnchorFrames = instance->LastCopiedFrame;
-            instance->State = KSSTATE_RUN;
-            KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+            {
+                PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
+                ULONG generation = 0;
+                ULONG hwFrames = 0;
+
+                if (context != NULL) {
+                    KeAcquireSpinLock(&context->ClockLock, &oldIrql);
+                    generation = context->ClockGeneration;
+                    KeReleaseSpinLock(&context->ClockLock, oldIrql);
+                    hwFrames = (ULONG)(context->SpeakerBufferSize / T2AUDIO_RING_BYTES_PER_FRAME);
+                }
+
+                KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+                instance->AnchorQpc = currentQpc;
+                // Resume from the consumed cursor so no frame is skipped or
+                // copied twice across PAUSE -> RUN.
+                instance->AnchorFrames = instance->LastCopiedFrame;
+                // START_IO restarts the T2 at ring slot 0: aim the next write
+                // T2AUDIO_LEAD_FRAMES ahead of it. Anchors older than this
+                // START_IO are ignored; the first new one re-checks the lead.
+                instance->DestOffset = (hwFrames != 0)
+                    ? (T2AUDIO_LEAD_FRAMES + hwFrames -
+                       (ULONG)(instance->LastCopiedFrame % hwFrames)) % hwFrames
+                    : T2AUDIO_LEAD_FRAMES;
+                instance->ClockGenerationSeen = generation;
+                if (instance->LastCopiedFrame == 0) {
+                    T2AudioSpeakerStateReset(&instance->SpeakerState);
+                }
+                instance->State = KSSTATE_RUN;
+                KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+            }
 
             // Start the DPC only after its time anchor is initialized.
             if (T2AudioShouldStartCopyTimer(
@@ -729,8 +879,8 @@ T2AudioStreamGetHWLatency(
         if (instance->DeviceContext != NULL) {
             latencyFrames = instance->DeviceContext->SpeakerLatencyFrames;
         }
-        // The copy writes each frame T2AUDIO_LEAD_FRAMES ahead of the cursor
-        // in the hardware ring, which acts as the FIFO. The codec delay is
+        // The copy writes each frame about T2AUDIO_LEAD_FRAMES ahead of the
+        // T2 read position in the hardware ring, which acts as the FIFO. The codec delay is
         // the stream + device output latency the T2 reports ('ltnc'), in
         // 100 ns units.
         Latency->FifoSize = T2AUDIO_LEAD_FRAMES * instance->BytesPerFrame;
@@ -794,13 +944,17 @@ T2AudioCreateStream(
     _Out_ PMINIPORTWAVERTSTREAM *Stream)
 {
     PT2AUDIO_WAVERT_STREAM instance;
+    ULONG channels = 0;
     NTSTATUS status;
 
     if (Stream == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     *Stream = NULL;
-    status = T2AudioValidateSixChannelFormat(DataFormat);
+    status = T2AudioValidateRenderFormat(
+        DataFormat,
+        (DeviceContext != NULL && DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+        &channels);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -816,7 +970,10 @@ T2AudioCreateStream(
     instance->DeviceContext = DeviceContext;
     instance->PortStream = PortStream;
     instance->SampleRate = 48000;
-    instance->BytesPerFrame = 24;
+    instance->Channels = channels;
+    instance->BytesPerFrame = channels * 4u;
+    instance->DestOffset = T2AUDIO_LEAD_FRAMES;
+    T2AudioSpeakerStateReset(&instance->SpeakerState);
     instance->State = KSSTATE_STOP;
     // The stream uses PortStream until it is destroyed (FreeAudioBuffer and the
     // final Release), so hold a reference for its lifetime.

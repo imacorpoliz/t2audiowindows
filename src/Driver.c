@@ -1,4 +1,5 @@
 #include "T2AudioMiniport.h"
+#include "T2AudioSpeakerLogic.h"
 
 // Registry subkeys under HKLM\SYSTEM\CurrentControlSet\Services. Parameters is
 // persistent (diagnostic tuning). TestSession MUST be created as a volatile key
@@ -213,6 +214,7 @@ T2AudioStartDevice(
     RtlZeroMemory(context, sizeof(*context));
     context->DeviceObject = DeviceObject;
     KeInitializeSpinLock(&context->HardwareLock);
+    KeInitializeSpinLock(&context->ClockLock);
 
     // Never start in Safe Mode. This driver programs device memory, and a fault
     // here must not make the recovery environment unusable. SafeBootMode is set
@@ -243,10 +245,16 @@ T2AudioStartDevice(
             (context->DiagStage >= T2AUDIO_STAGE_HW_IO) &&
             (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
                                        L"EnableBceIo", 0) != 0);
-        KdPrint(("T2Audio: diagnostic session active stage=%u mmioCopy=%u bceIo=%u\n",
+        // Raw 6-channel endpoint: per-speaker diagnostics only (the client
+        // drives the tweeters unfiltered). Volatile like the other gates.
+        context->RawSpeakerChannels =
+            (T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
+                                       L"RawSpeakerChannels", 0) != 0);
+        KdPrint(("T2Audio: diagnostic session active stage=%u mmioCopy=%u bceIo=%u rawChannels=%u\n",
                  context->DiagStage,
                  context->MmioCopyEnabled ? 1u : 0u,
-                 context->BceIoEnabled ? 1u : 0u));
+                 context->BceIoEnabled ? 1u : 0u,
+                 context->RawSpeakerChannels ? 1u : 0u));
     }
 
     context->ForceSystemBuffer =
@@ -254,9 +262,15 @@ T2AudioStartDevice(
                                    L"ForceSystemBuffer", 0) != 0);
     context->MdlVariant =
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MdlVariant", 0);
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u\n",
+    // Stereo path: tweeters high-passed unless TweeterMode=0 (muted). Any
+    // other value falls back to the high-pass.
+    context->TweeterMode =
+        (T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TweeterMode",
+                                   T2AUDIO_TWEETER_HIGHPASS) == T2AUDIO_TWEETER_MUTE)
+            ? T2AUDIO_TWEETER_MUTE : T2AUDIO_TWEETER_HIGHPASS;
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
-             context->MdlVariant));
+             context->MdlVariant, context->TweeterMode));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the
     // driver runs purely on system memory and never touches a BAR.

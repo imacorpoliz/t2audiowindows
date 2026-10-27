@@ -62,6 +62,11 @@ param(
     # but no command is sent. Pass this only after the no-command run is clean.
     [switch]$BceIo,
 
+    # Offer the 6 raw ring channels to Windows instead of the stereo endpoint
+    # (RawSpeakerChannels=1), for per-speaker diagnostics. The tweeters then
+    # get whatever the client sends, with NO protection high-pass.
+    [switch]$RawChannels,
+
     # Skip the kernel DbgView capture (faster, no logs).
     [switch]$NoCapture,
 
@@ -126,7 +131,7 @@ function Get-T2InstanceId {
 
 # Create the volatile test-session key. Returns $true on success.
 function New-TestSession {
-    param([bool]$AllowMmio, [bool]$AllowBceIo, [int]$DiagStage)
+    param([bool]$AllowMmio, [bool]$AllowBceIo, [int]$DiagStage, [bool]$RawSpeakerChannels = $false)
 
     $svc = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($ServiceKeyPath, $true)
     if ($null -eq $svc) {
@@ -147,6 +152,9 @@ function New-TestSession {
         $key.SetValue('DiagStage', $DiagStage, [Microsoft.Win32.RegistryValueKind]::DWord)
         $key.SetValue('EnableMmioCopy', $mmioValue, [Microsoft.Win32.RegistryValueKind]::DWord)
         $key.SetValue('EnableBceIo', $bceIoValue, [Microsoft.Win32.RegistryValueKind]::DWord)
+        $rawValue = 0
+        if ($RawSpeakerChannels) { $rawValue = 1 }
+        $key.SetValue('RawSpeakerChannels', $rawValue, [Microsoft.Win32.RegistryValueKind]::DWord)
         $key.Flush()
         $key.Close()
     } finally {
@@ -399,7 +407,7 @@ function Invoke-Test {
     $dbg = $null
     $proc = $null
     try {
-        if (-not (New-TestSession -AllowMmio ([bool]$Mmio) -AllowBceIo ([bool]$BceIo) -DiagStage $effectiveStage)) { exit 1 }
+        if (-not (New-TestSession -AllowMmio ([bool]$Mmio) -AllowBceIo ([bool]$BceIo) -DiagStage $effectiveStage -RawSpeakerChannels ([bool]$RawChannels))) { exit 1 }
 
         if (-not $NoCapture) {
             $dbg = Get-DbgViewCli

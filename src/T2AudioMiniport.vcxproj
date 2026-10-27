@@ -82,6 +82,7 @@
     <ClInclude Include="T2AudioMiniport.h" />
     <ClInclude Include="T2AudioBufferLogic.h" />
     <ClInclude Include="BceProtocolLogic.h" />
+    <ClInclude Include="T2AudioSpeakerLogic.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

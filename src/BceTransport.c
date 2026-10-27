@@ -1,5 +1,6 @@
 #include "T2AudioMiniport.h"
 #include "BceProtocolLogic.h"
+#include "T2AudioSpeakerLogic.h"
 
 // T2 BCE Protocol constants (from kaiT2en modules/t2bce_audio/protocol.h).
 // The 4-byte tag is not a constant: T2AudioSendBceMessage stamps a request
@@ -893,9 +894,28 @@ T2AudioHandleVhciMessage(
             return;
         }
         if (deviceId == Context->BceSpeakerDeviceId && deviceId != 0) {
+            LARGE_INTEGER qpc, qpcFreq;
+            ULONG64 anchorFrames;
+            KIRQL oldIrql;
+
+            // hostTime is on the host clock AppleUSBVHCI publishes to the T2
+            // (QPC in ns), so the delivery delay can be added back; an
+            // implausible delta falls back to "current" (see
+            // T2AudioClockFramesAtReception).
+            qpc = KeQueryPerformanceCounter(&qpcFreq);
+            anchorFrames = T2AudioClockFramesAtReception(
+                frames, timestamp,
+                T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart),
+                48000);
+
+            KeAcquireSpinLock(&Context->ClockLock, &oldIrql);
             Context->LastT2Timestamp = timestamp;
             Context->LastT2SampleFrames = frames;
             Context->LastT2UpdateSeed = seed;
+            Context->ClockAnchorFrames = anchorFrames;
+            Context->ClockAnchorQpc = (ULONG64)qpc.QuadPart;
+            Context->ClockGeneration++;
+            KeReleaseSpinLock(&Context->ClockLock, oldIrql);
         }
         n = InterlockedIncrement(&Context->VhciTimestampCount);
         // These arrive continuously while I/O runs: log the first few, then
