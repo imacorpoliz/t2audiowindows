@@ -5,6 +5,15 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude, before the 17:00 session): speaker check tool, click-free tones, code-analysis fixes (source only, not hardware-tested)
+
+- **`T2Audio-TestAgent.ps1 -SpeakerCheck`** answers the owner's question "do the woofers work at all?". After the muted probe it plays a fixed sequence and waits for Enter before each step; the owner's answer per step goes to `speakercheck.txt`.
+  - With `-RawChannels`: each of the 6 drivers alone. Woofers 0/1/3/4: 100 Hz, 1 kHz, sweep 50→500 Hz. Tweeters 2/5: 2 kHz, 8 kHz, sweep 1→16 kHz.
+  - Without it: the stereo endpoint, left then right: 100 Hz, 1 kHz, 8 kHz, sweep 40 Hz→16 kHz. This is what Windows plays, through the plain path or `SpeakerDsp`.
+- **`Test-WasapiTone.ps1` bug found and fixed.** It filled the whole 1 s WASAPI buffer and then called `Stop` at once, so the last second of every tone was cut off abruptly: an audible click. It also started without a fade. Now there is a 20 ms fade in/out, only the requested frames are written, and the buffer is drained before `Stop`. This click may be part of the "single click on a low tone" in Session #1. New `-SweepTo` gives a logarithmic sweep; the tweeter guard checks the sweep's lowest frequency.
+- **WDK code analysis:** `DbgPrint` length format fixed in `Device.c` (logged lengths had garbage upper bits); explicit `DeviceContext` NULL check in the `SetState` STOP path. No behavior change.
+- CI: `b662d48`, `cff06bb`, `4fb665e` (see Actions). The C# of the tone script is compiled there.
+
 ### 2026-10-28 (Claude): analysis of Listening Session #1 — "no bass at all"
 
 Based on `docs/logs/EXCERPT_20261028_151122.md` (1.0.9.0) and the owner's words ("very flat, as if there is no low end at all; one click on a low tone; clearly louder than the standard driver"):
