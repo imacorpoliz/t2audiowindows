@@ -86,7 +86,7 @@ T2AudioMapResources(
         descriptor = ResourceList->FindTranslatedEntry(
             CmResourceTypeMemory, i);
         if (descriptor != NULL && descriptor->Type == CmResourceTypeMemory) {
-            KdPrint(("T2Audio: Resource[%u] Translated: Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+            KdPrint(("T2Audio: Resource[%u] Translated: Phys=0x%I64X Len=0x%X Flags=0x%04X\n",
                      i, descriptor->u.Memory.Start.QuadPart, 
                      descriptor->u.Memory.Length, descriptor->Flags));
         }
@@ -150,12 +150,12 @@ T2AudioMapResources(
         translated = ResourceList->FindTranslatedEntry(CmResourceTypeMemory, i);
         raw = ResourceList->FindUntranslatedEntry(CmResourceTypeMemory, i);
         if (translated != NULL && translated->Type == CmResourceTypeMemory) {
-            KdPrint(("T2Audio: Resource[%u] translated: Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+            KdPrint(("T2Audio: Resource[%u] translated: Phys=0x%I64X Len=0x%X Flags=0x%04X\n",
                      i, translated->u.Memory.Start.QuadPart,
                      translated->u.Memory.Length, translated->Flags));
         }
         if (raw != NULL && raw->Type == CmResourceTypeMemory) {
-            KdPrint(("T2Audio: Resource[%u] raw(BAR): Phys=0x%I64X Len=0x%IX Flags=0x%04X\n",
+            KdPrint(("T2Audio: Resource[%u] raw(BAR): Phys=0x%I64X Len=0x%X Flags=0x%04X\n",
                      i, raw->u.Memory.Start.QuadPart,
                      raw->u.Memory.Length, raw->Flags));
         }

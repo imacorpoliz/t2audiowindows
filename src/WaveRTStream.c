@@ -790,7 +790,11 @@ T2AudioStreamSetState(
         }
         // The power callbacks may already have stopped the I/O before D3; the
         // HardwareIoActive exchange makes sure only one STOP_IO is sent.
-        if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u) &&
+        // HardwareIoStarted implies a device context; the explicit check
+        // documents it (and satisfies code analysis C6011/C6387).
+        if (instance->DeviceContext == NULL) {
+            instance->HardwareIoStarted = FALSE;
+        } else if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u) &&
             InterlockedExchange(&instance->DeviceContext->HardwareIoActive, 0) == 0) {
             KdPrint(("T2Audio: SetState %u: I/O already stopped (power)\n", State));
             instance->HardwareIoStarted = FALSE;
