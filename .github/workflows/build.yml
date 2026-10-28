@@ -84,6 +84,42 @@ jobs:
           cl /nologo /W4 /Fe:tests\T2AudioSpeakerLogicTest.exe tests\T2AudioSpeakerLogicTest.c || exit /b 1
           tests\T2AudioSpeakerLogicTest.exe || exit /b 1
 
+      # The WASAPI tools embed C# in a here-string compiled by Add-Type at run
+      # time; compile it here (Windows PowerShell 5.1, as on the test machine)
+      # without running anything, so a typo cannot first show up on hardware.
+      - name: Compile C# embedded in tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($f in 'tools\Test-WasapiRender.ps1', 'tools\Test-WasapiTone.ps1') {
+            $text = Get-Content -Raw $f
+            $m = [regex]::Match($text, "(?s)\`$code = @'\r?\n(.*?)\r?\n'@")
+            if (-not $m.Success) { throw "no `$code here-string in $f" }
+            Add-Type -TypeDefinition $m.Groups[1].Value
+            Write-Host "compiled: $f"
+          }
+
+      # Report-only for now (continue-on-error): findings are listed in the log
+      # and turned into blocking checks once the existing ones are fixed.
+      - name: PSScriptAnalyzer (report only)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+          Invoke-ScriptAnalyzer -Path tools -Severity Error -Recurse | Format-Table -AutoSize | Out-String -Width 200
+
+      - name: InfVerif (report only)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iv = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter infverif.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if (-not $iv) { Write-Warning 'infverif.exe not found'; exit 0 }
+          & $iv.FullName /v packaging\T2AudioMiniport.inf
+          exit $LASTEXITCODE
+
       - name: Upload unsigned driver
         uses: actions/upload-artifact@v4
         with:
@@ -92,3 +128,16 @@ jobs:
             src/bin/Release/T2AudioMiniport.sys
             src/bin/Release/T2AudioMiniport.pdb
           if-no-files-found: warn
+
+      # WDK code analysis, report only. Runs after the upload so the uploaded
+      # binary always comes from the plain Release build above.
+      - name: WDK code analysis (report only)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          msbuild src\T2AudioMiniport.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /p:RunCodeAnalysis=true `
+            /t:Rebuild /nologo /verbosity:minimal
