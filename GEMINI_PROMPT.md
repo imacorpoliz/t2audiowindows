@@ -9,6 +9,8 @@ OWNER PERMISSIONS FOR THIS SESSION: sound is allowed; installing the driver in p
 
 Read: the "▶ NEXT RUN" block in GEMINI.md (steps 1–8 with 5a, in order), docs/INSTALL.md, §1 "Hard rules", the first entry in docs/CURRENT_STATE.md.
 
+FIRST: the owner reports "left normal, right quiet" after running the installer. Do GEMINI.md "▶ NEXT RUN" step 0 before anything else (Status/Balance output, per-channel tones, raw vs DSP presets) and report.
+
 Goal: verify on hardware what Claude built for daily use:
 1) build 1.0.12.0 from the latest diagnostics into packaging\ (signed .sys/.cat/.inf);
 2) install: T2Audio-Setup.ps1 -Action Install -Preset macos;

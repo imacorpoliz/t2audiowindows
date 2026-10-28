@@ -24,6 +24,22 @@ Verifying all of this is the goal of the session. The agent `T2Audio-TestAgent.p
 
 The installer's UI is in Russian. The strings quoted below are what it prints; the English meaning is given in brackets.
 
+**Step 0 (FIRST, owner report 2026-10-28): "left sounds normal, right is quiet"** («слева звук нормальный а справа тихий»).
+Claude checked on the host: the DSP is exactly symmetric for every preset (identical L/R input → 0.00 dB L/R difference at 60 Hz…8 kHz), and the installer only set the master volume. So the cause is in Windows, the copy path or the hardware. Find which, in this order, with the driver installed (persistent mode), DbgView capturing, and the volume moderate:
+1. **Windows balance.** Update to the latest `diagnostics`, run `.\tools\T2Audio-Setup.ps1 -Action Status` and copy the line «Громкость T2: mute=… volume=… L=… R=…» [T2 volume]. If `L` and `R` differ, the installer warns. Then `.\tools\T2Audio-Setup.ps1 -Action Balance -Volume 0.3`: it prints the balance before and after and sets both channels equal. Ask the owner: is it even now? If yes, this was the cause, report and continue with step 1.
+2. **Also check by hand:** Sound settings → the T2 speakers → Properties → Levels → Balance; Enhancements / Spatial sound off; is Equalizer APO (`SpeakerDSP-APO` from `mbp`) installed on this device? If yes, that is a bug (double processing); uninstall it from the T2 device and retest.
+3. **Which side and which speaker.** Play a tone on one channel of the stereo endpoint (moderate level, 1 kHz, then 200 Hz):
+   ```powershell
+   .\tools\Test-WasapiTone.ps1 -Channel 0 -Frequency 1000 -Seconds 3 -Amplitude 0.1
+   .\tools\Test-WasapiTone.ps1 -Channel 1 -Frequency 1000 -Seconds 3 -Amplitude 0.1
+   .\tools\Test-WasapiTone.ps1 -Channel 0 -Frequency 200 -Seconds 3 -Amplitude 0.1
+   .\tools\Test-WasapiTone.ps1 -Channel 1 -Frequency 200 -Seconds 3 -Amplitude 0.1
+   ```
+   The owner says for each: same loudness left vs right? 1 kHz is mostly the tweeter + woofers, 200 Hz only the woofers. Quiet right at 200 Hz only → a right woofer; at 1 kHz only → the right tweeter.
+4. **DSP or not.** `-Action Preset -Preset raw` (no DSP, everything else the same), repeat 3. Then `-Action Preset -Preset natural`, repeat 3. Then back to `macos`. Raw also quiet right → not the DSP (copy path, mapping or hardware). Only DSP presets → a DSP bug for Claude.
+5. **Hardware reference.** If possible, boot macOS and play the same mono test (or any centred voice): is the right side normal there? If macOS also has a quiet right side, it is the speaker.
+6. Report: `docs/logs/EXCERPT_*_balance.md` with the `Status`/`Balance` output, the answers to 3–5 (owner's words verbatim with a translation), `mode parameters` and `run summary` lines (`dspLimited`, `maxCopyUs`). Do not change code.
+
 **Step 1. Build 1.0.12.0** from the current `diagnostics` (the latest commit, with the tone controls; CI step "Parse tools and check installer presets" green).
 1. CI is green.
 2. Build and sign as in §2. Put `.sys`, `.cat` and `.inf` with `DriverVer` 1.0.12.0 into `packaging\`, record the SHA256.

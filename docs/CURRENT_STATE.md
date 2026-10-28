@@ -5,6 +5,14 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): owner report "right side quiet" — host analysis, installer balance check (cause not yet known)
+
+The owner reported after running the installer: «слева звук нормальный а справа тихий» ("left sounds normal, right is quiet"). No log or preset name came with the report.
+- **Host check:** the DSP (`T2DspRenderStereoToSpeakers`) was run for all 12 presets with identical L/R sine input at 60, 120, 500, 2500 and 8000 Hz: the L and R speaker energy differ by 0.00 dB everywhere. The DSP, including the new tone controls, compressor styles and autogain, is symmetric. The installer only calls `SetMasterVolumeLevelScalar`, never per-channel volume.
+- **Most likely, unproven:** a left/right balance stored by Windows for the endpoint (it survives reinstalls), an enhancement or Equalizer APO on the device, or one right-side speaker (hardware or mapping).
+- **Installer change:** `-Action Status` now prints the endpoint's per-channel levels and warns when L ≠ R; `Install` (via the volume step) and the new `-Action Balance` set both channels equal and print the balance before and after.
+- Diagnostic plan for Gemini: `GEMINI.md`, "▶ NEXT RUN", step 0.
+
 ### 2026-10-28 (Claude): closer lsp post-processing, tone controls, five new presets (source only, not hardware-tested)
 
 The owner asked whether all post-processing is implemented, and for more presets in the installer. ROADMAP §7.2 and §7.4. **Defaults unchanged:** with the new parameters at 0 the output is bit-exact with 08182f6 (the tone stage is skipped when flat, `CompStyle=0` is the old code path). One exception, by design: `DspAutoGain=1` (preset `even`) now measures LUFS instead of plain RMS.
