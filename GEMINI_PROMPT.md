@@ -1,48 +1,36 @@
-# Промпт для Gemini (сессия на железе, звук разрешён)
+# Промпт для Gemini (сессия прослушивания, звук разрешён)
 
-Вставь текст ниже в Gemini как задание. Подробности: `GEMINI.md` (блок «▶ СЛЕДУЮЩИЙ ЗАПУСК», §6, §7) и `docs/REVIEW_20261028.md`.
+Вставь текст ниже в Gemini как задание. Подробности: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md` и первая запись в `docs/CURRENT_STATE.md`.
 
 ```text
 Ты работаешь в репозитории imacorpoliz/t2audiowindows на Windows-машине с WDK и на тестовом MacBookPro16,1. Ты — билдер и тестировщик драйвера T2AudioPort.
 
-РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ (это и есть разрешение из GEMINI.md §1, отдельно спрашивать не нужно):
-- «Разрешаю START_IO»: -BceIo -OwnerApprovedBceIo для шагов ниже.
-- «Разрешаю звук»: -AudibleVolume -OwnerApprovedAudible, тон, раскладка каналов (-RawChannels только с тоном >= 1 кГц на одном канале), 10-минутные прогоны часов.
-Лимиты остаются: громкость точки T2 не выше 0.05, амплитуда тона не выше 0.1, Parameters\OutputAttenuation не ниже 3 (−18 дБ). Обычная музыка — только после PASS тона, на громкости Windows 1–5 %.
+РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ: «разрешаю START_IO» и «разрешаю звук» (-BceIo -OwnerApprovedBceIo, -Listen -OwnerApprovedAudible). Отдельно спрашивать не нужно.
 
-Перед началом прочитай: GEMINI.md (блок «▶ СЛЕДУЮЩИЙ ЗАПУСК», §1, §6, §7), docs/REVIEW_20261028.md, последние записи docs/CURRENT_STATE.md.
+Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md, §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md (разбор этапа E от Claude).
+
+Цель: новая сборка 1.0.9.0 (в ней исправлен щелчок в начале каждого потока и добавлены счётчики задержек), владелец слушает сам, ты собираешь логи.
 
 Шаги (каждый следующий — только если предыдущий PASS):
-1. git fetch; ветка gemini/stage-e от origin/diagnostics. Проверь, что CI «Build» на этом коммите зелёный.
-2. Сборка Release x64, подпись тестовым сертификатом, DriverVer = сегодня, 1.0.8.0. Запиши SHA256 .sys в $h. Файлы .sys и .cat не коммить.
-3. Установка: отключи устройство PCI\VEN_106B&DEV_1803, затем pnputil /add-driver packaging\T2AudioMiniport.inf /install.
-4. Stage 1:
-   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h
-   PASS: в wasapi.txt «endpoint mute=True volume=0», в логе «OutputAttenuation=3 (-18 dB) ClockRateTracking=0».
-5. Регрессия этапа D (беззвучно):
-   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -ExpectedSysHash $h
-   .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-   PASS: как в docs/logs/EXCERPT_20261028_043442.md — «START_IO reply … msg=1 status=0x00000000», «SetState RUN StartIo status=0x00000000», шаг sample 16640, re-aimed 1–2 раза в начале, «STOP_IO reply … msg=3», после стопа меток нет.
-6. Этап E — первый звук:
-   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -AudibleVolume 0.03 -OwnerApprovedAudible -ExpectedSysHash $h
-   .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-   В tone.txt должно быть «endpoint mute=False volume=0.03», «Start hr=0x00000000», «after run: endpoint mute=True volume=0».
-   Спроси владельца, что он услышал: есть ли тон, с обеих ли сторон, из вуферов и/или твитеров, есть ли щелчки примерно раз в 0,35 с. Запиши ответ.
-   Тона нет, а лог как на шаге 5? Повтори с -ToneFrequency 1000 и затем с Parameters\OutputAttenuation=1. Громкость точки не повышай. Если и так тихо — стоп, отчёт: T2 не читает кольцо.
-7. Раскладка (GEMINI.md §6.2): цикл по каналам 0..5 с -RawChannels -ToneChannel $c -ToneFrequency 1000 -AudibleVolume 0.03 -OwnerApprovedAudible, после каждого -Mode Recover. Спрашивай владельца, какой динамик звучал. Ожидаемо: 0/1 — левые вуферы, 2 — левый твитер, 3/4 — правые вуферы, 5 — правый твитер. Если не совпало, не правь код, запиши в отчёт.
-8. Часы (GEMINI.md §7 E2/E3): два прогона по 10 минут. Агент выключает устройство сразу после тона, поэтому длинный прогон делается длинным тоном через агент:
-   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -AudibleVolume 0.03 -OwnerApprovedAudible -ToneSeconds 600 -CaptureSeconds 660 -ExpectedSysHash $h
-   .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-   a) с Parameters\ClockRateTracking отсутствующим или 0: посчитай «re-aimed», спроси владельца про щелчки, вычисли дрейф T2 по меткам (шаг sample 16640 против интервала в мс);
-   b) с Parameters\ClockRateTracking=1 (dword): в логе «T2 clock: rate=… ppb drift=… ppb lead=…», drift стабилен, lead 1000 ± 100, re-aimed не больше 1–2 раз в начале. Если rate упирается в ±1000000 или lead уходит, верни 0 и приложи лог.
-   Логи ограничены: первые 8 строк и потом каждая 1000-я для меток и rate, каждая 100-я для re-aimed. Опирайся на счётчики (#n) в строках.
-9. Отчёт: docs/logs/EXCERPT_<дата>_<время>.md по каждому шагу; датированная запись в docs/CURRENT_STATE.md (хэш, версия, PASS/FAIL каждого шага, что услышал владелец, раскладка, дрейф в ppm, результат ClockRateTracking); отметки в GEMINI.md §7; PR из своей ветки в diagnostics. В конце устройство снова на AppleAudio (Started, CM_PROB_NONE), звуковая схема Windows возвращена, Parameters\ClockRateTracking и OutputAttenuation возвращены к значениям по умолчанию (удалить значения).
+1. git fetch; ветка gemini/listen-1 от origin/diagnostics; CI «Build» на коммите зелёный.
+2. Сборка Release x64, подпись, DriverVer = сегодня, 1.0.9.0, SHA256 .sys в $h. .sys и .cat не коммить.
+3. Установка: отключи PCI\VEN_106B&DEV_1803, затем pnputil /add-driver packaging\T2AudioMiniport.inf /install. В HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters удали OutputAttenuation и ClockRateTracking, если они там есть.
+4. .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h
+   PASS: в t2audio_messages.txt «OutputAttenuation=1 (-6 dB) ClockRateTracking=0».
+5. Прослушивание №1:
+   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -Listen -OwnerApprovedAudible -ExpectedSysHash $h
+   Агент ждёт Enter. Скажи владельцу: выбрать динамики T2 устройством вывода, снять Mute на этой точке (пробы её глушат), поднимать громкость с 5–10 %, слушать что угодно сколько угодно (музыка, видео, паузы, повторные старты) и отмечать время хрипов. По его команде нажми Enter. Потом .\tools\T2Audio-TestAgent.ps1 -Mode Recover.
+6. Прослушивание №2: то же самое с Parameters\ClockRateTracking=1 (dword). В логе должна быть строка «T2 clock: rate=… ppb drift=… ppb lead=…» (drift около +10000 ppb, lead около 1000). Потом удали ClockRateTracking.
+7. Отчёт: docs/logs/EXCERPT_<дата>_<время>.md для обоих прослушиваний. В нём строка mode parameters, ВСЕ строки «run summary: …», ВСЕ строки «re-aimed», первые строки «rate=», слова владельца и время хрипов. Датированная запись в docs/CURRENT_STATE.md (хэш, версия, результат по шагам). PR в diagnostics. В конце устройство на AppleAudio (Started, CM_PROB_NONE).
+
+Что важно увидеть в логе (для Claude):
+- в начале каждого потока теперь ОДИН «re-aimed», а не два (-17xx и +6xx, как раньше);
+- в «run summary»: gaps>lead и skips. Если они не 0, хрип от задержек DPC; maxCopyGapUs покажет, насколько.
 
 Правила:
-- На любом шаге без PASS: стоп, .\tools\T2Audio-TestAgent.ps1 -Mode Recover, сохрани логи (docs/logs/capture_agent_*, минидамп), опиши в CURRENT_STATE.md, что ожидалось и что получилось, сообщи владельцу. Код драйвера не чини наугад.
-- Неприятный звук, треск, перегруз — сразу -Mode Recover и Mute. Твитеры режут слух — Parameters\TweeterMode=0.
-- BSOD — стоп, минидамп, отчёт, без разбора не повторять.
-- Не убирай гейт TestSession, не включай автозапуск, не усыпляй Mac во время прогона.
-- В отчётах различай «проверено на железе (хэш …)», «проверено тестами» и «гипотеза».
-- В diagnostics напрямую не пушь, только PR.
+- На любом шаге без PASS: -Mode Recover, сохрани логи (docs/logs/capture_agent_*, минидамп), опиши в CURRENT_STATE.md, что ожидалось и что получилось, сообщи владельцу. Драйвер наугад не чини.
+- Неприятный звук — владелец ставит Mute, ты жмёшь Enter, затем -Mode Recover. Твитеры режут слух — Parameters\TweeterMode=0.
+- BSOD — стоп, минидамп, отчёт.
+- Не убирай гейт TestSession, не включай автозапуск, не усыпляй Mac во время прослушивания.
+- В отчётах различай «проверено на железе (хэш …)», «проверено тестами» и «гипотеза». В diagnostics напрямую не пушь, только PR.
 ```
