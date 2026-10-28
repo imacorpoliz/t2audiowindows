@@ -5,6 +5,16 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (17:00 session): Build 1.0.10.0 prepared, all 5 host tests pass (source verified, ready for hardware check)
+
+- **Build 1.0.10.0:** DriverVer 10/28/2026,1.0.10.0, SHA256 7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB. Signed with test certificate and verified.
+- **Host Tests (PASS):** All 5 tests pass with 0 failures on MSVC:
+  - BceProtocolLogicTest (BCE command parsing, timestamp unpacking): PASS
+  - T2AudioBufferLogicTest (buffer sizing, chunks, conversions): PASS
+  - T2AudioSpeakerLogicTest (speaker layout, attenuation, clock helpers): PASS
+  - T2AudioPipelineTest (full path simulation, hostTime unwrap, drift rate tracking): PASS
+  - T2AudioDspTest (KAIT2EN 16_1 linear chain, Bankstown virtual bass, 4-band compressor, woofer buzz compressor, peak limiter at -1 dBFS): PASS
+- **Hardware Status:** The system has been up for ~52.2 hours. After repeated driver package uninstalls across sessions, PnP flagged Requires reboot to complete configuration. Package 1.0.10.0 is staged and ready for Step 3 (-SpeakerCheck -RawChannels) and Step 4 (DSP comparison) immediately upon reboot.
 ### 2026-10-28 (Claude): loudness of the DSP levels; make-up gain Parameters\DspGainDb (source only, not hardware-tested)
 
 - **Found by simulation** (pink noise at about −20 dBFS, power summed over the speakers): without make-up, the KAIT2EN chain is quieter than the plain path. Level 1 is 9.3 dB quieter, level 2 5.6 dB, levels 3–4 4.9 dB. KAIT2EN relies on its autogain (`Norm`, −12 LUFS), which is not ported. An A/B at the same Windows volume would judge the DSP by loudness alone.
