@@ -5,6 +5,12 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): loudness of the DSP levels; make-up gain Parameters\DspGainDb (source only, not hardware-tested)
+
+- **Found by simulation** (pink noise at about −20 dBFS, power summed over the speakers): without make-up, the KAIT2EN chain is quieter than the plain path. Level 1 is 9.3 dB quieter, level 2 5.6 dB, levels 3–4 4.9 dB. KAIT2EN relies on its autogain (`Norm`, −12 LUFS), which is not ported. An A/B at the same Windows volume would judge the DSP by loudness alone.
+- **Added** `Parameters\DspGainDb` (0–12 dB, default **6**), applied after the DSP in front of the −1 dBFS limiter. With the defaults (−6 dB `OutputAttenuation`, +6 dB make-up): plain −22.8 dB, level 1 −26.1, level 2 −22.4, levels 3–4 −18.6. Logged in `mode parameters` as `DspGainDb=`. The plain path is unaffected.
+- **Test:** +6 dB is +6.0 dB on a quiet tone; at +12 dB full scale is still held at the limiter threshold; the table clamps above 12.
+
 ### 2026-10-28 (Claude): woofer buzz compressor, SpeakerDsp=4 (source only, not hardware-tested)
 
 - **Added** the graph's woofer "Buzz" compressor as level 4 (on top of 3), on each woofer pair after the woofer chain. lsp's band numbering resolved: band k's settings belong to its start frequency `sf_k`, bands are sorted by frequency. The enabled bands are then 110.06–125.51 and 125.51–144.58 Hz with one setting (−12 dB, ratio 8, 2/50 ms), reproduced as one LR4-split band 110–145 Hz (all-pass compensated, flat below threshold). The generator asserts the enabled bands are contiguous and share a setting.

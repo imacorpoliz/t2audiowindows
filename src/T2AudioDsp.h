@@ -49,6 +49,21 @@
 #define T2DSP_GAIN_ONE        (1ll << 30)    // limiter gain, Q30
 #define T2DSP_RELEASE_SHIFT   10
 
+// Make-up gain after the DSP (Parameters\DspGainDb, 0..12 dB, default 6),
+// applied in front of the limiter. The KAIT2EN chain is ~5-9 dB quieter
+// than the plain path on music-like signals (it relies on an autogain stage
+// that is not ported), so without it every DSP level loses an A/B on
+// loudness alone; the limiter still caps the output at -1 dBFS.
+#define T2DSP_GAIN_DB_DEFAULT  6u
+#define T2DSP_GAIN_DB_MAX      12u
+static const int g_T2DspGainDbQ28[T2DSP_GAIN_DB_MAX + 1] = { 268435456, 301189535, 337940217, 379175160, 425441527, 477353244, 535599149, 600952130, 674279380, 756553907, 848867446, 952444939, 1068660799 };
+
+static __inline long long
+T2DspGainFromDb(unsigned int Db)
+{
+    return g_T2DspGainDbQ28[Db > T2DSP_GAIN_DB_MAX ? T2DSP_GAIN_DB_MAX : Db];
+}
+
 // SpeakerDsp levels.
 #define T2DSP_LEVEL_OFF        0u
 #define T2DSP_LEVEL_LINEAR     1u
@@ -415,7 +430,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 // Render Frames stereo frames (MSB-aligned 32-bit host samples, L then R)
 // into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR,
 // T2DSP_LEVEL_VIRTBASS, T2DSP_LEVEL_COMP (virtual bass + compressor) or
-// T2DSP_LEVEL_BUZZ (all of it + the woofer buzz compressor). AttenuationShift is the same safety cut as the
+// T2DSP_LEVEL_BUZZ (all of it + the woofer buzz compressor). GainDb is the
+// make-up gain (0..12 dB) in front of the limiter. AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
 // S24_LE).
 static __inline void
@@ -425,9 +441,11 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             unsigned int Shift,
                             unsigned int AttenuationShift,
                             unsigned int Level,
+                            unsigned int GainDb,
                             T2DSP_STATE *S)
 {
     unsigned long f;
+    long long gain = T2DspGainFromDb(GainDb);
 
     AttenuationShift = T2AudioClampAttenuation(AttenuationShift);
     for (f = 0; f < Frames; f++) {
@@ -466,9 +484,10 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
             T2DspBuzz(S, w);
         }
         for (side = 0; side < 2; side++) {
-            // Back to full scale (2^31) for the limiter and the ring.
-            w[side] *= (1ll << T2DSP_INTERNAL_SHIFT);
-            t[side] *= (1ll << T2DSP_INTERNAL_SHIFT);
+            // Back to full scale (2^31) for the limiter and the ring, with
+            // the make-up gain (|w| < 2^31 * 4 after it; the limiter takes < 2^35).
+            w[side] = T2DspSar(w[side] * gain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
+            t[side] = T2DspSar(t[side] * gain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
         }
         lw[0] = w[0];
         rw[0] = w[1];

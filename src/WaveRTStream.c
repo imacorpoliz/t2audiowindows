@@ -367,6 +367,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                     context->OutputAttenuation,
                     (context->SpeakerDsp > T2DSP_LEVEL_MAX) ? T2DSP_LEVEL_MAX
                                                             : context->SpeakerDsp,
+                    context->DspGainDb,
                     &instance->Dsp);
             } else if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(

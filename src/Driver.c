@@ -282,12 +282,17 @@ T2AudioStartDevice(
         (T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClockRateTracking", 0) != 0);
     // Off by default: the hardware-verified plain speaker path.
     context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 0);
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u\n",
+    // Make-up gain for the DSP path (see T2AudioDsp.h); clamped to 0..12 dB.
+    context->DspGainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspGainDb", 6);
+    if (context->DspGainDb > 12) {
+        context->DspGainDb = 12;
+    }
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
              context->OutputAttenuation, context->OutputAttenuation * 6u,
              context->ClockRateTracking ? 1u : 0u,
-             context->SpeakerDsp));
+             context->SpeakerDsp, context->DspGainDb));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the
     // driver runs purely on system memory and never touches a BAR.

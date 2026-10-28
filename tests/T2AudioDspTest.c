@@ -238,7 +238,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
         double l = amp * sin(ph), r = amp * sin(ph + rphase);
         src[0] = host_word(l);
         src[1] = host_word(r);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
         ref_frame(&ref, l, r, out);
         if (n >= 48000) {
             double a = fabs(ring_value(dst[ch]));
@@ -319,7 +319,7 @@ static void test_stability(void)
     printf("Stability\n");
     T2DspReset(&st);
     for (n = 0; n < 48000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
         if (dst[0] | dst[2] | dst[3] | dst[5]) nonzero++;
     }
     check("silence in -> exact silence out", nonzero == 0);
@@ -327,10 +327,10 @@ static void test_stability(void)
     // Impulse, then 2 s of silence: the output must decay to (near) zero.
     T2DspReset(&st);
     src[0] = src[1] = 0x7FFFFF00u;
-    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
     src[0] = src[1] = 0;
     for (n = 0; n < 96000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
         if (n > 95000) {
             int c;
             for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > tail) tail = fabs(ring_value(dst[c]));
@@ -354,7 +354,7 @@ static void test_headroom_and_limiter(void)
         double s = 0.999 * sin(2.0 * 3.14159265358979323846 * 100.0 * n / 48000.0);
         int c;
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     printf("  full-scale 100 Hz: output peak %.4f, limited frames %lu\n", peak, st.LimitedFrames);
@@ -374,7 +374,7 @@ static void test_headroom_and_limiter(void)
         unsigned int v = ((n / 300) & 1) ? 0x80000000u : 0x7FFFFFFFu;
         int c;
         src[0] = src[1] = v;
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     check("full-scale square: output bounded by the threshold", peak <= 0.8912509 + 2.0 / 8388608.0);
@@ -384,7 +384,7 @@ static void test_headroom_and_limiter(void)
     for (n = 0; n < 48000; n++) {
         double s = 0.05 * sin(2.0 * 3.14159265358979323846 * 440.0 * n / 48000.0);
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
     }
     check("limiter idle at -26 dBFS", st.LimitedFrames == 0);
 
@@ -399,7 +399,7 @@ static void test_headroom_and_limiter(void)
             for (n = 0; n < 57600; n++) {
                 double s = 0.1 * sin(2.0 * 3.14159265358979323846 * 1000.0 * n / 48000.0);
                 src[0] = src[1] = host_word(s);
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, g_level, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, g_level, 0, &st);
                 if (n >= 48000 && fabs(ring_value(dst[0])) > pf) pf = fabs(ring_value(dst[0]));
             }
             a1 = 20.0 * log10(pf / 0.1);
@@ -419,7 +419,7 @@ static void test_cost(void)
     T2DspReset(&st);
     for (i = 0; i < 96 * 2; i++) src[i] = host_word(0.1 * sin(i * 0.1));
     t0 = clock();
-    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, &st);
+    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, 0, &st);
     t1 = clock();
     us = (double)(t1 - t0) / CLOCKS_PER_SEC * 1e6 / 5000.0;
     printf("Cost: %.1f us per 2 ms DPC tick (96 frames) on this host\n", us);
@@ -448,7 +448,7 @@ static double tone_band_energy(double hz, double amp, double lo, double hi, int 
             double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0);
             src[0] = src[1] = host_word(s);
             if (fixed) {
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, &st);
                 y[n] = ring_value(dst[T2AUDIO_SPK_LEFT_WOOFER_A]);
             } else {
                 ref_frame(&ref, s, s, out);
@@ -565,6 +565,35 @@ static void test_buzz(void)
     check("60 Hz at 0 dBFS not compressed (|gain| < 0.5 dB)", fabs(buzz_level(1.0, 60, 1)) < 0.5);
 }
 
+// Make-up gain (DspGainDb): +6 dB is +6.02 dB on a quiet tone; at +12 dB a
+// full-scale signal is still held at the limiter threshold.
+static double tweeter_8k_peak(unsigned int gainDb, double amp)
+{
+    static T2DSP_STATE st;
+    unsigned int src[2], dst[6];
+    double pk = 0;
+    int n;
+
+    T2DspReset(&st);
+    for (n = 0; n < 24000; n++) {
+        double s = amp * sin(2.0 * 3.14159265358979323846 * 8000.0 * n / 48000.0);
+        src[0] = src[1] = host_word(s);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, gainDb, &st);
+        if (n > 12000 && fabs(ring_value(dst[T2AUDIO_SPK_LEFT_TWEETER])) > pk) pk = fabs(ring_value(dst[T2AUDIO_SPK_LEFT_TWEETER]));
+    }
+    return pk;
+}
+
+static void test_makeup_gain(void)
+{
+    double g0 = tweeter_8k_peak(0, 0.05), g6 = tweeter_8k_peak(6, 0.05), g12 = tweeter_8k_peak(12, 0.999);
+
+    printf("Make-up gain (DspGainDb)\n");
+    check("+6 dB raises a quiet tone by 6.0 dB (+-0.05)", fabs(20.0 * log10(g6 / g0) - 6.0) < 0.05);
+    check("+12 dB at full scale still capped by the limiter", g12 <= 0.8912509 + 2.0 / 8388608.0);
+    check("gain table clamps above 12 dB", T2DspGainFromDb(40) == T2DspGainFromDb(12));
+}
+
 static void test_log_exp(void)
 {
     long long e, v;
@@ -614,6 +643,7 @@ int main(void)
     test_stability();
     test_headroom_and_limiter();
     test_virtual_bass();
+    test_makeup_gain();
     test_log_exp();
     test_compressor();
     test_buzz();

@@ -142,6 +142,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // woofer buzz compressor (110-145 Hz). Values above
     // T2DSP_LEVEL_MAX act as the maximum. Not hardware-tested.
     ULONG SpeakerDsp;
+    // DspGainDb (Parameters\DspGainDb, default 6, 0..12): make-up gain after
+    // the speaker DSP, in front of its -1 dBFS limiter (T2AudioDsp.h).
+    ULONG DspGainDb;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;
