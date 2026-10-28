@@ -230,7 +230,7 @@ Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
 | `HardwareLock`, `HardwareReady` | защита MMIO от teardown (§7) |
 | `BceSpeakerDeviceId`, `SpeakerDeviceId` | найденный / «подключённый» speaker (второе — только на стадии ≥ 4) |
 | `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | результат запроса потока (§5.3) |
-| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode` | гейты и параметры (§8) |
+| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode`, `OutputAttenuation` | гейты и параметры (§8) |
 | `ClockLock`, `ClockGeneration`, `ClockAnchorFrames/Qpc` | якорь часов T2 из `UPDATE_TIMESTAMP` (§6.3) |
 
 ### 4.3 Формат на пине
@@ -337,8 +337,8 @@ pending = playFrame - frame
                     src = frame,      (кадр клиента: 8 байт стерео / 24 raw)
                     dst = frame + DestOffset,   (кадр кольца: 24 байта)
                     …)                           # не пересекает конец ни одного кольца
-        стерео: T2AudioRenderStereoToSpeakers(dst, src, кусок, shift, TweeterMode)
-        raw:    T2AudioConvertSamples(dst, src, кусок, SpeakerSampleShift)
+        стерео: T2AudioRenderStereoToSpeakers(dst, src, кусок, shift, TweeterMode, OutputAttenuation)
+        raw:    T2AudioConvertSamples(dst, src, кусок, SpeakerSampleShift + OutputAttenuation)
     _mm_sfence()                                 # слить WC-буферы
 LastCopiedFrame = playFrame
 ```
@@ -439,6 +439,7 @@ LastCopiedFrame = playFrame
 | `ForceSystemBuffer` | 1 = никогда не делать hardware I/O (чисто программный поток) |
 | `MdlVariant` | эксперименты с MDL на BAR (`Phase4.c`). Текущий тракт всегда использует системный буфер, так что практически не используется. |
 | `TweeterMode` | стерео-путь: 1 (по умолчанию) = твитеры через ФВЧ 4-го порядка 3 кГц, 0 = твитеры молчат (звук только из вуферов) |
+| `OutputAttenuation` | защитное ослабление каждого сэмпла перед записью в кольцо, шаг 6 дБ (арифметический сдвиг вправо). По умолчанию 3 (−18 дБ), 0 = выключено, больше 16 обрезается до 16. Действует и на стерео, и на raw-путь. Пока драйвер экспериментальный, по умолчанию оно включено. |
 
 ### 8.4 Почему нет «нормального режима»
 

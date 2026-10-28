@@ -26,9 +26,10 @@ The 16-inch MacBook Pro is renowned for class-leading laptop acoustics, achieved
                            Woofers + Tweeters)          Protection             Hardware Volume
 ```
 
-### 1. First Audible Playback (Stage E — 99% Ready, Immediate Next Step)
-* **Current State:** The entire hardware pipeline (DMA, BAR0 circular ring, interrupts, BCE protocol handshake, and hardware clocks) is verified and working on hardware.
-* **Remaining Action:** Remove software muting and run a low-volume test stream at **2–5% volume**. Sound will physically play across all 6 speakers.
+### 1. First Audible Playback (Stage E — Immediate Next Step)
+* **Current State:** START_IO/STOP_IO, the T2 clock and the copy DPC are verified on hardware in silent runs. Not yet shown: that the T2 actually plays the samples we write into the BAR0 ring.
+* **Tooling (ready, not yet hardware-tested):** `tools/T2Audio-TestAgent.ps1 -Mmio -BceIo -OwnerApprovedBceIo -AudibleVolume 0.03 -OwnerApprovedAudible` runs the muted probe first, then a short quiet tone with the T2 endpoint at ≤ 5 % volume, and mutes the endpoint again afterwards. The driver additionally attenuates every sample by `Parameters\OutputAttenuation` (6 dB steps, default 3 = −18 dB).
+* **Remaining Action:** Owner-approved low-volume run; confirm sound from all 6 speakers and no clicks every ~0.35 s. See `GEMINI.md` §6.
 
 ### 2. Acoustic EQ & Deep Bass Tuning (macOS DSP Parity)
 * **The Reality of Laptop Acoustics:** The MacBook Pro speaker enclosures are physically compact. macOS achieves its signature deep, punchy low-end via heavy DSP equalization: boosting frequencies below 100 Hz while notching out chassis resonances of the unibody aluminum casing. Without EQ, raw speakers sound thin and flat.
