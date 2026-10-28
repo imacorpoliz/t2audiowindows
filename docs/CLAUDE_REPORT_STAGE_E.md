@@ -142,7 +142,8 @@ This report matches our architectural expectations and the theoretical models de
 
 ### 6.1 Confirmed Fixes on Hardware:
 1. **Start-of-stream gap successfully eliminated:**
-   - In 1.0.8.0, every stream experienced two re-aims: e-aimed lead by -17xx followed by +6xx ~333 ms later (causing a 13 ms silent gap).
+   - In 1.0.8.0, every stream experienced two re-aims: 
+e-aimed lead by -17xx followed by +6xx ~333 ms later (causing a 13 ms silent gap).
    - In 1.0.9.0, T2AudioClockUnwrapHostTime fixed hostTime wrapping: all three observed streams in Session #1 logged **EXACTLY ONE re-aim** (-1049, -1080, -1080), and ZERO subsequent re-aims! The initial gap is completely gone.
 2. **DPC Latency Counters:**
    - maxCopyGapUs = 2635 (~2.6 ms).
@@ -169,3 +170,17 @@ Three critical hypotheses to analyze:
 ### 6.4 Recommended Next Action:
 Run **Step §6.2 Per-Channel Diagnostic** (	ools/T2Audio-TestAgent.ps1 -RawChannels -ToneChannel  -ToneFrequency 1000 -AudibleVolume 0.03 -OwnerApprovedAudible) for each channel  \dots 5$.
 This will isolate each of the 6 physical amplifier outputs with a safe 1 kHz tone and prove beyond doubt which physical transducer is wired to which ring channel!
+---
+
+## 7. Ответ Claude на прослушивание №1
+
+Подробно — запись «analysis of Listening Session #1» в `docs/CURRENT_STATE.md`. Коротко:
+
+* **Подтверждено на железе:** щелчок в начале потока исправлен (один `re-aimed`). Задержек DPC нет (`maxCopyGapUs` 2,6 мс, `gaps>lead=0`, `skips=0`). Хрип, похоже, ушёл.
+* **«Баса нет вовсе» — скорее баланс, а не мёртвые вуферы.** Простой путь отдаёт вуферам середину на 0 дБ, твитерам верх на 0 дБ. В kaiT2en середина на вуферах ослаблена на ~23 дБ, твитеры на ~13 дБ, бас поднят. Плюс у kaiT2en есть виртуальный бас и компрессор. Получается громко, ярко и без баса. Именно это лечит `SpeakerDsp=1..3`; в прослушивании №1 он не участвовал.
+* **Щелчок на низком тоне:** ниже ~60 Гц ноутбучные вуферы почти ничего не играют, а на старте тона слышен щелчок. Это нормально.
+* **Гипотезы §6.3:**
+  * A (вуферы на 2/5) маловероятна: Linux-драйвер kaiT2en пишет каналы в кольцо без перестановки, а граф 16_1 использует ту же раскладку, и на Linux это работает. Проверить всё равно стоит, это дёшево (двухтональная проверка ниже).
+  * B (усилитель вуферов выключен до команды) не подтверждается: Linux-драйвер таких команд не шлёт.
+  * C (противофаза пар) не подтверждается: граф подаёт на оба вуфера пары один сигнал.
+* **Следующее:** проверка раскладки двумя тонами, потом сравнение `SpeakerDsp=0/1/2/3` (см. `GEMINI.md`, «▶ СЛЕДУЮЩИЙ ЗАПУСК»).

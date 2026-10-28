@@ -96,8 +96,8 @@ param(
     [double]$ToneAmplitude = 0.2,
 
     # Channel for the tone (-1 = all). With -RawChannels (speaker layout
-    # check, GEMINI.md §6.2) a single channel and >= 1 kHz are required:
-    # the raw tweeters 2 and 5 have no protection filter.
+    # check, GEMINI.md §6.2) a single channel is required, and >= 1 kHz on
+    # channels 2 and 5: the raw tweeters have no protection filter.
     [ValidateRange(-1, 5)]
     [int]$ToneChannel = -1,
 
@@ -449,8 +449,9 @@ function Invoke-Test {
             Write-Fail '-AudibleVolume plays sound through the speakers. It needs the owner''s explicit approval: -OwnerApprovedAudible.'
             exit 1
         }
-        if ($RawChannels -and ($ToneChannel -lt 0 -or $ToneFrequency -lt 1000)) {
-            Write-Fail '-AudibleVolume with -RawChannels needs -ToneChannel 0..5 and -ToneFrequency >= 1000 (raw tweeters have no protection filter).'
+        if ($RawChannels -and ($ToneChannel -lt 0 -or
+                (($ToneChannel -eq 2 -or $ToneChannel -eq 5) -and $ToneFrequency -lt 1000))) {
+            Write-Fail '-AudibleVolume with -RawChannels needs -ToneChannel 0..5, and -ToneFrequency >= 1000 on channels 2 and 5 (raw tweeters have no protection filter).'
             exit 1
         }
         Write-Warn "Stage E: after the muted probe a $ToneFrequency Hz tone (amplitude $ToneAmplitude) plays for $ToneSeconds s at endpoint volume $AudibleVolume."

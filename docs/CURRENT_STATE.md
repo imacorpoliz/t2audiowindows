@@ -5,6 +5,19 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): analysis of Listening Session #1 — "no bass at all"
+
+Based on `docs/logs/EXCERPT_20261028_151122.md` (1.0.9.0) and the owner's words ("very flat, as if there is no low end at all; one click on a low tone; clearly louder than the standard driver"):
+
+- **Confirmed on hardware:** the hostTime unwrap fix works (one re-aim per stream, no second gap); copy timing is clean (`maxCopyGapUs` 2.6 ms, no gaps over the lead, no skips). DPC latency is **not** a problem, and the owner did not report crackle this time.
+- **Most likely cause of "no bass": the plain path's tonal balance, not dead woofers.** The plain path (`SpeakerDsp=0`) sends the full band at 0 dB to the woofers and 0 dB above 3 kHz to the tweeters. The KAIT2EN 16_1 chains instead give the woofers +1 dB at 100 Hz but −23 dB at 1 kHz and −74 dB at 4 kHz, and the tweeters about −13 dB. Relative to the bass, our mids are therefore ~+23 dB and our highs ~+13 dB too hot, with no bass shelf, no virtual bass and no compressor: bright, loud ("louder than Apple") and bass-less. This is what `SpeakerDsp=1..3` addresses; it was not part of Session #1.
+- **"One click on a low tone":** a sine below ~60 Hz is mostly inaudible from laptop woofers; the onset produces a click. Expected physics, not a fault. With `SpeakerDsp≥1`, Tone1 removes content below ~70 Hz.
+- **Gemini's hypotheses** (`docs/CLAUDE_REPORT_STAGE_E.md` §6.3):
+  - A (woofers on 2/5): unlikely. KAIT2EN's `t2bce_audio` copies ALSA interleaved frames to the ring without reordering, and the 16_1 graph routes `AUX0..5` as 0/1 left woofers, 2 left tweeter, 3/4 right woofers, 5 right tweeter, which works on Linux. Still cheap to verify with a two-tone layout check (next session).
+  - B (amplifier mute until a BCE control message): not supported. The Linux driver sends no volume/mute/control messages to the speaker, only remote access, property reads and START/STOP_IO.
+  - C (opposed woofer pairs need inverted polarity): not supported. The graph drives each pair with the identical signal.
+- **Tool change:** `-RawChannels` with a tone now allows low frequencies on channels 0/1/3/4 (still ≥ 1 kHz on 2/5), for the two-tone layout check.
+
 ### 2026-10-28 (after Stage E, latest): multiband compressor, SpeakerDsp=3 (source only, not hardware-tested)
 
 - CI green on `ea6bd9c` (level 2).
