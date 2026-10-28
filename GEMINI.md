@@ -8,6 +8,79 @@
 
 ---
 
+## ▶ СЛЕДУЮЩИЙ ЗАПУСК — делай по шагам (обновлено 2026-10-28, ночь)
+
+С прошлого прогона на железе (1.0.7.0) изменилось следующее. Всё это — только исходники, на железе не проверено:
+* ослабление `OutputAttenuation` (−18 дБ по умолчанию);
+* флаг `ClockRateTracking` (по умолчанию выключен);
+* режим тона в агенте и выбор канала в `Test-WasapiTone.ps1`;
+* CI-проверки.
+
+Поэтому сначала нужна **регрессия** (новая сборка ведёт себя на этапе D как 1.0.7.0), и только потом звук. Все правила §1 действуют. На каждом шаге: **если не PASS, стоп**, затем `-Mode Recover`, лог в отчёт и вопрос владельцу. Дальше не иди.
+
+**Шаг 1. Ветка и CI.**
+```powershell
+git fetch origin
+git checkout -b gemini/stage-e origin/diagnostics
+```
+На GitHub → Actions прогон «Build» для этого коммита должен быть зелёным. Если красный, стоп: собирать нельзя, сообщи владельцу.
+
+**Шаг 2. Сборка и подпись** по §2 (A1–A3). `DriverVer` = сегодняшняя дата, `1.0.8.0`. Запиши SHA256 `.sys` в `$h`. `.sys` и `.cat` не коммить.
+
+**Шаг 3. Установка** по §3 B1. Сначала отключи устройство `PCI\VEN_106B&DEV_1803`, потом `pnputil /add-driver … /install`: так не будет Code 14.
+
+**Шаг 4. Stage 1 (беззвучно, разрешение не нужно).**
+```powershell
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h
+```
+PASS, когда:
+* в `wasapi.txt` есть `endpoint mute=True volume=0`;
+* в `t2audio_messages.txt` строка `mode parameters: … OutputAttenuation=3 (-18 dB) ClockRateTracking=0`.
+
+**Шаг 5. Регрессия этапа D (беззвучно; нужна фраза владельца «разрешаю START_IO»).**
+```powershell
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -ExpectedSysHash $h
+.\tools\T2Audio-TestAgent.ps1 -Mode Recover
+```
+PASS = тот же лог, что в `docs/logs/EXCERPT_20261028_043442.md`:
+* `START_IO reply … msg=1 status=0x00000000`;
+* `SetState RUN StartIo status=0x00000000`;
+* шаг `sample` 16 640;
+* `re-aimed` 1–2 раза в начале;
+* `STOP_IO reply … msg=3`;
+* после стопа меток нет.
+
+**Шаг 6. Этап E — первый звук (нужна отдельная фраза владельца «разрешаю звук»).** Это §6.1:
+```powershell
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
+    -AudibleVolume 0.03 -OwnerApprovedAudible -ExpectedSysHash $h
+.\tools\T2Audio-TestAgent.ps1 -Mode Recover
+```
+Спроси владельца, что он услышал, и запиши ответ. Затем проверь `tone.txt`: там должна быть строка `after run: endpoint mute=True volume=0`.
+
+**Шаг 7 (по желанию владельца, со звуком).**
+* Раскладка §6.2: по одному каналу, только ≥ 1 кГц.
+* Прогоны часов §7 E2/E3: по 10 минут, `ClockRateTracking` 0 и 1.
+
+**Шаг 8. Отчёт.**
+1. Выдержка лога в `docs/logs/EXCERPT_<дата>_<время>.md`.
+2. Датированная запись в `docs/CURRENT_STATE.md`: хэш, версия, PASS/FAIL по каждому шагу, что услышал владелец.
+3. Отметь пункты §7.
+4. Открой PR из своей ветки в `diagnostics`.
+5. В конце устройство снова на AppleAudio (`Started`, `CM_PROB_NONE`), звуковая схема возвращена.
+
+**Если что-то не работает:**
+* ошибка сборки или CI;
+* `Add-Type` падает;
+* в `tone.txt` есть `REFUSED`;
+* поток не входит в RUN;
+* звука нет при нормальном логе;
+* BSOD.
+
+Ничего не исправляй наугад в драйвере. Сделай `-Mode Recover`, сохрани логи (`capture_agent_*`, минидамп), кратко опиши в `docs/CURRENT_STATE.md`, что сделал и что увидел, и передай владельцу. Он отнесёт это Claude.
+
+---
+
 ## 0. Текущее состояние (на 2026-10-28, вечер)
 
 * Основная ветка — **`diagnostics`** (ветка по умолчанию). CI (`.github/workflows/build.yml`): драйвер собирается с WDK (Release x64), три хост-теста проходят на MSVC, gcc и clang.
@@ -182,7 +255,7 @@ $h = '<SHA256 из A3>'
 Условия: B и C полностью PASS (выполнено), R1 по минидампам не противоречит причине (выполнено), и **владелец в чате разрешил этот прогон**.
 
 Перед прогоном (обязательно):
-1. Пересобери пакет из текущего `diagnostics`. Код драйвера с прогона 2026-10-28 не менялся, но обновлены `tools/Test-WasapiRender.ps1` и агент.
+1. Пересобери пакет из текущего `diagnostics` (порядок — блок «▶ Следующий запуск» в начале файла).
 2. **Заглуши саму конечную точку T2, а не устройство по умолчанию.** Windows хранит громкость и Mute для каждой конечной точки отдельно, а новая точка T2 может стать устройством по умолчанию на 100 %. Сделай прогон `-Stage 1`: проба теперь сама ставит Mute и громкость 0 на точке T2. В `wasapi.txt` должно быть `endpoint mute=True volume=0` и `T2 endpoint muted, volume 0.`. Если там `MUTE NOT CONFIRMED`, стоп. Windows запоминает это состояние, поэтому на прогоне D точка уже будет заглушена, и проба проверит это ещё раз до `Start`.
 3. «Панель управления → Звук → Звуки → Звуковая схема: Без звука» на время прогона (верни после), плюс Mute и громкость 0 на AppleAudio.
 
@@ -283,7 +356,18 @@ after run: endpoint mute=True volume=0
 
 ### 6.2 Раскладка (по одному каналу)
 
-Только с `-RawChannels` (**твитеры без защиты**): тихий тон **1 кГц и выше**, по одному каналу 0…5. Агент не пускает `-AudibleVolume` вместе с `-RawChannels`. Сначала нужна задача T1 (§7). Запиши, какой динамик звучит. Низкие частоты на каналы 2 и 5 **не подавать**. Если порядок не совпал с таблицей в `DRIVER_GUIDE.md` §4.3, поправь `T2AUDIO_SPK_*` в `src/T2AudioSpeakerLogic.h` и тесты.
+Только с `-RawChannels` (**твитеры без защиты**): тихий тон **1 кГц и выше**, по одному каналу 0…5. Агент пускает `-AudibleVolume` вместе с `-RawChannels` только с `-ToneChannel 0..5` и `-ToneFrequency >= 1000`. Сам скрипт тона тоже отказывает (`TWEETER REFUSED`), если ниже 1 кГц идёт на каналы 2/5 или на все каналы.
+
+```powershell
+foreach ($c in 0..5) {
+  .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -RawChannels `
+      -AudibleVolume 0.03 -OwnerApprovedAudible -ToneChannel $c -ToneFrequency 1000 -ExpectedSysHash $h
+  .\tools\T2Audio-TestAgent.ps1 -Mode Recover
+  Read-Host "Канал ${c}: какой динамик звучал? (запиши)"
+}
+```
+
+Запиши, какой динамик звучит. Низкие частоты на каналы 2 и 5 **не подавать**. Если порядок не совпал с таблицей в `DRIVER_GUIDE.md` §4.3, поправь `T2AUDIO_SPK_*` в `src/T2AudioSpeakerLogic.h` и тесты.
 
 ---
 
@@ -300,8 +384,8 @@ after run: endpoint mute=True volume=0
 - [ ] **S4. Удалить устаревший hardware-MDL путь** (`T2AudioCreateSpeakerMdl`, `MdlVariant`, `tools/Test-MdlVariants.ps1`): буфер WaveRT давно живёт в системной памяти. Только если CI остаётся зелёным, без изменения поведения.
 
 **Инструменты:**
-- [ ] **T1. Выбор канала в `Test-WasapiTone.ps1`** (`-Channel 0..5`, остальные каналы — тишина). Для `-RawChannels` запретить частоты ниже 1 кГц на каналах 2 и 5. Нужен для §6.2.
-- [ ] **T2. Поддержка `-RawChannels` в агенте вместе с тоном** — только после T1 и с проверкой частоты.
+- [x] **T1. Выбор канала в `Test-WasapiTone.ps1`** (`-Channel`): сделано 2026-10-28 (Claude), компилируется в CI. На железе не проверено.
+- [x] **T2. `-RawChannels` в агенте вместе с тоном** (`-ToneChannel`, ≥ 1 кГц): сделано 2026-10-28 (Claude). На железе не проверено, это §6.2.
 
 **Реверс (REA + Ghidra, `docs/REVERSE_PLAN.md`):**
 - [ ] **R4.** Нужен ли `SET_PROPERTY 'nsrt'` перед START_IO.

@@ -12,6 +12,12 @@
 # mutes it again with volume 0 when the tone ends (also on errors). Without
 # -EndpointVolume the endpoint volume and mute are left as they are.
 #
+# -Channel N plays the tone on channel N only (the others get silence). On
+# the stereo endpoint 0 = left, 1 = right. On the raw 6-channel endpoint
+# (-RawChannels in the agent) 0/1 and 3/4 are the woofers and 2/5 the
+# tweeters, which have NO protection filter there: the probe refuses a tone
+# below 1 kHz on channels 2 and 5 of a 6-channel format. -1 = all channels.
+#
 # All COM work is done inside C# so the RCW-to-interface casts happen in the
 # CLR (PowerShell cannot cast a raw COM object to a [ComImport] interface).
 
@@ -20,7 +26,8 @@ param(
     [double]$Seconds = 4.0,
     [double]$Frequency = 440.0,
     [double]$Amplitude = 0.25,
-    [double]$EndpointVolume = -1.0
+    [double]$EndpointVolume = -1.0,
+    [int]$Channel = -1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,7 +157,10 @@ public static class Tone {
         sb.AppendLine("after run: endpoint mute=" + muted + " volume=" + level);
     }
 
-    public static string Run(string targetId, double seconds, double frequency, double amplitude, double endpointVolume) {
+    // Raw 6-channel ring: channels 2 and 5 are the unprotected tweeters.
+    public const double MinTweeterFrequency = 1000.0;
+
+    public static string Run(string targetId, double seconds, double frequency, double amplitude, double endpointVolume, int channel) {
         var sb = new StringBuilder();
         bool lowVolume = endpointVolume >= 0.0;
         if (lowVolume) {
@@ -193,14 +203,14 @@ public static class Tone {
             sb.AppendLine("T2 endpoint at low volume " + endpointVolume + ".");
         }
         try {
-            Play(device, seconds, frequency, amplitude, sb);
+            Play(device, seconds, frequency, amplitude, channel, sb);
         } finally {
             if (vol != null) Silence(vol, sb);
         }
         return sb.ToString();
     }
 
-    static void Play(IMMDevice device, double seconds, double frequency, double amplitude, StringBuilder sb) {
+    static void Play(IMMDevice device, double seconds, double frequency, double amplitude, int channel, StringBuilder sb) {
         Guid iid = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         object o;
         int hr = device.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o);
@@ -219,6 +229,12 @@ public static class Tone {
         int bits = fmt.Format.wBitsPerSample;
         if (!isFloat && bits != 16 && bits != 32) { sb.AppendLine("unsupported PCM container: " + bits + " bits"); return; }
         sb.AppendLine("MixFormat: ch=" + ch + " rate=" + rate + " bits=" + fmt.Format.wBitsPerSample + " float=" + isFloat);
+        if (channel >= ch) { sb.AppendLine("CHANNEL REFUSED: channel " + channel + " >= " + ch + " channels"); return; }
+        if (ch == 6 && frequency < MinTweeterFrequency && (channel == 2 || channel == 5 || channel < 0)) {
+            sb.AppendLine("TWEETER REFUSED: " + frequency + " Hz on a raw 6-channel tweeter (needs >= " + MinTweeterFrequency + " Hz)");
+            return;
+        }
+        sb.AppendLine("channel = " + (channel < 0 ? "all" : channel.ToString()));
 
         hr = client.Initialize(0, 0, 10000000, 0, pfmt, IntPtr.Zero);
         sb.AppendLine("Initialize hr=" + H(hr));
@@ -262,7 +278,7 @@ public static class Tone {
                 for (int f = 0; f < avail; f++) {
                     float s = (float)(amplitude * Math.Sin(phase));
                     phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                    for (int c = 0; c < ch; c++) buf[f * ch + c] = s;
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
             } else if (bits == 32) {
@@ -271,7 +287,7 @@ public static class Tone {
                 for (int f = 0; f < avail; f++) {
                     int s = (int)(amplitude * 2147483647.0 * Math.Sin(phase));
                     phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                    for (int c = 0; c < ch; c++) buf[f * ch + c] = s;
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
             } else {
@@ -279,7 +295,7 @@ public static class Tone {
                 for (int f = 0; f < avail; f++) {
                     short s = (short)(amplitude * 32767.0 * Math.Sin(phase));
                     phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                    for (int c = 0; c < ch; c++) buf[f * ch + c] = s;
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
             }
@@ -302,4 +318,4 @@ if (-not ('T2WasapiTone.Tone' -as [type])) {
     Add-Type -TypeDefinition $code
 }
 
-[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude, $EndpointVolume)
+[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude, $EndpointVolume, $Channel)

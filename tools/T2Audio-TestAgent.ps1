@@ -87,6 +87,12 @@ param(
     [ValidateRange(0.0, 0.1)]
     [double]$ToneAmplitude = 0.05,
 
+    # Channel for the tone (-1 = all). With -RawChannels (speaker layout
+    # check, GEMINI.md §6.2) a single channel and >= 1 kHz are required:
+    # the raw tweeters 2 and 5 have no protection filter.
+    [ValidateRange(-1, 5)]
+    [int]$ToneChannel = -1,
+
     # Offer the 6 raw ring channels to Windows instead of the stereo endpoint
     # (RawSpeakerChannels=1), for per-speaker diagnostics. The tweeters then
     # get whatever the client sends, with NO protection high-pass.
@@ -422,8 +428,8 @@ function Invoke-Test {
             Write-Fail '-AudibleVolume plays sound through the speakers. It needs the owner''s explicit approval: -OwnerApprovedAudible.'
             exit 1
         }
-        if ($RawChannels) {
-            Write-Fail '-AudibleVolume is refused with -RawChannels (no tweeter protection on the raw endpoint).'
+        if ($RawChannels -and ($ToneChannel -lt 0 -or $ToneFrequency -lt 1000)) {
+            Write-Fail '-AudibleVolume with -RawChannels needs -ToneChannel 0..5 and -ToneFrequency >= 1000 (raw tweeters have no protection filter).'
             exit 1
         }
         Write-Warn "Stage E: after the muted probe a $ToneFrequency Hz tone (amplitude $ToneAmplitude) plays for $ToneSeconds s at endpoint volume $AudibleVolume."
@@ -523,7 +529,7 @@ function Invoke-Test {
                     Write-Warn "Playing the Stage E tone at endpoint volume $AudibleVolume..."
                     $toneOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ToneScript `
                         -DeviceId $endpoint -EndpointVolume $AudibleVolume -Amplitude $ToneAmplitude `
-                        -Frequency $ToneFrequency -Seconds $ToneSeconds 2>&1 | Out-String
+                        -Frequency $ToneFrequency -Seconds $ToneSeconds -Channel $ToneChannel 2>&1 | Out-String
                     $toneOut | Out-File (Join-Path $captureDir 'tone.txt') -Encoding utf8
                     if ($toneOut -match 'REFUSED|NOT CONFIRMED|NOT FOUND') {
                         Write-Fail 'Stage E tone did not play (see tone.txt).'
