@@ -19,6 +19,10 @@ Executed on MacBookPro16,1 running Windows 11 with driver version 1.0.12.1 (sys 
   - Verified CPU load test under extreme DSP settings: preset `night` (`SpeakerDsp=4`, `DspAutoGain=1`, `CompStyle=1`) + `Tune +12/+12/+12`. In `run summary`: `maxCopyUs = 2112` (2.1 ms max tick, ~40 µs per sub-buffer), `gaps>10ms=0`, `skips=0`, `dspLimited=0`. Stream remained completely glitch-free.
   - Verified dynamic preset switching across all 10 presets: `macos`, `macos-precise`, `bass`, `voice`, `movie`, `night`, `loud`, `maxvolume`, `even`, `bright`.
   - Documented in `docs/logs/EXCERPT_20261028_step5_presets.md`.
+- **Owner Listening Evaluation (Step 5a):**
+  - **A/B Compressor Style (`macos` vs `macos-precise`):** Owner verdict verbatim: *«первый приятнее был»* ("the first one [macos, `CompStyle=0`] was more pleasant"). Confirms `CompStyle=0` (fast peak compressor) remains the default for the `macos` profile (ROADMAP §7.2).
+  - **`bass` Preset (+4 dB 150 Hz woofer shelf):** Owner verdict verbatim: *«на киках дребезжание, короче оставляй то что было и доделывай остальное»* ("rattling on kicks, in short leave what was there before [macos] and finish up the rest"). Confirms 16" MBP woofers mechanically rattle on heavy kick transients with +4 dB boost; default `macos` profile is retained as the production reference.
+  - **Settled Profile:** `macos` (Как на Mac, рекомендуется), `volume=1.00 L=1.00 R=1.00`, `mute=False`, status OK.
 
 ### 2026-10-28 (Claude): Gemini hardware reports reviewed — balance fixed, reboot PASS, headphone/mic formats known, jack events absent → jack polling added (source only)
 

@@ -57,3 +57,23 @@ T2Audio: crash guard disarmed (clean end of session)
 T2Audio: mode parameters: ForceSystemBuffer=0 MdlVariant=0 TweeterMode=1 OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=4 DspGainDb=3 TweeterTrimDb=0 WooferLimitDb=6 DspAutoGain=1 BassDb=12 TrebleDb=12 ClarityDb=12 CompStyle=1 ExtendedProbe=0 JackEvents=0 HeadphoneAutoMute=0
 T2Audio: run summary: reAims=1 rateUpdates=0 ratePpb=0 maxCopyGapUs=5047 gaps>10ms=0 gaps>lead=0 skips=0 maxCopyUs=2112 dspLimited=0 wooferLimited=0 autoGainDb10=598 jackMutedFrames=0
 ```
+
+---
+
+## 4. Acoustic Evaluation by Owner (Step 5a Verbatim)
+
+1. **A/B Test: `macos` vs `macos-precise` (Compressor Style):**
+   - **Settings:** Same volume (moderate/high), identical music track.
+     - `macos`: `CompStyle=0` (fast peak limiter/compressor).
+     - `macos-precise`: `CompStyle=1` (RMS detector with soft knee $\pm 6$ dB, matching lsp `mb_compressor`).
+   - **Owner verdict (verbatim):** *«первый приятнее был»* ("the first one was more pleasant").
+   - **Architectural conclusion (ROADMAP §7.2):** Keep `CompStyle=0` as the default for the `macos` profile.
+
+2. **Preset `bass` (+4 dB 150 Hz Woofer Shelf):**
+   - **Settings:** `SpeakerDsp=4, DspGainDb=6, WooferLimitDb=2, BassDb=4, CompStyle=1`. Tested on music with kick drums / bass.
+   - **Owner verdict (verbatim):** *«на киках дребезжание, короче оставляй то что было и доделывай остальное»* ("rattling on kicks, in short leave what was there before [macos] and finish up the rest").
+   - **Architectural conclusion:** Physical woofers on the 16" MBP rattle on heavy kick transients with +4 dB boost. Default `macos` profile (`BassDb=0`) is retained as the stable reference.
+
+3. **Active Working Profile:**
+   - Restored and settled on `macos` (Как на Mac, рекомендуется): `SpeakerDsp=3, DspGainDb=6, TweeterTrimDb=0, WooferLimitDb=0, DspAutoGain=0, BassDb=0, TrebleDb=0, ClarityDb=0, CompStyle=0`.
+   - Volume: 100% (`volume=1.00 L=1.00 R=1.00`), Mute=False.
