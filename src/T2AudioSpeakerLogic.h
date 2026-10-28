@@ -326,4 +326,100 @@ T2AudioClockCorrection(unsigned long long NextSourceFrame,
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Rate tracking (optional, Parameters\ClockRateTracking=1; off by default).
+//
+// The source cursor runs on QPC while the T2 reads the ring on its own
+// crystal. Without tracking the lead drifts by the clock difference (tens of
+// ppm) and T2AudioClockCorrection re-aims it with a jump once it leaves the
+// tolerance: an audible skip every few minutes. With tracking the source
+// cursor runs at QPC * (1 + ppb / 1e9), where ppb follows the T2:
+//   ppb = drift + gain * (TARGET - lead)
+// drift is measured over the whole run (first anchor to latest, so delivery
+// jitter averages out); the lead term pulls the lead back to the target.
+// The re-aim stays as the emergency path. See tests/T2AudioPipelineTest.c.
+// ---------------------------------------------------------------------------
+#define T2AUDIO_RATE_MAX_DRIFT_PPB     500000ll   // +-500 ppm
+#define T2AUDIO_RATE_MAX_PPB          1000000ll   // +-1000 ppm total
+#define T2AUDIO_RATE_GAIN_PPB_PER_FRAME  1000ll   // 1 ppm per frame of error
+
+// Frames for Ticks of a Frequency clock at SampleRate scaled by (1 + Ppb/1e9).
+// Non-decreasing in Ticks for |Ppb| < 1e9. Exact for Ppb == 0.
+static __inline unsigned long long
+T2AudioTicksToFramesPpb(unsigned long long Ticks,
+                        unsigned long SampleRate,
+                        unsigned long long Frequency,
+                        long long Ppb)
+{
+    unsigned long long base;
+    long long corr;
+
+    if (Frequency == 0) {
+        return 0;
+    }
+    base = (Ticks / Frequency) * SampleRate + ((Ticks % Frequency) * SampleRate) / Frequency;
+    if (Ppb == 0 || base == 0) {
+        return base;
+    }
+    // base stays below 2^43 for any realistic run (days), |Ppb| <= 2^20.
+    corr = ((long long)base * Ppb) / 1000000000ll;
+    if (corr < 0 && (unsigned long long)(-corr) > base) {
+        return 0;
+    }
+    return (unsigned long long)((long long)base + corr);
+}
+
+static __inline long long
+T2AudioClampLL(long long Value, long long Limit)
+{
+    if (Value > Limit) {
+        return Limit;
+    }
+    if (Value < -Limit) {
+        return -Limit;
+    }
+    return Value;
+}
+
+// Drift of the T2 against the host clock, in ppb, from two anchors (T2 read
+// frame at host time ns): positive when the T2 runs fast. Returns 0 when the
+// baseline is too short (< 1 s) to be meaningful.
+static __inline long long
+T2AudioClockDriftPpb(unsigned long long BaseFrames,
+                     unsigned long long BaseNs,
+                     unsigned long long Frames,
+                     unsigned long long Ns,
+                     unsigned long SampleRate)
+{
+    unsigned long long dNs;
+    unsigned long long expected;
+    long long diff;
+
+    if (Ns <= BaseNs || Frames < BaseFrames || SampleRate == 0) {
+        return 0;
+    }
+    dNs = Ns - BaseNs;
+    if (dNs < 1000000000ull) {
+        return 0;
+    }
+    // Expected frames at the nominal rate; dNs < 2^63 / 48000 for ~2 days.
+    expected = (dNs / 1000000000ull) * SampleRate +
+               ((dNs % 1000000000ull) * SampleRate) / 1000000000ull;
+    if (expected == 0) {
+        return 0;
+    }
+    diff = (long long)(Frames - BaseFrames) - (long long)expected;
+    return T2AudioClampLL((diff * 1000000000ll) / (long long)expected,
+                          T2AUDIO_RATE_MAX_DRIFT_PPB);
+}
+
+// Source rate (ppb) from the measured drift and the current lead.
+static __inline long long
+T2AudioClockRatePpb(long long DriftPpb, long long Lead)
+{
+    long long ppb = DriftPpb +
+                    ((long long)T2AUDIO_CLOCK_TARGET_LEAD - Lead) * T2AUDIO_RATE_GAIN_PPB_PER_FRAME;
+    return T2AudioClampLL(ppb, T2AUDIO_RATE_MAX_PPB);
+}
+
 #endif

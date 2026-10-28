@@ -5,6 +5,13 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (late): clock-drift defect found by simulation; rate tracking prepared (host tests only, driver unchanged)
+
+- **New test `tests/T2AudioPipelineTest.c`:** host simulation of the whole path (client ring -> 2 ms copy DPC -> 16,640-frame BAR0 ring -> T2 reader on its own clock, one `UPDATE_TIMESTAMP` per lap, 2 ms delivery). It mirrors `T2AudioStreamAdvanceLocked` / `T2AudioStreamFollowT2ClockLocked` and must be kept in sync with `src/WaveRTStream.c`. Runs in CI (gcc, clang, MSVC).
+- **Finding (simulation, not yet seen on hardware):** the source cursor runs on QPC while the T2 reads on its own crystal. With a realistic ±80 ppm difference the current driver re-aims the lead 5 times in 10 minutes, giving 5–9 audible discontinuities (a jump or a short silence roughly every 1–2 minutes). The ~1 s Stage D runs could not show this. At 0 ppm the path is continuous after the initial re-aim.
+- **Prepared fix (in `src/T2AudioSpeakerLogic.h`, NOT called by the driver yet):** `T2AudioTicksToFramesPpb`, `T2AudioClockDriftPpb`, `T2AudioClockRatePpb`. In the simulation with tracking: 1 re-aim at the start only, lead held at 960–1040 frames for ±80 ppm, also with ±300 ppm and with a wrapped hostTime.
+- **Plan:** wire it into `WaveRTStream.c` behind `Parameters\ClockRateTracking` (default 0 = current, hardware-verified behavior), then hardware-test after Stage E (`GEMINI.md` §7).
+
 ### 2026-10-28 (evening): Stage E preparation - output attenuation, low-volume tone tooling (source only, not hardware-tested)
 
 - **Driver:** new `Parameters\OutputAttenuation` (6 dB steps, default 3 = -18 dB, 0 = off, clamped to 16), applied to every sample on both the stereo path (`T2AudioRenderStereoToSpeakers`, new `AttenuationShift` argument) and the raw 6-channel path (added to `SpeakerSampleShift`). Logged as `mode parameters: ... OutputAttenuation=3 (-18 dB)`. Host tests extended (`tests/T2AudioSpeakerLogicTest.c`, "Output attenuation"); gcc and clang pass locally. The kernel build has not been compiled yet (CI / builder).
