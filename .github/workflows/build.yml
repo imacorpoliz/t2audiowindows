@@ -97,7 +97,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($f in 'tools\Test-WasapiRender.ps1', 'tools\Test-WasapiTone.ps1') {
+          foreach ($f in 'tools\Test-WasapiRender.ps1', 'tools\Test-WasapiTone.ps1', 'tools\T2Audio-Setup.ps1') {
             $text = Get-Content -Raw $f
             $m = [regex]::Match($text, "(?s)\`$code = @'\r?\n(.*?)\r?\n'@")
             if (-not $m.Success) { throw "no `$code here-string in $f" }

@@ -1,27 +1,28 @@
-# Промпт для Gemini (доводка звука на 1.0.12.0; звук разрешён)
+# Промпт для Gemini (установщик, постоянный режим, перезагрузка; звук разрешён)
 
-Вставь текст ниже в Gemini как задание. Подробности: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md` и первая запись в `docs/CURRENT_STATE.md`.
+Вставь текст ниже в Gemini как задание. Подробности: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md`, `docs/INSTALL.md` и первая запись в `docs/CURRENT_STATE.md`.
 
 ```text
 Ты работаешь в репозитории imacorpoliz/t2audiowindows на Windows-машине с WDK и на тестовом MacBookPro16,1. Ты — билдер и тестировщик драйвера T2AudioPort.
 
-РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ: «разрешаю START_IO» и «разрешаю звук» (-BceIo -OwnerApprovedBceIo, -Listen -OwnerApprovedAudible). Отдельно спрашивать не нужно.
+РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ: звук разрешён; установка драйвера в постоянный режим установщиком tools\T2Audio-Setup.ps1 разрешена; перезагрузка Windows разрешена. Сон Mac (шаг 6) — только если владелец отдельно скажет «разрешаю сон».
 
-Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md (шаги 1–3 по порядку), §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md. SpeakerDsp=3 одобрен владельцем и теперь стоит по умолчанию; в run summary новое поле maxCopyUs.
+Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md (шаги 1–8 по порядку), docs/INSTALL.md, §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md.
 
-Цель: сборка 1.0.12.0 и доводка с владельцем по таблице вариантов a–f:
-- гул на басовом треке при 100 % громкости (по умолчанию → SpeakerDsp=4 → WooferLimitDb 3/6);
-- яркость (TweeterTrimDb 3/6);
-- громкость (DspGainDb 9);
-- 10 минут лучшего варианта с ClockRateTracking=1.
+Цель: проверить на железе то, что Claude сделал для ежедневного использования:
+1) сборка 1.0.12.0 в packaging\ (подписанные .sys/.cat/.inf);
+2) установка: T2Audio-Setup.ps1 -Action Install -Preset macos;
+3) обычная перезагрузка: драйвер стартует сам, CrashGuardStrikes остаётся 0 (главный тест);
+4) строка разъёма наушников в логе — вставлены и вынуты;
+5) пресеты bright / loud / maxvolume / macos;
+6) сон (только с разрешения);
+7) T2Audio-Setup.ps1 -Action Uninstall — возврат AppleAudio.
 
-Отчёт: docs/logs/EXCERPT_*.md (таблица вариантов, слова владельца, все run summary с maxCopyUs, dspLimited, wooferLimited), запись в docs/CURRENT_STATE.md с итоговыми лучшими значениями, PR в diagnostics. «Доказано» — только проверенное, остальное «гипотеза»; оценку стоимости DSP бери из maxCopyUs драйвера, а не из хост-теста.
+Лог ядра снимай DbgView с начала каждого шага. Отчёт: docs/logs/EXCERPT_*.md (вывод установщика, строки лога: persistent mode, crash guard, headphone jack, mode parameters, run summary с maxCopyUs; слова владельца), запись в docs/CURRENT_STATE.md, PR в diagnostics. «Доказано» — только проверенное.
 
 Правила:
-- Без PASS — -Mode Recover, логи, запись в CURRENT_STATE.md, сообщить владельцу. Драйвер наугад не чинить.
-- Неприятный звук — Mute, Enter, -Mode Recover.
-- BSOD — стоп, минидамп, отчёт.
-- Не убирать гейт TestSession, не включать автозапуск, не усыплять Mac с работающим драйвером.
-- В конце: AppleAudio (Started, CM_PROB_NONE), все значения в Parameters удалены.
+- Сбой или BSOD — стоп. После перезагрузки T2Audio-Setup.ps1 -Action Status (покажет удар защиты), минидамп из C:\Windows\Minidump, отчёт, вопрос владельцу. Код не чинить.
+- Если после обычной перезагрузки защита показывает удар — стоп, это ошибка для Claude.
+- В конце: по решению владельца либо оставить установленным (пресет macos), либо -Action Uninstall. Запиши, что выбрано.
 - В diagnostics напрямую не пушить, только PR.
 ```

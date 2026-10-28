@@ -5,6 +5,21 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): daily use: persistent mode with crash guard, installer with sound presets, headphone jack read (source only, not hardware-tested)
+
+- **Persistent mode** (`Parameters\EnableProduction=1`). Without a TestSession the driver starts on every boot in the hardware-verified configuration (stage 5, MMIO copy, BCE I/O, stereo endpoint).
+  - **Crash guard** (`src/T2AudioCrashGuard.h`, host test `tests/T2AudioCrashGuardTest.c`): `CrashGuardArmed=1` is written and flushed to disk (`ZwFlushKey`) before the session. It is cleared on a clean end: PnP stop/removal, `PowerChangeState` D1–D3, system shutdown (`IoRegisterShutdownNotification` + `IRP_MJ_SHUTDOWN`), and a start that fails.
+  - A start that finds the flag set counts a strike. After 2 strikes in a row the driver refuses to start until the installer resets it. Safe Mode always refuses.
+  - Without `EnableProduction` nothing changes (TestSession only). CI green on `cad014e`.
+- **Installer** `tools/T2Audio-Setup.ps1` (Russian menu, UTF-8 BOM for Windows PowerShell 5.1; guide `docs/INSTALL.md`).
+  - Checks admin, model, testsigning, the signed package.
+  - Install/update: binds the driver with the disable→add→enable sequence that avoids Code 14, switches on persistent mode, un-mutes the T2 endpoint and sets 30 %.
+  - Switches sound presets and restarts the device; shows status (driver, preset, crash guard, testsigning); resets the crash guard; uninstalls back to AppleAudio (delete the T2 package, rescan).
+  - Its C# (endpoint volume) is compiled in CI.
+- **Presets:** `macos` (`SpeakerDsp=3`, owner-approved), `bright` (+3 dB tweeters), `loud` (level 4, +9 dB, woofers −3 dB), `maxvolume` (level 4, woofers −6 dB), `warm` (level 2), `natural` (level 1), `raw` (no DSP).
+- **Headphones, step 1** (`docs/HEADPHONES.md`): the BCE probe finds `"Codec Output"` and logs its `'outp'/'jack'` state. No headphone output yet; KAIT2EN treats it as a separate BCE device with its own ring, which means a second endpoint (steps 2–4 in that document).
+- **Test plan:** `GEMINI.md` "▶ next run". The key test is that an ordinary reboot leaves `CrashGuardStrikes=0`, which proves that shutdown clears the flag.
+
 ### 2026-10-28 (Claude): analysis of Listening Session #3; SpeakerDsp=3 becomes the default; DSP cost counter (source only, not hardware-tested)
 
 Based on `docs/logs/EXCERPT_20261028_192200.md` (1.0.11.0, `SpeakerDsp=3`, `DspGainDb=6`, other trims 0):
