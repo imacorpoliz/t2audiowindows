@@ -33,6 +33,7 @@ The owner asked whether all post-processing is implemented, and for more presets
 - Cost on the build host: level 3 ~52 µs, everything on (level 4, style 1, autogain, tone +3/+3/+3) ~64 µs per 2 ms tick.
 - New CI step "Parse tools and check installer presets": parses every `tools/*.ps1` with the PowerShell parser and checks the preset table (every `-Preset` name exists, all values in range, `macos` equals the driver defaults). The PowerShell itself could not be run here (no PowerShell on the build host); it is checked by CI and by Gemini's step 5a.
 - Kernel wiring (`Driver.c`, `WaveRTStream.c`) is checked only by the CI WDK build.
+- **Bug found by the new CI step and fixed:** since the installer was added (8fa10c4), `T2Audio-Setup.ps1` had a parse error in `Invoke-Uninstall` (`"... $inf: ..."`: PowerShell reads `$inf:` as a drive-qualified variable). A script with a parse error does not run at all, so **every action of the installer, including Install, would have failed immediately** with "Variable reference is not valid". Fixed as `${inf}:`. It was never run on hardware, so nothing was affected; this is why the parse step now blocks the build.
 
 Hardware steps: `GEMINI.md`, "▶ NEXT RUN", step 5a.
 

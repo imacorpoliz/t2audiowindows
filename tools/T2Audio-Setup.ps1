@@ -514,7 +514,7 @@ function Invoke-Uninstall {
     if ($infs.Count -eq 0) { Write-Info 'Пакет T2AudioPort в хранилище драйверов не найден.' }
     foreach ($inf in $infs) {
         $r = Invoke-Pnp @('/delete-driver', $inf, '/uninstall', '/force')
-        if ($r.Code -eq 0) { Write-Ok "Удалён $inf" } else { Write-Warn "pnputil /delete-driver $inf: код $($r.Code)" }
+        if ($r.Code -eq 0) { Write-Ok "Удалён $inf" } else { Write-Warn "pnputil /delete-driver ${inf}: код $($r.Code)" }
     }
     $null = Invoke-Pnp @('/scan-devices')
     $d = Wait-DeviceService 'AppleAudio' 30
