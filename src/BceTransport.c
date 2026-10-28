@@ -768,6 +768,10 @@ T2AudioJackWorkRoutine(
             previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
             // The poll runs every second: log changes only (and the first
             // read, as proof the poll works).
+            if ((previous != 0) != (plugged != 0)) {
+                // Tell Windows (headphone endpoint's jack description).
+                T2AudioNotifyJackChange(context);
+            }
             if ((previous != 0) != (plugged != 0) || polls == 1) {
                 KdPrint(("T2Audio: headphone jack %s (was %s, read #%d)%s\n",
                          plugged ? "PLUGGED" : "unplugged", previous ? "plugged" : "unplugged",
@@ -939,6 +943,67 @@ T2AudioQuerySpeakerStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     KdPrint(("T2Audio: speaker sample shift=%u latency=%u+%u frames safety=%u frames\n",
              Context->SpeakerSampleShift, streamLatency, deviceLatency, safetyOffset));
+}
+
+// Parameters\HeadphoneOutput: the same query for the headphone device
+// ("Codec Output", 2 channels; hardware 2026-10-28: stream 0x26, 24-bit in
+// 32-bit slots). The headphone copy stays off unless this succeeds.
+static VOID
+T2AudioQueryHeadphoneStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG64 streams[4];
+    ULONG streamCount = 0;
+    UCHAR formatData[T2AUDIO_BCE_PHYS_FORMAT_SIZE];
+    ULONG formatLength = 0;
+    T2AUDIO_BCE_PHYS_FORMAT format;
+    ULONG64 deviceId = Context->BceHeadphoneDeviceId;
+    ULONG deviceLatency = 0;
+    ULONG streamLatency = 0;
+    int shift;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    Context->HeadphoneStreamId = 0;
+    Context->HeadphoneFormatValid = FALSE;
+    Context->HeadphoneSampleShift = 0;
+    Context->HeadphoneLatencyFrames = 0;
+    if (deviceId == 0) {
+        return;
+    }
+
+    status = T2AudioGetOutputStreamList(deviceId, streams, ARRAYSIZE(streams), &streamCount);
+    if (!NT_SUCCESS(status) || streamCount == 0) {
+        KdPrint(("T2Audio: headphones 0x%I64X: no output stream (0x%08X, n=%u)\n",
+                 deviceId, status, streamCount));
+        return;
+    }
+    Context->HeadphoneStreamId = streams[0];
+    status = T2AudioGetProperty(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_PHYS_FORMAT, formatData,
+                                sizeof(formatData), &formatLength);
+    if (!NT_SUCCESS(status) ||
+        !T2AudioBceParsePhysicalFormat(formatData, formatLength, &format)) {
+        KdPrint(("T2Audio: headphone stream 0x%I64X: 'pft ' unavailable (0x%08X, len=%u)\n",
+                 streams[0], status, formatLength));
+        return;
+    }
+    shift = T2AudioBceDeviceSampleShift(&format, T2AUDIO_HP_RING_CHANNELS, 48000);
+    if (shift < 0) {
+        KdPrint(("T2Audio: headphone stream format unsupported (ch=%u bits=%u bpf=%u flags=0x%X); headphone copy disabled\n",
+                 format.ChannelsPerFrame, format.BitsPerChannel, format.BytesPerFrame,
+                 format.FormatFlags));
+        return;
+    }
+    (VOID)T2AudioGetU32Property(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_LATENCY, &streamLatency);
+    (VOID)T2AudioGetU32Property(deviceId, deviceId, T2AUDIO_PROP_SCOPE_OUTPUT,
+                                T2AUDIO_PROP_LATENCY, &deviceLatency);
+    Context->HeadphoneSampleShift = (ULONG)shift;
+    Context->HeadphoneLatencyFrames = streamLatency + deviceLatency;
+    Context->HeadphoneFormatValid = TRUE;
+    KdPrint(("T2Audio: headphone stream 0x%I64X: shift=%u latency=%u+%u frames\n",
+             streams[0], Context->HeadphoneSampleShift, streamLatency, deviceLatency));
 }
 
 NTSTATUS
@@ -1173,6 +1238,24 @@ T2AudioHandleVhciMessage(
             Context->ClockAnchorNs = T2AudioClockAnchorNs(hostNs, receptionNs);
             Context->ClockGeneration++;
             KeReleaseSpinLock(&Context->ClockLock, oldIrql);
+        } else if (deviceId == Context->HeadphoneDeviceId && deviceId != 0) {
+            // Same anchor for the headphone device (Parameters\HeadphoneOutput).
+            LARGE_INTEGER qpc, qpcFreq;
+            ULONG64 receptionNs;
+            ULONG64 hostNs;
+            KIRQL oldIrql;
+
+            qpc = KeQueryPerformanceCounter(&qpcFreq);
+            receptionNs = T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart);
+            hostNs = T2AudioClockUnwrapHostTime(timestamp, receptionNs,
+                                                (ULONG64)qpcFreq.QuadPart);
+            KeAcquireSpinLock(&Context->ClockLock, &oldIrql);
+            Context->HpClockAnchorFrames = T2AudioClockFramesAtReception(frames, hostNs,
+                                                                         receptionNs, 48000);
+            Context->HpClockAnchorQpc = (ULONG64)qpc.QuadPart;
+            Context->HpClockAnchorNs = T2AudioClockAnchorNs(hostNs, receptionNs);
+            Context->HpClockGeneration++;
+            KeReleaseSpinLock(&Context->ClockLock, oldIrql);
         }
         n = InterlockedIncrement(&Context->VhciTimestampCount);
         // These arrive continuously while I/O runs: log the first few, then
@@ -1297,6 +1380,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     if (Context->BceSpeakerDeviceId != 0) {
         T2AudioQuerySpeakerStream(Context);
+    }
+    if (Context->HeadphoneOutput && Context->BceHeadphoneDeviceId != 0) {
+        T2AudioQueryHeadphoneStream(Context);
     }
     if (Context->JackEvents && Context->BceHeadphoneDeviceId != 0) {
         (VOID)T2AudioRegisterJackListener(Context);

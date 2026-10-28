@@ -22,6 +22,10 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     LONG ReferenceCount;
     PT2AUDIO_DEVICE_CONTEXT DeviceContext;
     PPORTWAVERTSTREAM PortStream;
+    // TRUE for a stream of the headphone filter (Parameters\HeadphoneOutput):
+    // it renders into the "Codec Output" ring, plain path, and drives the
+    // headphone device's I/O and clock. FALSE = the speaker, as before.
+    BOOLEAN Headphone;
     KSSTATE State;
     ULONG SampleRate;
     // Client format: 2 channels (stereo, laid out over the six speakers) or 6
@@ -100,12 +104,58 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
 
 static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
 
+// The output this stream feeds: the speaker ring (6 ch, 24 bytes a frame) or,
+// for a headphone stream, the "Codec Output" ring (2 ch, 8 bytes a frame).
+static __inline SIZE_T
+T2AudioStreamRingOffset(_In_ const T2AUDIO_WAVERT_STREAM *instance, _In_ const T2AUDIO_DEVICE_CONTEXT *context)
+{
+    return instance->Headphone ? context->HeadphoneBufferOffset : context->SpeakerBufferOffset;
+}
+
+static __inline SIZE_T
+T2AudioStreamRingSize(_In_ const T2AUDIO_WAVERT_STREAM *instance, _In_ const T2AUDIO_DEVICE_CONTEXT *context)
+{
+    return instance->Headphone ? context->HeadphoneBufferSize : context->SpeakerBufferSize;
+}
+
+static __inline ULONG
+T2AudioStreamRingFrameBytes(_In_ const T2AUDIO_WAVERT_STREAM *instance)
+{
+    return instance->Headphone ? T2AUDIO_HP_RING_BYTES_PER_FRAME : T2AUDIO_RING_BYTES_PER_FRAME;
+}
+
+static __inline ULONG64
+T2AudioStreamIoDeviceId(_In_ const T2AUDIO_WAVERT_STREAM *instance, _In_ const T2AUDIO_DEVICE_CONTEXT *context)
+{
+    return instance->Headphone ? context->HeadphoneDeviceId : context->SpeakerDeviceId;
+}
+
+static __inline volatile LONG *
+T2AudioStreamIoActive(_In_ const T2AUDIO_WAVERT_STREAM *instance, _In_ T2AUDIO_DEVICE_CONTEXT *context)
+{
+    return instance->Headphone ? &context->HeadphoneIoActive : &context->HardwareIoActive;
+}
+
+// BAR1 is mapped, device writes are allowed and this stream's ring lies
+// inside BAR1. Caller holds HardwareLock.
+static __inline BOOLEAN
+T2AudioStreamRingWritable(_In_ const T2AUDIO_WAVERT_STREAM *instance, _In_ const T2AUDIO_DEVICE_CONTEXT *context)
+{
+    SIZE_T offset = T2AudioStreamRingOffset(instance, context);
+    SIZE_T size = T2AudioStreamRingSize(instance, context);
+
+    return context->HardwareReady && context->MmioCopyEnabled &&
+           context->Bar1Mapped != NULL && size != 0 && size <= MAXULONG &&
+           offset <= context->Bar1Size && size <= context->Bar1Size - offset;
+}
+
 // Zero Count ring frames starting at ring frame FirstFrame (mod HwFrames).
 // Caller holds the device's HardwareLock and has validated the mapping.
 static VOID
 T2AudioStreamZeroRingLocked(
     _In_ PUCHAR HwBufferBase,
     _In_ ULONG HwFrames,
+    _In_ ULONG FrameBytes,
     _In_ ULONG64 FirstFrame,
     _In_ ULONG64 Count)
 {
@@ -122,8 +172,8 @@ T2AudioStreamZeroRingLocked(
         if (run > zeroFrames) {
             run = (ULONG)zeroFrames;
         }
-        RtlZeroMemory(HwBufferBase + (SIZE_T)slot * T2AUDIO_RING_BYTES_PER_FRAME,
-                      (SIZE_T)run * T2AUDIO_RING_BYTES_PER_FRAME);
+        RtlZeroMemory(HwBufferBase + (SIZE_T)slot * FrameBytes,
+                      (SIZE_T)run * FrameBytes);
         FirstFrame += run;
         zeroFrames -= run;
     }
@@ -157,10 +207,17 @@ T2AudioStreamFollowT2ClockLocked(
         return;
     }
     KeAcquireSpinLockAtDpcLevel(&context->ClockLock);
-    generation = context->ClockGeneration;
-    anchorFrames = context->ClockAnchorFrames;
-    anchorQpc = context->ClockAnchorQpc;
-    anchorNs = context->ClockAnchorNs;
+    if (instance->Headphone) {
+        generation = context->HpClockGeneration;
+        anchorFrames = context->HpClockAnchorFrames;
+        anchorQpc = context->HpClockAnchorQpc;
+        anchorNs = context->HpClockAnchorNs;
+    } else {
+        generation = context->ClockGeneration;
+        anchorFrames = context->ClockAnchorFrames;
+        anchorQpc = context->ClockAnchorQpc;
+        anchorNs = context->ClockAnchorNs;
+    }
     KeReleaseSpinLockFromDpcLevel(&context->ClockLock);
 
     if (generation == instance->ClockGenerationSeen) {
@@ -184,6 +241,7 @@ T2AudioStreamFollowT2ClockLocked(
                                HwFrames, &newOffset, &jump)) {
         if (jump > 0) {
             T2AudioStreamZeroRingLocked(HwBufferBase, HwFrames,
+                                        T2AudioStreamRingFrameBytes(instance),
                                         NextFrame + instance->DestOffset, (ULONG64)jump);
         }
         instance->ClockCorrections++;
@@ -284,19 +342,17 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     // Hold the device's hardware lock across the check and the writes so
     // T2AudioUnmapResources cannot unmap BAR1 underneath the copy.
     KeAcquireSpinLockAtDpcLevel(&context->HardwareLock);
-    canCopy = context->HardwareReady && !context->PoweredDown &&
-              context->MmioCopyEnabled && context->SpeakerFormatValid &&
-              context->Bar1Mapped != NULL &&
-              context->SpeakerBufferSize != 0 &&
-              context->SpeakerBufferSize <= MAXULONG &&
-              context->SpeakerBufferOffset <= context->Bar1Size &&
-              context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset;
+    canCopy = !context->PoweredDown &&
+              (instance->Headphone ? context->HeadphoneFormatValid : context->SpeakerFormatValid) &&
+              T2AudioStreamRingWritable(instance, context);
 
     if (canCopy) {
-        PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + context->SpeakerBufferOffset;
+        PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + T2AudioStreamRingOffset(instance, context);
         PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
         ULONG remainingFrames = (ULONG)pendingFrames;
-        ULONG hwFrames = (ULONG)context->SpeakerBufferSize / T2AUDIO_RING_BYTES_PER_FRAME;
+        ULONG frameBytes = T2AudioStreamRingFrameBytes(instance);
+        ULONG ringBytes = (ULONG)T2AudioStreamRingSize(instance, context);
+        ULONG hwFrames = ringBytes / frameBytes;
 
         // Diagnostics only: time since the previous ring write.
         if (instance->LastCopyQpc != 0 && (ULONG64)qpc.QuadPart > instance->LastCopyQpc &&
@@ -323,7 +379,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // audio from the previous lap (~347 ms earlier), which the T2 would
         // play again as an echo/stutter.
         if (skippedFrames != 0) {
-            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames,
+            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
                                         skipStart + instance->DestOffset,
                                         skippedFrames);
         }
@@ -337,8 +393,9 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // Parameters\HeadphoneAutoMute: while the headphone jack reads plugged
         // in (JackEvents keeps it current), the speakers get silence. The
         // cursors keep moving, so playback resumes in sync on unplug.
-        if (context->HeadphoneAutoMute && context->HeadphoneJackPlugged != 0) {
-            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames,
+        if (!instance->Headphone &&
+            context->HeadphoneAutoMute && context->HeadphoneJackPlugged != 0) {
+            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
                                         frame + instance->DestOffset, remainingFrames);
             instance->JackMutedFrames += remainingFrames;
             frame += remainingFrames;
@@ -354,9 +411,9 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                 frame + instance->DestOffset,
                 remainingFrames,
                 instance->BytesPerFrame,
-                T2AUDIO_RING_BYTES_PER_FRAME,
+                frameBytes,
                 instance->SourceSize,
-                (ULONG)context->SpeakerBufferSize,
+                ringBytes,
                 &srcOffset,
                 &dstOffset,
                 &byteLen);
@@ -374,7 +431,15 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // apply the OutputAttenuation safety shift (two arithmetic shifts
             // compose, so the raw path adds it to the sample shift). Frames
             // are 4-byte aligned in both rings.
-            if (instance->Channels == 2 && context->SpeakerDsp) {
+            if (instance->Headphone) {
+                // Headphones: stereo straight into the 2-channel ring (same
+                // 4-byte slots as the client), with the headphone safety cut.
+                T2AudioConvertSamples(
+                    (volatile unsigned int *)(hwBufferBase + dstOffset),
+                    (const unsigned int *)(sourceBase + srcOffset),
+                    byteLen / sizeof(unsigned int),
+                    context->HeadphoneSampleShift + context->HeadphoneAttenuation);
+            } else if (instance->Channels == 2 && context->SpeakerDsp) {
                 // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
                 // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
                 // the autogain in front, then the tone controls.
@@ -555,6 +620,12 @@ T2AudioStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
     LONG references = InterlockedDecrement(&stream->ReferenceCount);
 
     if (references == 0) {
+        // PortCls stops a stream before destroying it (which unregisters it);
+        // this is only a backstop for the resume list.
+        if (stream->DeviceContext != NULL) {
+            (VOID)InterlockedCompareExchangePointer(
+                &stream->DeviceContext->RunningStream[stream->Headphone ? 1 : 0], NULL, stream);
+        }
         // Defensive: PortCls normally calls FreeAudioBuffer first, but release
         // any buffer still held so a failed/partial lifecycle cannot leak it.
         T2AudioStreamReleaseBuffer(stream, NULL);
@@ -631,7 +702,8 @@ T2AudioStreamSetFormat(
     // another frame size would need a new buffer.
     status = T2AudioValidateRenderFormat(
         DataFormat,
-        (instance->DeviceContext != NULL && instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+        (!instance->Headphone && instance->DeviceContext != NULL &&
+         instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
         &channels);
     if (NT_SUCCESS(status) && instance->AudioBufferMdl != NULL &&
         channels != instance->Channels) {
@@ -653,13 +725,11 @@ T2AudioStreamSetFormat(
     return status;
 }
 
-static NTSTATUS STDMETHODCALLTYPE
-T2AudioStreamSetState(
-    _In_ PMINIPORTWAVERTSTREAM Stream,
+static NTSTATUS
+T2AudioStreamSetStateLocked(
+    _Inout_ PT2AUDIO_WAVERT_STREAM instance,
     _In_ KSSTATE State)
 {
-    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
-        Stream, T2AUDIO_WAVERT_STREAM, Interface);
 
     KdPrint(("T2Audio: SetState %u (forceSys=%u bceIo=%u irql=%u)\n", State,
              instance->DeviceContext->ForceSystemBuffer ? 1u : 0u,
@@ -689,15 +759,10 @@ T2AudioStreamSetState(
                 PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 
                 KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
-                if (context->HardwareReady &&
-                    context->MmioCopyEnabled &&
-                    context->Bar1Mapped != NULL &&
-                    context->SpeakerBufferSize != 0 &&
-                    context->SpeakerBufferOffset <= context->Bar1Size &&
-                    context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset) {
+                if (T2AudioStreamRingWritable(instance, context)) {
                     RtlZeroMemory((PUCHAR)context->Bar1Mapped +
-                                  context->SpeakerBufferOffset,
-                                  context->SpeakerBufferSize);
+                                  T2AudioStreamRingOffset(instance, context),
+                                  T2AudioStreamRingSize(instance, context));
                     _mm_sfence();
                 }
                 KeReleaseSpinLock(&context->HardwareLock, oldIrql);
@@ -716,17 +781,18 @@ T2AudioStreamSetState(
             if (instance->DeviceContext->BceIoEnabled &&
                 T2AudioDecideHardwareIo(
                     instance->DeviceContext->ForceSystemBuffer ? 1u : 0u,
-                    (instance->DeviceContext->SpeakerDeviceId != 0) ? 1u : 0u,
+                    (T2AudioStreamIoDeviceId(instance, instance->DeviceContext) != 0) ? 1u : 0u,
                     instance->HardwareIoStarted ? 1u : 0u)) {
                 KdPrint(("T2Audio: SetState RUN about to StartIo irql=%u\n",
                          (ULONG)KeGetCurrentIrql()));
-                status = T2AudioStartIo(instance->DeviceContext);
+                status = T2AudioStartIoDevice(instance->DeviceContext,
+                                              T2AudioStreamIoDeviceId(instance, instance->DeviceContext));
                 KdPrint(("T2Audio: SetState RUN StartIo status=0x%08X\n", status));
                 if (!NT_SUCCESS(status)) {
                     return status;
                 }
                 instance->HardwareIoStarted = TRUE;
-                InterlockedExchange(&instance->DeviceContext->HardwareIoActive, 1);
+                InterlockedExchange(T2AudioStreamIoActive(instance, instance->DeviceContext), 1);
             }
 
             // Publish the anchor taken above.
@@ -737,9 +803,11 @@ T2AudioStreamSetState(
 
                 if (context != NULL) {
                     KeAcquireSpinLock(&context->ClockLock, &oldIrql);
-                    generation = context->ClockGeneration;
+                    generation = instance->Headphone ? context->HpClockGeneration
+                                                     : context->ClockGeneration;
                     KeReleaseSpinLock(&context->ClockLock, oldIrql);
-                    hwFrames = (ULONG)(context->SpeakerBufferSize / T2AUDIO_RING_BYTES_PER_FRAME);
+                    hwFrames = (ULONG)(T2AudioStreamRingSize(instance, context) /
+                                       T2AudioStreamRingFrameBytes(instance));
                 }
 
                 KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
@@ -820,15 +888,10 @@ T2AudioStreamSetState(
             // Silence the hardware ring under the hardware lock, so a
             // concurrent teardown cannot unmap BAR1 mid-write.
             KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
-            if (context->HardwareReady &&
-                context->MmioCopyEnabled &&
-                context->Bar1Mapped != NULL &&
-                context->SpeakerBufferSize != 0 &&
-                context->SpeakerBufferOffset <= context->Bar1Size &&
-                context->SpeakerBufferSize <= context->Bar1Size - context->SpeakerBufferOffset) {
+            if (T2AudioStreamRingWritable(instance, context)) {
                 RtlZeroMemory((PUCHAR)context->Bar1Mapped +
-                              context->SpeakerBufferOffset,
-                              context->SpeakerBufferSize);
+                              T2AudioStreamRingOffset(instance, context),
+                              T2AudioStreamRingSize(instance, context));
             }
             KeReleaseSpinLock(&context->HardwareLock, oldIrql);
         }
@@ -839,14 +902,15 @@ T2AudioStreamSetState(
         if (instance->DeviceContext == NULL) {
             instance->HardwareIoStarted = FALSE;
         } else if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u) &&
-            InterlockedExchange(&instance->DeviceContext->HardwareIoActive, 0) == 0) {
+            InterlockedExchange(T2AudioStreamIoActive(instance, instance->DeviceContext), 0) == 0) {
             KdPrint(("T2Audio: SetState %u: I/O already stopped (power)\n", State));
             instance->HardwareIoStarted = FALSE;
         } else if (T2AudioDecideStopHardwareIo(instance->HardwareIoStarted ? 1u : 0u)) {
             NTSTATUS status;
             KdPrint(("T2Audio: SetState %u about to StopIo irql=%u\n",
                      State, (ULONG)KeGetCurrentIrql()));
-            status = T2AudioStopIo(instance->DeviceContext);
+            status = T2AudioStopIoDevice(instance->DeviceContext,
+                                         T2AudioStreamIoDeviceId(instance, instance->DeviceContext));
             if (!NT_SUCCESS(status)) {
                 // The STOP_IO failed (for example the BCE transport was poisoned
                 // after a send timeout). This must not wedge the stream in RUN
@@ -860,6 +924,78 @@ T2AudioStreamSetState(
         }
     }
     return STATUS_SUCCESS;
+}
+
+// SetState runs under the device's StreamMutex (a KMUTEX: the thread stays
+// at PASSIVE_LEVEL, so START_IO/STOP_IO can still be sent), which
+// serialises it with the resume-after-sleep work item. While in RUN the
+// stream is listed in RunningStream for that work item.
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioStreamSetState(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ KSSTATE State)
+{
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
+    NTSTATUS status;
+
+    if (context == NULL) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
+    status = T2AudioStreamSetStateLocked(instance, State);
+    context->RunningStream[instance->Headphone ? 1 : 0] =
+        (instance->State == KSSTATE_RUN) ? (PVOID)instance
+            : ((context->RunningStream[instance->Headphone ? 1 : 0] == (PVOID)instance)
+                   ? NULL : context->RunningStream[instance->Headphone ? 1 : 0]);
+    KeReleaseMutex(&context->StreamMutex, FALSE);
+    return status;
+}
+
+// Parameters\ResumeAfterSleep (ROADMAP 2.1): called by the D0 work item
+// (Power.c) with StreamMutex held, at PASSIVE_LEVEL. If this stream is still
+// in RUN but the power-down stopped its I/O (STOP_IO before D3), start it
+// again exactly as a PAUSE -> RUN would: silent ring, START_IO, a new clock
+// anchor from the consumed cursor. Nothing happens otherwise.
+VOID
+T2AudioStreamResumeAfterPower(_In_ PVOID Stream)
+{
+    PT2AUDIO_WAVERT_STREAM instance = (PT2AUDIO_WAVERT_STREAM)Stream;
+    PT2AUDIO_DEVICE_CONTEXT context;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    if (instance == NULL || instance->DeviceContext == NULL) {
+        return;
+    }
+    context = instance->DeviceContext;
+    if (instance->State != KSSTATE_RUN || !instance->HardwareIoStarted ||
+        *T2AudioStreamIoActive(instance, context) != 0) {
+        return;
+    }
+    KdPrint(("T2Audio: resume after sleep: restarting %s I/O\n",
+             instance->Headphone ? "headphone" : "speaker"));
+    // Leave RUN without STOP_IO (the power-down already sent it) ...
+    instance->HardwareIoStarted = FALSE;
+    status = T2AudioStreamSetStateLocked(instance, KSSTATE_PAUSE);
+    if (NT_SUCCESS(status)) {
+        KIRQL oldIrql;
+
+        // The ring still holds audio from before the sleep: the T2 restarts
+        // at slot 0, so silence it first (a fresh run from STOP does the same).
+        KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
+        if (T2AudioStreamRingWritable(instance, context) && !context->PoweredDown) {
+            RtlZeroMemory((PUCHAR)context->Bar1Mapped + T2AudioStreamRingOffset(instance, context),
+                          T2AudioStreamRingSize(instance, context));
+            _mm_sfence();
+        }
+        KeReleaseSpinLock(&context->HardwareLock, oldIrql);
+        // ... and enter it again: START_IO, re-anchor, copy timer.
+        status = T2AudioStreamSetStateLocked(instance, KSSTATE_RUN);
+    }
+    KdPrint(("T2Audio: resume after sleep: status=0x%08X\n", status));
 }
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -1047,14 +1183,15 @@ T2AudioStreamGetHWLatency(
 
         RtlZeroMemory(Latency, sizeof(*Latency));
         if (instance->DeviceContext != NULL) {
-            latencyFrames = instance->DeviceContext->SpeakerLatencyFrames;
+            latencyFrames = instance->Headphone ? instance->DeviceContext->HeadphoneLatencyFrames
+                                                : instance->DeviceContext->SpeakerLatencyFrames;
         }
         // The copy writes each frame about T2AUDIO_LEAD_FRAMES ahead of the
         // T2 read position in the hardware ring, which acts as the FIFO. The codec delay is
         // the stream + device output latency the T2 reports ('ltnc'), in
         // 100 ns units, plus the DSP limiter's lookahead on the DSP path.
         if (instance->DeviceContext != NULL && instance->DeviceContext->SpeakerDsp != 0 &&
-            instance->Channels == 2) {
+            instance->Channels == 2 && !instance->Headphone) {
             latencyFrames += T2DSP_LOOKAHEAD;
         }
         Latency->FifoSize = T2AUDIO_LEAD_FRAMES * instance->BytesPerFrame;
@@ -1113,6 +1250,7 @@ static const IMiniportWaveRTStreamVtbl g_T2AudioStreamVtbl = {
 NTSTATUS
 T2AudioCreateStream(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _In_ BOOLEAN Headphone,
     _In_ PPORTWAVERTSTREAM PortStream,
     _In_ PKSDATAFORMAT DataFormat,
     _Out_ PMINIPORTWAVERTSTREAM *Stream)
@@ -1127,7 +1265,7 @@ T2AudioCreateStream(
     *Stream = NULL;
     status = T2AudioValidateRenderFormat(
         DataFormat,
-        (DeviceContext != NULL && DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+        (!Headphone && DeviceContext != NULL && DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
         &channels);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -1142,6 +1280,7 @@ T2AudioCreateStream(
     instance->Interface.lpVtbl = &g_T2AudioStreamVtbl;
     instance->ReferenceCount = 1;
     instance->DeviceContext = DeviceContext;
+    instance->Headphone = Headphone;
     instance->PortStream = PortStream;
     instance->SampleRate = 48000;
     instance->Channels = channels;

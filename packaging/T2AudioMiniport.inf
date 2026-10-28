@@ -25,6 +25,13 @@ AddInterface=%KSCATEGORY_RENDER%,%KSNAME_Wave%,T2Audio.Wave
 AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_Wave%,T2Audio.Wave
 AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Topology%,T2Audio.Topology
 AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_Topology%,T2Audio.Topology
+; Headphone endpoint (Parameters\HeadphoneOutput=1). The interfaces only
+; become active when the driver registers these subdevices.
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_WaveHeadphone%,T2Audio.WaveHeadphone
+AddInterface=%KSCATEGORY_RENDER%,%KSNAME_WaveHeadphone%,T2Audio.WaveHeadphone
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_WaveHeadphone%,T2Audio.WaveHeadphone
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_TopologyHeadphone%,T2Audio.TopologyHeadphone
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_TopologyHeadphone%,T2Audio.TopologyHeadphone
 
 [T2Audio.Wave]
 AddReg=T2Audio.Wave.AddReg
@@ -39,6 +46,20 @@ AddReg=T2Audio.Topology.AddReg
 [T2Audio.Topology.AddReg]
 HKR,,CLSID,,%Proxy.CLSID%
 HKR,,FriendlyName,,%T2Audio.Topology.FriendlyName%
+
+[T2Audio.WaveHeadphone]
+AddReg=T2Audio.WaveHeadphone.AddReg
+
+[T2Audio.WaveHeadphone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%T2Audio.WaveHeadphone.FriendlyName%
+
+[T2Audio.TopologyHeadphone]
+AddReg=T2Audio.TopologyHeadphone.AddReg
+
+[T2Audio.TopologyHeadphone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%T2Audio.TopologyHeadphone.FriendlyName%
 
 [T2Audio_Install.NT.Services]
 Include=wdmaudio.inf
@@ -71,10 +92,14 @@ T2Audio.DeviceDesc="Apple T2 Audio Device (6-channel Native Driver)"
 T2Audio.ServiceDesc="T2 Audio PortCls Miniport Driver"
 T2Audio.Wave.FriendlyName="T2 Audio Speaker"
 T2Audio.Topology.FriendlyName="T2 Audio Topology"
+T2Audio.WaveHeadphone.FriendlyName="T2 Audio Headphones"
+T2Audio.TopologyHeadphone.FriendlyName="T2 Audio Headphone Topology"
 KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
 KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
 KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
 KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
 KSNAME_Wave="Wave"
 KSNAME_Topology="Topology"
+KSNAME_WaveHeadphone="WaveHeadphone"
+KSNAME_TopologyHeadphone="TopologyHeadphone"
 Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"

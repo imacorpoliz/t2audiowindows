@@ -20,6 +20,13 @@
 #define T2AUDIO_WAVE_PIN_BRIDGE      1u
 #define T2AUDIO_TOPO_PIN_BRIDGE      0u
 #define T2AUDIO_TOPO_PIN_SPEAKER     1u
+// The headphone filters (Parameters\HeadphoneOutput=1) use the same pin
+// layout; topology pin 1 is the headphone jack there.
+#define T2AUDIO_TOPO_PIN_HEADPHONE   1u
+
+// Headphone ring ("Codec Output"): 2 channels, S24_LE in 32-bit slots.
+#define T2AUDIO_HP_RING_CHANNELS        2u
+#define T2AUDIO_HP_RING_BYTES_PER_FRAME 8u
 
 #pragma pack(push, 4)
 typedef struct _T2AUDIO_BUFFER_ENTRY {
@@ -114,6 +121,40 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     volatile LONG JackPollStop;
     volatile LONG JackWorkRunning;
     volatile LONG JackPollCount;
+    // Headphone output (Parameters\HeadphoneOutput=1, default 0; ROADMAP 4.4).
+    // A second WaveRT + topology filter pair renders to the "Codec Output"
+    // device: its ring is located in BufferStruct at MapResources, its
+    // stream format read at the BCE probe, and its START_IO/STOP_IO use the
+    // headphone device id. Plain path (no speaker DSP), with its own safety
+    // cut HeadphoneAttenuation (6 dB steps, default 2 = -12 dB). The clock
+    // anchor mirrors the speaker one, from the headphone device's
+    // UPDATE_TIMESTAMP. HeadphoneIoActive works like HardwareIoActive.
+    // HeadphonePortEvents (IPortEvents of the headphone topology port, held
+    // with a reference) signals jack changes to Windows.
+    ULONG HeadphoneOutput;
+    ULONG HeadphoneAttenuation;
+    BOOLEAN HeadphoneFiltersRegistered;
+    SIZE_T HeadphoneBufferOffset;
+    SIZE_T HeadphoneBufferSize;
+    ULONG64 HeadphoneDeviceId;
+    ULONG64 HeadphoneStreamId;
+    BOOLEAN HeadphoneFormatValid;
+    ULONG HeadphoneSampleShift;
+    ULONG HeadphoneLatencyFrames;
+    volatile LONG HeadphoneIoActive;
+    ULONG HpClockGeneration;
+    ULONG64 HpClockAnchorFrames;
+    ULONG64 HpClockAnchorQpc;
+    ULONG64 HpClockAnchorNs;
+    PVOID HeadphonePortEvents;
+    // Resume after sleep (Parameters\ResumeAfterSleep=1, default 0; ROADMAP
+    // 2.1): streams register here while in RUN; on D0 a PASSIVE work item
+    // restarts the I/O of a stream the power-down had stopped. StreamMutex
+    // serialises that with SetState. Index 0 = speaker, 1 = headphones.
+    ULONG ResumeAfterSleep;
+    KMUTEX StreamMutex;
+    PVOID RunningStream[2];
+    volatile LONG ResumeWorkPending;
     // Parameters\ExtendedProbe=1: log every BCE device's streams, formats,
     // latencies and jacks, and the whole BufferStruct table (read-only), as
     // groundwork for the headphone and microphone endpoints (docs/ROADMAP.md).
@@ -271,6 +312,14 @@ NTSTATUS T2AudioMapResources(
 VOID T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioCrashGuardSetArmed(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ BOOLEAN Armed);
 
+NTSTATUS T2AudioFindOutputBuffer(
+    _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,
+    _In_ SIZE_T Bar1Size,
+    _In_ ULONG NumDevices,
+    _In_z_ PCSTR Name,
+    _Out_ SIZE_T *BufferOffset,
+    _Out_ SIZE_T *BufferSize);
+
 NTSTATUS T2AudioFindSpeakerBuffer(
     _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,
     _In_ SIZE_T Bar1Size,
@@ -289,16 +338,19 @@ VOID T2AudioLogFormat(
 
 NTSTATUS T2AudioCreateStream(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _In_ BOOLEAN Headphone,
     _In_ PPORTWAVERTSTREAM PortStream,
     _In_ PKSDATAFORMAT DataFormat,
     _Out_ PMINIPORTWAVERTSTREAM *Stream);
 
 NTSTATUS T2AudioCreateMiniport(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _In_ BOOLEAN Headphone,
     _Out_ PMINIPORTWAVERT *Miniport);
 
 NTSTATUS T2AudioCreateTopology(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _In_ BOOLEAN Headphone,
     _Out_ PMINIPORTTOPOLOGY *Topology);
 
 NTSTATUS T2AudioCreateSpeakerMdl(
@@ -318,6 +370,11 @@ NTSTATUS T2AudioBuildIoCommand(
 
 NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
+NTSTATUS T2AudioStartIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 DeviceId);
+NTSTATUS T2AudioStopIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 DeviceId);
+VOID T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioReleaseHeadphoneEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioStreamResumeAfterPower(_In_ PVOID Stream);
 NTSTATUS T2AudioRegisterPowerManagement(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PT2AUDIO_DEVICE_CONTEXT Context);

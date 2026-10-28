@@ -177,6 +177,20 @@ T2AudioLogCommandReply(_In_z_ PCSTR What, _In_reads_bytes_(Size) const UCHAR *Re
 NTSTATUS
 T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
+    return T2AudioStartIoDevice(Context, (Context != NULL) ? Context->SpeakerDeviceId : 0);
+}
+
+NTSTATUS
+T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    return T2AudioStopIoDevice(Context, (Context != NULL) ? Context->SpeakerDeviceId : 0);
+}
+
+// START_IO / STOP_IO for one BCE device: the speaker (T2AudioStartIo) or,
+// with Parameters\HeadphoneOutput, the headphone device "Codec Output".
+NTSTATUS
+T2AudioStartIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 DeviceId)
+{
     UCHAR message[sizeof(T2AUDIO_MESSAGE_HEADER) + sizeof(T2AUDIO_MESSAGE_BASE)];
     UCHAR reply[256];
     SIZE_T length;
@@ -187,15 +201,15 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_DEVICE_NOT_READY;
     }
 
-    KdPrint(("T2Audio: START_IO entry irql=%u speaker=0x%I64X\n",
-             (ULONG)KeGetCurrentIrql(), Context->SpeakerDeviceId));
+    KdPrint(("T2Audio: START_IO entry irql=%u device=0x%I64X\n",
+             (ULONG)KeGetCurrentIrql(), DeviceId));
     if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
         KdPrint(("T2Audio: START_IO refused at IRQL %u (needs PASSIVE)\n",
                  (ULONG)KeGetCurrentIrql()));
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (Context->SpeakerDeviceId == 0) {
+    if (DeviceId == 0) {
         KdPrint(("T2Audio: START_IO blocked: no device ID\n"));
         return STATUS_NOT_SUPPORTED;
     }
@@ -206,7 +220,7 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     // Opcode verified with REA against AppleAudio.sys FUN_1400048b0:
     // sends T2AUDIO_MSG_START_IO (0), checks reply opcode T2AUDIO_MSG_START_IO_RESPONSE (1).
-    status = T2AudioBuildIoCommand(T2AUDIO_MSG_START_IO, Context->SpeakerDeviceId,
+    status = T2AudioBuildIoCommand(T2AUDIO_MSG_START_IO, DeviceId,
                                    message, sizeof(message), &length);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -226,16 +240,16 @@ T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         // The command reached the T2 and it may have started anyway (on
         // 2026-10-28 timestamps kept coming after such a reply). Stop it so a
         // failed RUN never leaves the T2 reading the ring.
-        (VOID)T2AudioStopIo(Context);
+        (VOID)T2AudioStopIoDevice(Context, DeviceId);
         return STATUS_DEVICE_PROTOCOL_ERROR;
     }
 
-    KdPrint(("T2Audio: START_IO sent to device 0x%I64X\n", Context->SpeakerDeviceId));
+    KdPrint(("T2Audio: START_IO sent to device 0x%I64X\n", DeviceId));
     return STATUS_SUCCESS;
 }
 
 NTSTATUS
-T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioStopIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 DeviceId)
 {
     UCHAR message[sizeof(T2AUDIO_MESSAGE_HEADER) + sizeof(T2AUDIO_MESSAGE_BASE)];
     UCHAR reply[256];
@@ -247,22 +261,22 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_DEVICE_NOT_READY;
     }
 
-    KdPrint(("T2Audio: STOP_IO entry irql=%u speaker=0x%I64X\n",
-             (ULONG)KeGetCurrentIrql(), Context->SpeakerDeviceId));
+    KdPrint(("T2Audio: STOP_IO entry irql=%u device=0x%I64X\n",
+             (ULONG)KeGetCurrentIrql(), DeviceId));
     if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
         KdPrint(("T2Audio: STOP_IO refused at IRQL %u (needs PASSIVE)\n",
                  (ULONG)KeGetCurrentIrql()));
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (Context->SpeakerDeviceId == 0) {
+    if (DeviceId == 0) {
         KdPrint(("T2Audio: STOP_IO blocked: no device ID\n"));
         return STATUS_NOT_SUPPORTED;
     }
 
     // Opcode verified with REA against AppleAudio.sys FUN_140004970:
     // sends T2AUDIO_MSG_STOP_IO (2), checks reply opcode T2AUDIO_MSG_STOP_IO_RESPONSE (3).
-    status = T2AudioBuildIoCommand(T2AUDIO_MSG_STOP_IO, Context->SpeakerDeviceId,
+    status = T2AudioBuildIoCommand(T2AUDIO_MSG_STOP_IO, DeviceId,
                                    message, sizeof(message), &length);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -284,6 +298,6 @@ T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return STATUS_DEVICE_PROTOCOL_ERROR;
     }
 
-    KdPrint(("T2Audio: STOP_IO sent to device 0x%I64X\n", Context->SpeakerDeviceId));
+    KdPrint(("T2Audio: STOP_IO sent to device 0x%I64X\n", DeviceId));
     return STATUS_SUCCESS;
 }

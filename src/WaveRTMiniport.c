@@ -37,6 +37,8 @@ typedef struct _T2AUDIO_MINIPORT {
     LONG ReferenceCount;
     PT2AUDIO_DEVICE_CONTEXT DeviceContext;
     PPORTWAVERT Port;
+    // TRUE for the headphone wave filter (Parameters\HeadphoneOutput).
+    BOOLEAN Headphone;
 } T2AUDIO_MINIPORT;
 
 static NTSTATUS STDMETHODCALLTYPE
@@ -185,16 +187,97 @@ static PCFILTER_DESCRIPTOR g_T2AudioFilterDescriptor = {
     NULL
 };
 
+// Headphone wave filter: the same two pins, always stereo (no raw mode).
+static KSDATARANGE_AUDIO g_T2AudioHeadphoneRange = {
+    {
+        sizeof(KSDATARANGE_AUDIO),
+        0,
+        0,
+        0,
+        STATIC_KSDATAFORMAT_TYPE_AUDIO,
+        STATIC_KSDATAFORMAT_SUBTYPE_PCM,
+        STATIC_KSDATAFORMAT_SPECIFIER_WAVEFORMATEX
+    },
+    2,
+    32,
+    32,
+    48000,
+    48000
+};
+
+static PKSDATARANGE g_T2AudioHeadphoneRanges[] = {
+    (PKSDATARANGE)&g_T2AudioHeadphoneRange
+};
+
+static PCPIN_DESCRIPTOR g_T2AudioHeadphonePins[] = {
+    {
+        1,
+        1,
+        0,
+        NULL,
+        {
+            0,
+            NULL,
+            0,
+            NULL,
+            SIZEOF_ARRAY(g_T2AudioHeadphoneRanges),
+            g_T2AudioHeadphoneRanges,
+            KSPIN_DATAFLOW_IN,
+            KSPIN_COMMUNICATION_SINK,
+            &g_T2AudioCategoryAudio,
+            NULL,
+            0
+        }
+    },
+    {
+        1,
+        1,
+        0,
+        NULL,
+        {
+            0,
+            NULL,
+            0,
+            NULL,
+            SIZEOF_ARRAY(g_T2AudioBridgeRanges),
+            g_T2AudioBridgeRanges,
+            KSPIN_DATAFLOW_OUT,
+            KSPIN_COMMUNICATION_NONE,
+            &g_T2AudioCategoryAudio,
+            NULL,
+            0
+        }
+    }
+};
+
+static PCFILTER_DESCRIPTOR g_T2AudioHeadphoneFilterDescriptor = {
+    0,
+    NULL,
+    sizeof(PCPIN_DESCRIPTOR),
+    SIZEOF_ARRAY(g_T2AudioHeadphonePins),
+    g_T2AudioHeadphonePins,
+    0,
+    0,
+    NULL,
+    SIZEOF_ARRAY(g_T2AudioConnections),
+    g_T2AudioConnections,
+    0,
+    NULL
+};
+
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioMiniportGetDescription(
     _In_ PMINIPORT Miniport,
     _Out_ PPCFILTER_DESCRIPTOR *Description)
 {
-    UNREFERENCED_PARAMETER(Miniport);
+    PT2AUDIO_MINIPORT instance = CONTAINING_RECORD(
+        Miniport, T2AUDIO_MINIPORT, Interface);
+
     if (Description == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    *Description = &g_T2AudioFilterDescriptor;
+    *Description = instance->Headphone ? &g_T2AudioHeadphoneFilterDescriptor
+                                       : &g_T2AudioFilterDescriptor;
     return STATUS_SUCCESS;
 }
 
@@ -243,7 +326,7 @@ T2AudioMiniportDataRangeIntersection(
     PKSDATAFORMAT_WAVEFORMATEXTENSIBLE result;
     PT2AUDIO_MINIPORT instance = CONTAINING_RECORD(
         Miniport, T2AUDIO_MINIPORT, Interface);
-    BOOLEAN allowRaw = ((instance->DeviceContext != NULL) &&
+    BOOLEAN allowRaw = (!instance->Headphone && (instance->DeviceContext != NULL) &&
                         instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE;
     ULONG channels = allowRaw ? T2AUDIO_RING_CHANNELS : 2u;
 
@@ -363,6 +446,10 @@ T2AudioMiniportInit(
     UNREFERENCED_PARAMETER(UnknownAdapter);
     UNREFERENCED_PARAMETER(ResourceList);
     instance->Port = Port;
+    if (instance->Headphone) {
+        // Fixed stereo descriptor; the speaker range below is not touched.
+        return STATUS_SUCCESS;
+    }
     // Advertise stereo only, unless the test session asked for the raw ring
     // channels. Init runs before the port reads the filter descriptor at
     // PcRegisterSubdevice, and there is a single device.
@@ -392,7 +479,7 @@ T2AudioMiniportNewStream(
         KdPrint(("T2Audio: NewStream rejected: bad pin/capture\n"));
         return STATUS_INVALID_PARAMETER;
     }
-    status = T2AudioCreateStream(instance->DeviceContext, PortStream,
+    status = T2AudioCreateStream(instance->DeviceContext, instance->Headphone, PortStream,
                                  DataFormat, Stream);
     KdPrint(("T2Audio: NewStream status=0x%08X\n", status));
     return status;
@@ -539,6 +626,7 @@ T2AudioValidateRenderFormat(
 NTSTATUS
 T2AudioCreateMiniport(
     _In_ PT2AUDIO_DEVICE_CONTEXT DeviceContext,
+    _In_ BOOLEAN Headphone,
     _Out_ PMINIPORTWAVERT *Miniport)
 {
     PT2AUDIO_MINIPORT instance;
@@ -558,6 +646,7 @@ T2AudioCreateMiniport(
     instance->Interface.lpVtbl = &g_T2AudioMiniportVtbl;
     instance->ReferenceCount = 1;
     instance->DeviceContext = DeviceContext;
+    instance->Headphone = Headphone;
     *Miniport = &instance->Interface;
     return STATUS_SUCCESS;
 }

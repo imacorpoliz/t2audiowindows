@@ -36,6 +36,8 @@ T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->BufferStruct = NULL;
     Context->SpeakerBufferOffset = 0;
     Context->SpeakerBufferSize = 0;
+    Context->HeadphoneBufferOffset = 0;
+    Context->HeadphoneBufferSize = 0;
     KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
 
     // Drain queued copy DPCs as well, so none runs against this context after
@@ -304,6 +306,24 @@ T2AudioMapResources(
         goto Exit;
     }
 
+    // Headphone ring (Parameters\HeadphoneOutput=1 only): not finding it only
+    // leaves the headphone endpoint out; the speaker path is unaffected.
+    if (Context->HeadphoneOutput) {
+        SIZE_T hpOffset = 0;
+        SIZE_T hpSize = 0;
+        NTSTATUS hpStatus = T2AudioFindOutputBuffer(Context->BufferStruct, Context->Bar1Size,
+                                                    numDevices, "Codec Output",
+                                                    &hpOffset, &hpSize);
+
+        if (NT_SUCCESS(hpStatus) && (hpSize % T2AUDIO_HP_RING_BYTES_PER_FRAME) == 0) {
+            Context->HeadphoneBufferOffset = hpOffset;
+            Context->HeadphoneBufferSize = hpSize;
+        } else {
+            KdPrint(("T2Audio: headphone ring not usable (0x%08X, size 0x%Ix): no headphone endpoint\n",
+                     hpStatus, hpSize));
+        }
+    }
+
     // The BufferStruct contract has no device-id field; the speaker device id
     // is discovered later via the BCE device list (T2AudioProbeBceDevices,
     // called from T2AudioStartDevice).
@@ -417,6 +437,71 @@ T2AudioFindSpeakerBuffer(
     
     KdPrint(("T2Audio: FindSpeaker FAIL_L: Speaker device not found among %u devices\n",
              NumDevices));
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+// Locate output stream 0, buffer 0 of the BufferStruct device called Name
+// (exact match, e.g. "Codec Output" for the headphones). Same validation as
+// T2AudioFindSpeakerBuffer, which stays as is for the speaker.
+NTSTATUS
+T2AudioFindOutputBuffer(
+    _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,
+    _In_ SIZE_T Bar1Size,
+    _In_ ULONG NumDevices,
+    _In_z_ PCSTR Name,
+    _Out_ SIZE_T *BufferOffset,
+    _Out_ SIZE_T *BufferSize)
+{
+    SIZE_T nameLength;
+    ULONG index;
+
+    if (BufferOffset == NULL || BufferSize == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *BufferOffset = 0;
+    *BufferSize = 0;
+    if (BufferStruct == NULL || Name == NULL ||
+        BufferStruct->Signature != T2AUDIO_SIG || BufferStruct->Version < 2 ||
+        NumDevices > T2AUDIO_MAX_DEVICES) {
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+    nameLength = strlen(Name);
+    if (nameLength == 0 || nameLength >= sizeof(BufferStruct->Devices[0].Name)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (index = 0; index < NumDevices; ++index) {
+        const T2AUDIO_DEVICE_METADATA *device = &BufferStruct->Devices[index];
+        const T2AUDIO_STREAM_METADATA *stream;
+        SIZE_T offset;
+        SIZE_T size;
+
+        if (RtlCompareMemory(device->Name, Name, nameLength) != nameLength ||
+            device->Name[nameLength] != '\0') {
+            continue;
+        }
+        if (device->NumOutputStreams == 0 || device->NumOutputStreams > T2AUDIO_MAX_STREAMS) {
+            KdPrint(("T2Audio: FindOutputBuffer('%s'): %u output streams\n",
+                     Name, device->NumOutputStreams));
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+        stream = &device->OutputStreams[0];
+        if (stream->NumBuffers == 0 || stream->NumBuffers > T2AUDIO_MAX_BUFFERS) {
+            KdPrint(("T2Audio: FindOutputBuffer('%s'): %u buffers\n", Name, stream->NumBuffers));
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+        offset = stream->Buffers[0].Address;
+        size = stream->Buffers[0].Size;
+        if (offset > Bar1Size || size == 0 || size > Bar1Size - offset) {
+            KdPrint(("T2Audio: FindOutputBuffer('%s'): buffer 0x%Ix+0x%Ix outside BAR1 (0x%Ix)\n",
+                     Name, offset, size, Bar1Size));
+            return STATUS_DEVICE_CONFIGURATION_ERROR;
+        }
+        *BufferOffset = offset;
+        *BufferSize = size;
+        KdPrint(("T2Audio: FindOutputBuffer('%s'): address=0x%Ix size=0x%Ix\n", Name, offset, size));
+        return STATUS_SUCCESS;
+    }
     return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 

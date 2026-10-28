@@ -59,11 +59,60 @@ T2AudioPowerQuiesce(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_z_ PCSTR Why)
 {
     NTSTATUS status;
 
+    // Headphones (Parameters\HeadphoneOutput): the same for their device.
+    if (InterlockedExchange(&Context->HeadphoneIoActive, 0) != 0) {
+        status = T2AudioStopIoDevice(Context, Context->HeadphoneDeviceId);
+        KdPrint(("T2Audio: power %s: headphone STOP_IO status=0x%08X\n", Why, status));
+    }
     if (InterlockedExchange(&Context->HardwareIoActive, 0) == 0) {
         return;
     }
     status = T2AudioStopIo(Context);
     KdPrint(("T2Audio: power %s: STOP_IO status=0x%08X\n", Why, status));
+}
+
+// Parameters\ResumeAfterSleep: back in D0, restart the I/O of streams that
+// are still in RUN (T2AudioStreamResumeAfterPower). Waits 500 ms first so
+// AppleUSBVHCI has re-established remote access, then tries up to 3 times.
+static IO_WORKITEM_ROUTINE T2AudioResumeWorkRoutine;
+
+static VOID
+T2AudioResumeWorkRoutine(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID WorkContext)
+{
+    PIO_WORKITEM workItem = (PIO_WORKITEM)WorkContext;
+    PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
+    LARGE_INTEGER delay;
+    ULONG attempt;
+    ULONG i;
+
+    PAGED_CODE();
+
+    delay.QuadPart = -5000000ll; // 500 ms
+    for (attempt = 0; attempt < 3; attempt++) {
+        BOOLEAN pending = FALSE;
+
+        KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
+        if (!context->PoweredDown) {
+            for (i = 0; i < 2; i++) {
+                if (context->RunningStream[i] != NULL) {
+                    T2AudioStreamResumeAfterPower(context->RunningStream[i]);
+                }
+            }
+            pending = (context->RunningStream[0] != NULL && context->HardwareIoActive == 0) ||
+                      (context->RunningStream[1] != NULL && context->HeadphoneIoActive == 0);
+        }
+        KeReleaseMutex(&context->StreamMutex, FALSE);
+        if (!pending) {
+            break;
+        }
+    }
+    InterlockedExchange(&context->ResumeWorkPending, 0);
+    if (workItem != NULL) {
+        IoFreeWorkItem(workItem);
+    }
 }
 
 static VOID STDMETHODCALLTYPE
@@ -88,7 +137,19 @@ T2AudioPowerChangeState(
         // Persistent mode: a hardware session runs again (crash guard).
         T2AudioCrashGuardSetArmed(context, TRUE);
         // Like AppleAudio, START_IO is not re-sent here: it comes from the
-        // next SetState(RUN).
+        // next SetState(RUN). With ResumeAfterSleep a work item restarts the
+        // I/O of a stream that stayed in RUN through the sleep.
+        if (context->ResumeAfterSleep && context->DeviceObject != NULL &&
+            (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL) &&
+            InterlockedCompareExchange(&context->ResumeWorkPending, 1, 0) == 0) {
+            PIO_WORKITEM workItem = IoAllocateWorkItem(context->DeviceObject);
+
+            if (workItem != NULL) {
+                IoQueueWorkItem(workItem, T2AudioResumeWorkRoutine, DelayedWorkQueue, workItem);
+            } else {
+                InterlockedExchange(&context->ResumeWorkPending, 0);
+            }
+        }
         return;
     }
 

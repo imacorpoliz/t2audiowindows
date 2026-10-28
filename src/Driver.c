@@ -51,6 +51,7 @@ T2AudioPnpHandler(
             // The jack poll sends BCE requests: stop it before the transport
             // is closed with the resources.
             T2AudioStopJackPoll(context);
+            T2AudioReleaseHeadphoneEvents(context);
             T2AudioUnmapResources(context);
             // Persistent mode: clean end of the session.
             T2AudioCrashGuardSetArmed(context, FALSE);
@@ -289,6 +290,76 @@ T2AudioStartDeviceInner(
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList);
 
+// Second topology + WaveRT pair for the headphones ("TopologyHeadphone",
+// "WaveHeadphone"), wired like the speaker pair (Parameters\HeadphoneOutput).
+static NTSTATUS
+T2AudioRegisterHeadphoneFilters(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PRESOURCELIST ResourceList,
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PPORT base = NULL;
+    PPORTTOPOLOGY topoPort = NULL;
+    PPORTWAVERT wavePort = NULL;
+    PMINIPORTTOPOLOGY topoMiniport = NULL;
+    PMINIPORTWAVERT waveMiniport = NULL;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    status = PcNewPort(&base, CLSID_PortTopology);
+    if (NT_SUCCESS(status)) {
+        status = base->QueryInterface(IID_IPortTopology, (PVOID *)&topoPort);
+        base->Release();
+        base = NULL;
+    }
+    if (NT_SUCCESS(status)) {
+        status = T2AudioCreateTopology(Context, TRUE, &topoMiniport);
+    }
+    if (NT_SUCCESS(status)) {
+        status = topoPort->Init(DeviceObject, Irp, (PUNKNOWN)topoMiniport, NULL, ResourceList);
+    }
+    if (NT_SUCCESS(status)) {
+        status = PcRegisterSubdevice(DeviceObject, L"TopologyHeadphone", (PUNKNOWN)topoPort);
+    }
+    if (NT_SUCCESS(status)) {
+        status = PcNewPort(&base, CLSID_PortWaveRT);
+    }
+    if (NT_SUCCESS(status)) {
+        status = base->QueryInterface(IID_IPortWaveRT, (PVOID *)&wavePort);
+        base->Release();
+        base = NULL;
+    }
+    if (NT_SUCCESS(status)) {
+        status = T2AudioCreateMiniport(Context, TRUE, &waveMiniport);
+    }
+    if (NT_SUCCESS(status)) {
+        status = wavePort->Init(DeviceObject, Irp, (PUNKNOWN)waveMiniport, NULL, ResourceList);
+    }
+    if (NT_SUCCESS(status)) {
+        status = PcRegisterSubdevice(DeviceObject, L"WaveHeadphone", (PUNKNOWN)wavePort);
+    }
+    if (NT_SUCCESS(status)) {
+        status = PcRegisterPhysicalConnection(DeviceObject,
+                                              (PUNKNOWN)wavePort, T2AUDIO_WAVE_PIN_BRIDGE,
+                                              (PUNKNOWN)topoPort, T2AUDIO_TOPO_PIN_BRIDGE);
+    }
+    if (waveMiniport != NULL) {
+        waveMiniport->Release();
+    }
+    if (wavePort != NULL) {
+        wavePort->Release();
+    }
+    if (topoMiniport != NULL) {
+        topoMiniport->Release();
+    }
+    if (topoPort != NULL) {
+        topoPort->Release();
+    }
+    return status;
+}
+
 // Start wrapper: a start that fails after the crash guard was armed is a
 // clean end, not a crash.
 NTSTATUS
@@ -338,6 +409,7 @@ T2AudioStartDeviceInner(
 
     RtlZeroMemory(context, sizeof(*context));
     context->DeviceObject = DeviceObject;
+    KeInitializeMutex(&context->StreamMutex, 0);
     KeInitializeSpinLock(&context->HardwareLock);
     KeInitializeSpinLock(&context->ClockLock);
 
@@ -475,6 +547,15 @@ T2AudioStartDeviceInner(
     context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
+    // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off
+    // by default, so the default configuration is unchanged.
+    context->HeadphoneOutput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneOutput", 0) ? 1u : 0u;
+    context->HeadphoneAttenuation = T2AudioClampAttenuation(
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
+    context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
+    KdPrint(("T2Audio: headphone/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) ResumeAfterSleep=%u\n",
+             context->HeadphoneOutput, context->HeadphoneAttenuation,
+             context->HeadphoneAttenuation * 6u, context->ResumeAfterSleep));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
@@ -524,7 +605,7 @@ T2AudioStartDeviceInner(
     topologyPortBase->Release();
     
     KdPrint(("T2Audio: Creating Topology miniport\n"));
-    status = T2AudioCreateTopology(context, &topologyMiniport);
+    status = T2AudioCreateTopology(context, FALSE, &topologyMiniport);
     if (!NT_SUCCESS(status)) {
         KdPrint(("T2Audio: CreateTopology failed: 0x%08X\n", status));
         topologyPort->Release();
@@ -582,7 +663,7 @@ T2AudioStartDeviceInner(
     portBase->Release();
     
     KdPrint(("T2Audio: Creating WaveRT miniport\n"));
-    status = T2AudioCreateMiniport(context, &miniport);
+    status = T2AudioCreateMiniport(context, FALSE, &miniport);
     if (!NT_SUCCESS(status)) {
         KdPrint(("T2Audio: CreateMiniport failed: 0x%08X\n", status));
         port->Release();
@@ -635,6 +716,16 @@ T2AudioStartDeviceInner(
     port->Release();
     topologyPort->Release();
 
+    // Headphone filter pair (Parameters\HeadphoneOutput=1 and the "Codec
+    // Output" ring found). A failure only leaves the headphones out.
+    if (context->HeadphoneOutput && context->HeadphoneBufferSize != 0) {
+        NTSTATUS hpStatus = T2AudioRegisterHeadphoneFilters(DeviceObject, Irp, ResourceList, context);
+
+        context->HeadphoneFiltersRegistered = NT_SUCCESS(hpStatus) ? TRUE : FALSE;
+        KdPrint(("T2Audio: headphone endpoint %s (0x%08X)\n",
+                 NT_SUCCESS(hpStatus) ? "registered" : "NOT registered", hpStatus));
+    }
+
     // STOP_IO before D3 (as AppleAudio does), no MMIO while powered down.
     // Failure is not fatal: streams still stop I/O when they leave RUN.
     (VOID)T2AudioRegisterPowerManagement(DeviceObject, context);
@@ -675,6 +766,13 @@ T2AudioStartDeviceInner(
 
         KdPrint(("T2Audio: audio path ENABLED for speaker 0x%I64X (bceIo=%u, transport held open)\n",
                  context->SpeakerDeviceId, context->BceIoEnabled ? 1u : 0u));
+        if (context->HeadphoneFiltersRegistered && context->HeadphoneFormatValid &&
+            context->BceHeadphoneDeviceId != 0) {
+            context->HeadphoneDeviceId = context->BceHeadphoneDeviceId;
+            KdPrint(("T2Audio: audio path ENABLED for headphones 0x%I64X ring 0x%Ix+0x%Ix\n",
+                     context->HeadphoneDeviceId, context->HeadphoneBufferOffset,
+                     context->HeadphoneBufferSize));
+        }
     } else {
         T2AudioCloseBceTransport();
         KdPrint(("T2Audio: audio path stays disabled (stage %u)\n",
