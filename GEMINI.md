@@ -16,13 +16,14 @@
 * **persistent mode** (`Parameters\EnableProduction=1`): the driver starts on every boot without the agent, protected by the crash guard (`src/T2AudioCrashGuard.h`);
 * **installer with presets** `tools/T2Audio-Setup.ps1` (`docs/INSTALL.md`);
 * **headphone jack read** at probe time (`docs/HEADPHONES.md`, step 1);
-* **lookahead limiter** on every DSP level (instead of the instant one; sound is delayed by 0.5 ms) and **autogain** `DspAutoGain` (preset `even`).
+* **lookahead limiter** on every DSP level (instead of the instant one; sound is delayed by 0.5 ms) and **autogain** `DspAutoGain` (preset `even`);
+* **groundwork for headphones and microphones** (commit 40c1d6d), all off by default: `ExtendedProbe` (a detailed read-only log of every T2 audio device), `JackEvents` (headphone plug/unplug events), `HeadphoneAutoMute` (speakers go silent while headphones are plugged in).
 
 Verifying all of this is the goal of the session. The agent `T2Audio-TestAgent.ps1` is not needed for the install; capture the kernel log with DbgView (`tools/Capture-T2AudioLog.ps1` or DbgViewCLI by hand) from the very start of each step.
 
 The installer's UI is in Russian. The strings quoted below are what it prints; the English meaning is given in brackets.
 
-**Step 1. Build 1.0.12.0** from the current `diagnostics`.
+**Step 1. Build 1.0.12.0** from the current `diagnostics` (at least commit 40c1d6d).
 1. CI is green.
 2. Build and sign as in §2. Put `.sys`, `.cat` and `.inf` with `DriverVer` 1.0.12.0 into `packaging\`, record the SHA256.
 3. Before installing, the device is on AppleAudio and `Parameters` is empty.
@@ -44,7 +45,48 @@ The owner listens to music for 2–3 minutes: does it sound like listening sessi
 
 If an ordinary restart produced a strike (strikes = 1), a clean shutdown does not clear the flag. Stop and report to Claude: the log lines about `crash guard` and `PowerChangeState` before the shutdown.
 
-**Step 4. Headphones (read only).** Plug headphones in, then `-Action Preset -Preset macos` (this restarts the device). The jack line in the log must become `PLUGGED`. Unplug, restart again: `unplugged`. No sound in the headphones yet; that is expected.
+**Step 4. Headphones and microphones groundwork** (sound allowed; headphones give no sound yet, that is expected).
+
+Set the parameters with PowerShell (as administrator). `-Action Preset` only rewrites the preset values, so these stay, and it restarts the device:
+```powershell
+$p = 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters'
+```
+
+4a. **Read at probe.** With headphones unplugged, `-Action Preset -Preset macos`: the log has `BCE probe: headphone jack device … : unplugged`. Plug headphones in, `-Action Preset -Preset macos` again: `PLUGGED`. Unplug.
+
+4b. **Extended probe** (read-only):
+```powershell
+Set-ItemProperty $p ExtendedProbe 1 -Type DWord
+.\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos
+```
+PASS: `mode parameters: … ExtendedProbe=1`, then lines `BCE detail: device 0x… output streams: …`, `… input streams: …`, `… stream 0x… pft: rate=… ch=… bits=…`, `… outp ltnc/saft/jack=…`, `… inpt …`, and `BufferStruct device[i] '…' in=… out=…` with `buffer[0]: address=… size=…`. **Copy every `BCE detail` and `BufferStruct` line verbatim into the report**: they are the input for the headphone and microphone endpoints. Speaker sound must be unchanged; play music for 30 s to confirm.
+
+4c. **Jack events** (the driver subscribes to plug/unplug):
+```powershell
+Set-ItemProperty $p JackEvents 1 -Type DWord
+.\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos
+```
+PASS:
+* in the log, `jack listener on device 0x… : registered (0x00000000 …)`;
+* then, **without restarting anything**, plug headphones in and out 3 times, ~5 s apart. Each plug and each unplug gives `VHCI PROPERTY_CHANGED #n dev=0x… scope=0x6F757470 sel=0x6A61636B` and `headphone jack PLUGGED (was unplugged)` / `unplugged (was plugged)`;
+* speaker sound is unaffected.
+
+If the listener line says `FAILED`, or no `PROPERTY_CHANGED` arrives: record it, set `JackEvents` back to 0, go on with step 5.
+
+4d. **Auto-mute** (only if 4c passed):
+```powershell
+Set-ItemProperty $p HeadphoneAutoMute 1 -Type DWord
+.\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos
+```
+Play music on the speakers. Plug headphones in: the speakers go silent (and nothing in the headphones, which is expected). Unplug: music returns from the speakers within a moment, without a crash or a stuck stream. Stop playback and record `jackMutedFrames=` from `run summary` (> 0).
+
+4e. **Back to defaults** (unless the owner wants to keep auto-mute):
+```powershell
+Set-ItemProperty $p HeadphoneAutoMute 0 -Type DWord
+Set-ItemProperty $p JackEvents 0 -Type DWord
+Set-ItemProperty $p ExtendedProbe 0 -Type DWord
+.\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos
+```
 
 **Step 5. Presets.** `-Action Preset -Preset bright`, then `loud`, `maxvolume`, `even`, `macos`. After each one the log line `mode parameters` shows the expected values (`even` has `DspAutoGain=1`). The owner gives a short verdict by ear:
 * `maxvolume` and `loud`: a bass-heavy track at 100 %. Is there hum, or harshness on peaks? (The limiter now looks ahead, so harshness on peaks should be lower.)
@@ -64,7 +106,7 @@ On a BSOD, after the reboot `-Action Status` shows a strike; add the minidump to
 PASS: «Устройство снова на AppleAudio» [device is back on AppleAudio], `Status` shows AppleAudio.
 
 **Step 8. Report:**
-1. `docs/logs/EXCERPT_*.md`: installer output at every step, log lines (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` with `maxCopyUs`), the owner's words (verbatim, with a translation).
+1. `docs/logs/EXCERPT_*.md`: installer output at every step, log lines (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` with `maxCopyUs` and `jackMutedFrames`, **all `BCE detail` and `BufferStruct device` lines from 4b**, `jack listener` and `PROPERTY_CHANGED` lines from 4c), the owner's words (verbatim, with a translation).
 2. An entry in `docs/CURRENT_STATE.md`.
 3. A PR into `diagnostics`.
 
@@ -396,7 +438,7 @@ Each task gets its own branch off `diagnostics` and a PR. Mark finished items he
 - [x] **F1.** Equalizer from the kaiT2en profile `dsp/profiles/16_1`: done in the driver instead of Equalizer APO (`src/T2AudioDsp.h`, `SpeakerDsp=1..4`; level 3 approved by the owner).
 - [x] **F2.** Limiter/DRC in the driver: done (lookahead limiter, compressors; the lookahead version is not yet tested on hardware).
 - [ ] **G1.** Hardware volume (after R7).
-- [ ] **G2.** Headphones: `'jack'` events and the headphone output (`docs/HEADPHONES.md`).
+- [~] **G2.** Headphones: `'jack'` events implemented (`JackEvents`, `HeadphoneAutoMute`, 40c1d6d; next run step 4); the headphone output is next (`docs/HEADPHONES.md` step 3), after the `ExtendedProbe` log.
 - [ ] **G3.** Microphone (`0x21 Digital Mic` / `0x44 Codec Input`).
 - [~] **G4.** Autostart without `TestSession`: implemented as the installer's persistent mode with the crash guard; awaiting the hardware test (next run, steps 2–3 and 6).
 

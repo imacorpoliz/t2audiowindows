@@ -5,6 +5,26 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): groundwork for headphones and microphones: extended probe, jack events, optional speaker auto-mute (source only, not hardware-tested)
+
+ROADMAP §4.2, §4.3, §5.1 and §2.9. Everything new is **off by default**: with the three new parameters at 0 the driver behaves as 421e08c, except for the reported latency (+0.5 ms on the DSP path).
+- **`Parameters\ExtendedProbe=1`**: at probe time every BCE device is described in the log. Read-only, `GET_*` commands only, including `GET_INPUT_STREAM_LIST` (24), which AppleAudio also sends.
+  - input/output stream lists;
+  - each stream's `'pft '` and `'ltnc'`;
+  - the device's `'outp'`/`'inpt'` `ltnc`, `saft` and `jack`;
+  - then the whole BufferStruct table (every device, its streams, the first two buffers per stream).
+
+  This is the data the headphone endpoint (`"Codec Output"` ring and format) and the microphone work (`"Digital Mic"`, `"Codec Input"`) need.
+- **`Parameters\JackEvents=1`**:
+  - At probe time the driver sends `PROPERTY_LISTENER` (11) for `'outp'/'jack'` on the headphone device and checks the echo in the reply.
+  - Each `PROPERTY_CHANGED` (13) delivered through `0x222020` is parsed and logged.
+  - For the headphone jack, a PASSIVE work item re-reads `'jack'`, coalesced by an interlocked flag. The `0x222020` handler itself must not send BCE requests.
+  - The state goes to `HeadphoneJackPlugged`.
+- **`Parameters\HeadphoneAutoMute=1`** (only with `JackEvents`): while plugged, the copy writes silence into the speaker ring and the cursors keep moving. `run summary` gains `jackMutedFrames=`. There is no headphone output yet, so this is a test of the jack path, not a daily setting.
+- `GetHWLatency` now adds the DSP limiter's 24-frame lookahead.
+- Tests: `BceProtocolLogicTest` covers the `PROPERTY_CHANGED` parser, the listener builder and the reply check (12 new checks). All six host suites pass on gcc and clang.
+- The kernel code (work item, listener send, BufferStruct dump) is checked only by the CI WDK build. The hardware steps are in `GEMINI.md`, "▶ NEXT RUN", step 4.
+
 ### 2026-10-28 (Claude): all documentation translated to English; roadmap to full functionality
 
 - At the owner's request every document in the repository is now in English: the root files (`README.md`, `GEMINI.md`, `GEMINI_PROMPT.md`), `docs/*.md`, `docs/analysis/`, `docs/logs/`, `docs/archive/`.

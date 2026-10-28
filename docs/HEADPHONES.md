@@ -10,7 +10,7 @@
 
 1. **Done (2026-10-28, not tested on hardware):** during the BCE probe the driver finds `"Codec Output"` and logs
    `BCE probe: headphone jack device 0x… : PLUGGED/unplugged`. This will confirm the UID, the device id and the property read.
-2. **Mute the speakers while headphones are plugged in.** Subscribe with `PROPERTY_LISTENER`, handle `PROPERTY_CHANGED` in the `0x222020` handler (`T2AudioHandleVhciMessage`), and write silence into the speaker ring while plugged in. Logic only, no new audio path.
+2. **Implemented 2026-10-28, off by default, not tested on hardware:** `Parameters\JackEvents=1` (listener + jack re-read on every `PROPERTY_CHANGED`) and `Parameters\HeadphoneAutoMute=1` (speakers silent while plugged). `Parameters\ExtendedProbe=1` logs the `"Codec Output"` stream and its BufferStruct ring for step 3. Original plan: **Mute the speakers while headphones are plugged in.** Subscribe with `PROPERTY_LISTENER`, handle `PROPERTY_CHANGED` in the `0x222020` handler (`T2AudioHandleVhciMessage`), and write silence into the speaker ring while plugged in. Logic only, no new audio path.
 3. **A second audio endpoint, "Headphones".** A second WaveRT filter in PortCls, the `"Codec Output"` ring from BufferStruct (generalise `T2AudioFindSpeakerBuffer`), its `'pft '` format, START_IO/STOP_IO for its id, its own clock (`UPDATE_TIMESTAMP` by `dev`), without the speaker DSP. Plus `KSPROPERTY_JACK_DESCRIPTION`, so that Windows shows "plugged in / unplugged".
 4. Microphones work the same way, as an input stream (`set_input_stream_address_ranges` in KAIT2EN).
 

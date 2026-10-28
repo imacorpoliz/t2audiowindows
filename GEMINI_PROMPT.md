@@ -10,10 +10,10 @@ OWNER PERMISSIONS FOR THIS SESSION: sound is allowed; installing the driver in p
 Read: the "▶ NEXT RUN" block in GEMINI.md (steps 1–8 in order), docs/INSTALL.md, §1 "Hard rules", the first entry in docs/CURRENT_STATE.md.
 
 Goal: verify on hardware what Claude built for daily use:
-1) build 1.0.12.0 into packaging\ (signed .sys/.cat/.inf);
+1) build 1.0.12.0 from diagnostics (at least commit 40c1d6d) into packaging\ (signed .sys/.cat/.inf);
 2) install: T2Audio-Setup.ps1 -Action Install -Preset macos;
 3) ordinary reboot: the driver starts by itself, CrashGuardStrikes stays 0 (the main test);
-4) the headphone jack line in the log, with headphones plugged in and unplugged;
+4) headphones/mics groundwork (GEMINI.md step 4): jack line at probe; ExtendedProbe=1 (copy every 'BCE detail' and 'BufferStruct device' line into the report); JackEvents=1 (plug/unplug without restart -> PROPERTY_CHANGED + 'headphone jack PLUGGED/unplugged'); HeadphoneAutoMute=1 (speakers go silent while plugged, return on unplug); then all three back to 0;
 5) presets bright / loud / maxvolume / even / macos (even = autogain: is the level more even between a quiet and a loud recording, any "pumping"? autoGainDb10 from run summary);
 6) sleep (only with permission);
 7) T2Audio-Setup.ps1 -Action Uninstall: back to AppleAudio.

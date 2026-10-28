@@ -56,7 +56,7 @@ Nothing below can be trusted for daily use until this passes. The steps are in `
 | 2.6 | **Code hygiene:** remove the obsolete MDL-on-BAR path (S4), switch to `ExAllocatePool2`, fix the WDK code-analysis findings and make the CI analysis blocking (S6), INF defaults in `AddReg` (S3), packaging in CI (S2). | C, G | No behaviour change; CI must stay green. |
 | 2.7 | **Windows Update may reinstall AppleAudio** (Microsoft-signed, ranks higher). Options: the installer detects it and offers to re-run; a device-install restriction policy for the hardware id; or simply document it (current state). | C, O | Owner decides how intrusive this may be. |
 | 2.8 | **Formats:** only 48 kHz / 32-bit / stereo is offered. Shared mode is fine (the engine converts), but exclusive-mode apps asking for 44.1 kHz or 16/24-bit fail. Add 16- and 24-bit PCM (cheap) and, optionally, 44.1/96 kHz through `SET_PROPERTY 'nsrt'` (AppleAudio does this) with DSP tables per rate. | C, then G | 44.1 kHz needs a second set of DSP coefficients (the generator already takes the rate as input; the XTC FIR exists for 44.1/48/96). |
-| 2.9 | **Latency reporting:** add the limiter's 24 frames (0.5 ms) to `GetHWLatency`. | C | Trivial. |
+| 2.9 | **Latency reporting:** add the limiter's 24 frames (0.5 ms) to `GetHWLatency`. | C | ✅ done in code (40c1d6d). |
 
 ---
 
@@ -79,8 +79,8 @@ Plan in detail: [`HEADPHONES.md`](HEADPHONES.md). The kaiT2en driver shows the w
 | # | Item | Who | Notes |
 |---|---|---|---|
 | 4.1 | Jack read at probe | 🟡 | Verified in §1.4. |
-| 4.2 | **Jack events:** send `PROPERTY_LISTENER` (msg 11) for `'outp'/'jack'`; handle `PROPERTY_CHANGED` (msg 13) in the `0x222020` handler; re-read the property (AppleAudio only toggles a flag, then reads `GET_PROPERTY 'jack'`, `RE_appleaudio_protocol.md` §4). While plugged in, write silence to the speaker ring (speakers mute automatically). | C, then G | Parser + test first (`BceProtocolLogic.h`). |
-| 4.3 | **Probe the headphone stream:** log `GET_OUTPUT_STREAM_LIST`, `'pft '`, `'ltnc'`, `'saft'` for `"Codec Output"` and its BufferStruct ring (name, size). Read-only. | C, then G | Tells us the format (probably stereo S24_LE) before any write. |
+| 4.2 | 🟡 **Implemented behind `JackEvents` / `HeadphoneAutoMute` (40c1d6d), awaiting the hardware test.** **Jack events:** send `PROPERTY_LISTENER` (msg 11) for `'outp'/'jack'`; handle `PROPERTY_CHANGED` (msg 13) in the `0x222020` handler; re-read the property (AppleAudio only toggles a flag, then reads `GET_PROPERTY 'jack'`, `RE_appleaudio_protocol.md` §4). While plugged in, write silence to the speaker ring (speakers mute automatically). | C, then G | Parser + test first (`BceProtocolLogic.h`). |
+| 4.3 | 🟡 **Implemented as `ExtendedProbe` (40c1d6d), awaiting the hardware log.** **Probe the headphone stream:** log `GET_OUTPUT_STREAM_LIST`, `'pft '`, `'ltnc'`, `'saft'` for `"Codec Output"` and its BufferStruct ring (name, size). Read-only. | C, then G | Tells us the format (probably stereo S24_LE) before any write. |
 | 4.4 | **Second endpoint "Headphones":** a second WaveRT filter + topology with a headphone pin; generalise `T2AudioFindSpeakerBuffer`, the stream query, START_IO/STOP_IO and the clock anchor (today speaker-only) to per-device state; no speaker DSP (optionally a flat limiter). | C | The biggest code item. Keep the speaker path unchanged; behind a parameter until tested. |
 | 4.5 | **Jack reporting to Windows:** `KSPROPERTY_JACK_DESCRIPTION` with the connection state and a jack-change notification, so Windows shows the endpoint as plugged/unplugged and switches the default device. | C | |
 | 4.6 | Hardware test: plug/unplug while playing, both endpoints, sleep with headphones in. | G, O | Quiet levels first: headphones are far more sensitive than speakers. |
@@ -93,7 +93,7 @@ Two input devices: `"Digital Mic"` (`0x21`, the 3-microphone array) and `"Codec 
 
 | # | Item | Who | Notes |
 |---|---|---|---|
-| 5.1 | **Probe the input devices:** `GET_INPUT_STREAM_LIST` (msg 24), `'pft '`, `'ltnc'`, `'saft'`, `'inpt'/'jack'` for both devices; log only. | C, then G | Read-only. |
+| 5.1 | 🟡 **Covered by `ExtendedProbe` (40c1d6d).** **Probe the input devices:** `GET_INPUT_STREAM_LIST` (msg 24), `'pft '`, `'ltnc'`, `'saft'`, `'inpt'/'jack'` for both devices; log only. | C, then G | Read-only. |
 | 5.2 | **Buffer registration:** allocate a non-paged physically described buffer, write its page ranges into `BufferStruct.devices[i].input_streams[0]` (`num_input_streams`, `num_buffers`, `buffers[]`), send msg 18; repeat after D0. Pure layout code + host tests first. | C | Writes into device memory: new stage gate, own test plan. |
 | 5.3 | **Capture endpoint(s):** a WaveRT capture filter. Because the input buffer is host RAM, the WaveRT buffer can be the very buffer the T2 writes into (zero-copy), or a copy as on output. Clock from `UPDATE_TIMESTAMP` of the input device. | C | |
 | 5.4 | **Microphone DSP:** kaiT2en `dsp/profiles/16_1/mic.json` takes the 3 channels, sums them (a fixed beam), then a high-pass and an EQ biquad → mono. Small; port like the speaker tables (GPL-3 applies). Expose mono "Microphone Array" to Windows; optionally the raw 3 channels for apps that do their own processing. | C | |
