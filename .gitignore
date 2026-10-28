@@ -16,6 +16,12 @@ src/x64/
 src/Debug/
 src/Release/
 packaging/*.pdb
+# Built and signed driver binaries: produced by CI / local signing, never
+# committed (the tested hash goes into docs/CURRENT_STATE.md instead)
+packaging/*.sys
+packaging/*.cat
+*.exe
+*.ex
 
 # Visual Studio
 .vs/

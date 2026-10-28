@@ -11,7 +11,7 @@
 - **`tools/Test-WasapiTone.ps1`:** `-EndpointVolume 0.01..0.05` low-volume mode: requires an explicit `-DeviceId` (no fallback to another endpoint), refuses volume > 0.05 or amplitude > 0.1, un-mutes only after the volume reads back, and always re-mutes with volume 0 afterwards (`after run: endpoint mute=True volume=0`). Fixed: 32-bit integer mix formats were written as 16-bit samples.
 - **`tools/T2Audio-TestAgent.ps1`:** `-AudibleVolume <= 0.05` with a separate owner approval `-OwnerApprovedAudible`; needs `-BceIo -Mmio`, refused with `-RawChannels`; plays the tone only after the muted probe passed; output in `tone.txt`.
 - Not compiled on Windows yet (no C#/WDK in this environment): see `GEMINI.md` §7 S1.
-- Docs: root `SESSION_HANDOFF.md` reduced to a pointer; `GEMINI.md` §0/§6/§7 updated (Stage E procedure and builder TODO list).
+- Docs: stale root `SESSION_HANDOFF.md` removed; `GEMINI.md` §0/§6/§7 updated (Stage E procedure and builder TODO list).
 
 ### 2026-10-28: Stage D Repeat Hardware Verification (START_IO Protocol Fix, RUN Transition, Clock Lock, Clean STOP_IO) (PROVEN ON HARDWARE)
 

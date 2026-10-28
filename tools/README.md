@@ -9,7 +9,7 @@ Automated kernel debug log capture for T2AudioPort driver testing.
 - Windows with Administrator privileges
 - DbgViewCLI.exe (Microsoft Sysinternals DebugView CLI)
   - Download: https://learn.microsoft.com/en-us/sysinternals/downloads/debugview
-  - Expected location: `C:\Users\othysa\Desktop\mbp\DebugView\DbgViewCLI.exe`
+  - Looked up in this order: `$env:T2AUDIO_DBGVIEW`, `DebugView\DbgViewCLI.exe` next to the project folder (e.g. `mbp\DebugView\` for `mbp\T2AudioPort\`), `C:\Program Files\DebugView\`, then `PATH`
 
 ### Usage
 
@@ -78,7 +78,7 @@ Creates timestamped directory in `docs\logs\capture_YYYYMMDD_HHMMSS\`:
 
 **DbgViewCLI not found**
 - Download from official Microsoft Sysinternals link
-- Extract to `C:\Users\othysa\Desktop\mbp\DebugView\`
+- Extract next to the project (`..\DebugView\`) or set `$env:T2AUDIO_DBGVIEW` to the full path
 - Verify signature: `Get-AuthenticodeSignature DbgViewCLI.exe`
 
 **Running DebugView instances warning**

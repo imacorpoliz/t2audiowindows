@@ -42,20 +42,17 @@
 
 ---
 
-## 2. Планирование и рабочие журналы (docs/planning/)
+## 2. Архив (docs/archive/)
 
-| Документ | Описание |
+Устаревшие документы ранних этапов (октябрь 2026, до прохождения стадий B–D на железе). Хранятся только для истории: их выводы могут противоречить текущему коду. Актуальный статус — только в [CURRENT_STATE.md](CURRENT_STATE.md).
+
+| Каталог / документ | Что там |
 | :--- | :--- |
-| [PORT_PLAN.md](planning/PORT_PLAN.md) | Пошаговый план портирования драйвера из Linux в архитектуру Windows WDM/WaveRT. |
-| [T2_Windows_Implementation_Guide.md](planning/T2_Windows_Implementation_Guide.md) | Практическое руководство по реализации драйвера для Windows 10/11. |
-| [VERIFICATION_SUMMARY.md](planning/VERIFICATION_SUMMARY.md) | Сводка результатов тестирования и верификации на этапах проекта. |
-| [FINAL_REANALYSIS_REPORT.md](planning/FINAL_REANALYSIS_REPORT.md) | Итоговый ретроспективный отчет повторного анализа драйверного стека. |
-| [CURRENT_STATE.md](planning/CURRENT_STATE.md) | Снимок состояния кодовой базы и нерешенных задач на октябрь 2026. |
-| [CURRENT_STATUS.md](planning/CURRENT_STATUS.md) | Промежуточный статус-отчет по стадиям разработки. |
-| [WORK_LOG.md](planning/WORK_LOG.md) | Подробный хронологический журнал выполнения работ. |
-| [NOTES.md](planning/NOTES.md) | Заметки разработчика по аппаратуре, форматам и ограничениям T2. |
-| [DISASM_EVIDENCE.md](planning/DISASM_EVIDENCE.md) | Сводка ассемблерных доказательств по ключевым веткам кода. |
-| [RESEARCH_NOTES_INITIAL.md](planning/RESEARCH_NOTES_INITIAL.md) | Первоначальные рабочие заметки исследователя по 6-канальному звуку. |
+| [archive/planning/](archive/planning/) | Первоначальный план портирования, рабочие журналы, ранние статус-отчёты. |
+| [archive/research/](archive/research/) | Исходники ранних утилит разбора BufferStruct и кольца (бинарники удалены). |
+| [archive/DEBUGGING_LOG.md](archive/DEBUGGING_LOG.md) | Журнал отладки до 2026-10-07 (MapResources, BAR, топология). |
+| `archive/BAR_MAPPING_*`, `MAPRESOURCES_ROOT_CAUSE`, `RESOURCE_ANALYSIS`, `PHASE3_*`, `PHASE4_*`, `SESSION_COMPLETE`, `DIAGNOSTIC_SESSION_20261005`, `TOPOLOGY_BLOCKER_REPORT_20261006` | Разбор ранних блокеров запуска устройства — все решены. |
+| `archive/INSTALLATION_SUMMARY`, `PHASE*_COMPLETE`, `PROJECT_COMPLETE` | Ранние отчёты «готово», **не подтверждённые** железом. |
 
 ---
 

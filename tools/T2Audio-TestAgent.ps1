@@ -275,12 +275,18 @@ function Get-T2Endpoint {
     return $null
 }
 
+# DbgViewCLI: $env:T2AUDIO_DBGVIEW, then DebugView\ next to the project
+# (the mbp workspace layout), then Program Files, then PATH.
 function Get-DbgViewCli {
-    foreach ($p in @(
-        'C:\Program Files\DebugView\DbgViewCLI.exe',
-        'C:\Users\othysa\Desktop\mbp\DebugView\DbgViewCLI.exe')) {
-        if (Test-Path -LiteralPath $p) { return $p }
+    $candidates = @(
+        $env:T2AUDIO_DBGVIEW,
+        (Join-Path (Split-Path -Parent $ProjectRoot) 'DebugView\DbgViewCLI.exe'),
+        'C:\Program Files\DebugView\DbgViewCLI.exe')
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
     }
+    $cmd = Get-Command DbgViewCLI.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     return $null
 }
 

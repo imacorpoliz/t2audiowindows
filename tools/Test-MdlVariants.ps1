@@ -14,17 +14,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$DbgView = if (Test-Path 'C:\Program Files\DebugView\DbgViewCLI.exe') {
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$DbgView = @(
+    $env:T2AUDIO_DBGVIEW,
+    (Join-Path (Split-Path -Parent $ProjectRoot) 'DebugView\DbgViewCLI.exe'),
     'C:\Program Files\DebugView\DbgViewCLI.exe'
-} else {
-    'C:\Users\othysa\Desktop\mbp\DebugView\DbgViewCLI.exe'
-}
-$Probe = 'C:\Users\othysa\Desktop\mbp\T2AudioPort\tools\Test-WasapiRender.ps1'
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $DbgView) { throw 'DbgViewCLI.exe not found (set $env:T2AUDIO_DBGVIEW)' }
+$Probe = Join-Path $PSScriptRoot 'Test-WasapiRender.ps1'
 $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters'
 if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
 
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$outDir = "C:\Users\othysa\Desktop\mbp\T2AudioPort\docs\logs\mdlvariants_$stamp"
+$outDir = Join-Path $ProjectRoot "docs\logs\mdlvariants_$stamp"
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 Write-Output "output: $outDir"
 

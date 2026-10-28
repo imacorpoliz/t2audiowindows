@@ -39,11 +39,12 @@ $projectRoot = Split-Path -Parent $scriptRoot
 
 # Locate DbgViewCLI
 $dbgViewCLI = @(
+    $env:T2AUDIO_DBGVIEW,
     "$scriptRoot\..\DebugView\DbgViewCLI.exe",
-    "C:\Users\othysa\Desktop\mbp\DebugView\DbgViewCLI.exe",
+    "$projectRoot\..\DebugView\DbgViewCLI.exe",
     "C:\Program Files\DebugView\DbgViewCLI.exe",
     "C:\Tools\DebugView\DbgViewCLI.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 
 if (-not $dbgViewCLI) {
     Write-Error "DbgViewCLI.exe not found. Download from https://learn.microsoft.com/en-us/sysinternals/downloads/debugview"
