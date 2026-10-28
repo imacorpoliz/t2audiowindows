@@ -26,6 +26,14 @@
 #define T2_START_NS   40000000ull               // T2 starts ~40 ms after START_IO
 #define DELIVERY_NS   2000000ull                // timestamp delivery delay
 #define MARKER_MASK   0x3FFFFFu
+#define UPTIME_NS     179280000000000ull        // ~49.8 h, as in the 2026-10-28 Stage E run
+
+// Scenario knobs for the hostTime path (see simulate()).
+#define HOST_TRUE     0   // hostTime correct (uptime < 25.6 h)
+#define HOST_GARBAGE  1   // hostTime unusable (far off)
+#define HOST_WRAPPED  2   // AppleUSBVHCI's qpc*1e7 wrap at ~49.8 h uptime
+static unsigned long long g_firstLateNs = 0;   // extra delay of the first timestamp
+static int g_unwrap = 1;                       // driver unwraps hostTime (BceTransport.c)
 
 static int g_failures = 0;
 
@@ -70,7 +78,7 @@ static unsigned long long t2_time_of(unsigned long long f, long long t2Ppb)
 }
 
 static SIM_RESULT simulate(long long t2Ppb, unsigned long long seconds,
-                           int rateTracking, int implausibleHostTime)
+                           int rateTracking, int hostMode)
 {
     static unsigned int ring[HW_FRAMES * 6u];
     static unsigned int src[SRC_FRAMES * 2u];
@@ -107,14 +115,28 @@ static SIM_RESULT simulate(long long t2Ppb, unsigned long long seconds,
         unsigned long long playFrame, frame, pending, readNow;
 
         // bridgeOS: one UPDATE_TIMESTAMP per lap, delivered DELIVERY_NS later.
-        while (t2_time_of(nextLap, t2Ppb) + DELIVERY_NS <= now) {
+        for (;;) {
+            unsigned long long late = (nextLap == HW_FRAMES) ? g_firstLateNs : 0;
             unsigned long long hostNs = t2_time_of(nextLap, t2Ppb);
-            unsigned long long recvNs = hostNs + DELIVERY_NS;
-            // A wrapped hostTime (AppleUSBVHCI's QPC*1e7 overflow) is
-            // implausible; the driver then anchors on the reception time.
-            unsigned long long sentNs = implausibleHostTime ? 18446701622728035531ull : hostNs;
+            unsigned long long recvNs = hostNs + DELIVERY_NS + late;
+            // Absolute host times (the driver sees QPC since boot).
+            unsigned long long absHost = UPTIME_NS + hostNs;
+            unsigned long long absRecv = UPTIME_NS + recvNs;
+            unsigned long long sentNs, usedNs;
 
-            clkFrames = T2AudioClockFramesAtReception(nextLap, sentNs, recvNs, RATE);
+            if (recvNs > now) {
+                break;
+            }
+            if (hostMode == HOST_GARBAGE) {
+                sentNs = 18446701622728035531ull;
+            } else if (hostMode == HOST_WRAPPED) {
+                sentNs = absHost - T2AudioClockHostTimeWrapNs(QPC_FREQ);
+            } else {
+                sentNs = absHost;
+            }
+            // BceTransport.c: unwrap, then advance the anchor to reception.
+            usedNs = g_unwrap ? T2AudioClockUnwrapHostTime(sentNs, absRecv, QPC_FREQ) : sentNs;
+            clkFrames = T2AudioClockFramesAtReception(nextLap, usedNs, absRecv, RATE);
             clkQpc = recvNs / 100u;
             gen++;
             nextLap += HW_FRAMES;
@@ -276,10 +298,47 @@ int main(void)
     report("+300 ppm, 10 min", &a);
     check("+300 ppm: at most 2 re-aims", a.ReAims <= 2);
 
-    a = simulate(80000, 600, 1, 1);
-    report("+80 ppm, wrapped hostTime, 10 min", &a);
+    a = simulate(80000, 600, 1, HOST_GARBAGE);
+    report("+80 ppm, unusable hostTime, 10 min", &a);
     check("wrapped hostTime: at most 2 re-aims", a.ReAims <= 2);
     check("wrapped hostTime: no out-of-bounds copy", a.OutOfBounds == 0);
+
+    // Reproduces the 2026-10-28 Stage E log: ~50 h uptime (wrapped hostTime)
+    // and the first timestamp ~13 ms late -> re-aims -17xx then +6xx.
+    printf("Stream start with wrapped hostTime and a late first timestamp\n");
+    g_firstLateNs = 13000000ull;
+    g_unwrap = 0;
+    a = simulate(10000, 20, 0, HOST_WRAPPED);
+    report("old driver (no unwrap), 10 ppm", &a);
+    check("old driver: second re-aim at start (as on hardware)", a.ReAims == 2);
+    g_unwrap = 1;
+    a = simulate(10000, 20, 0, HOST_WRAPPED);
+    report("with unwrap, 10 ppm", &a);
+    check("unwrap: a single re-aim at start", a.ReAims == 1);
+    check("unwrap: no gap after the start", a.Discontinuities <= 1);
+    a = simulate(10000, 20, 0, HOST_TRUE);
+    report("correct hostTime, 10 ppm", &a);
+    check("correct hostTime: a single re-aim at start", a.ReAims == 1);
+    g_firstLateNs = 0;
+
+    printf("T2AudioClockUnwrapHostTime\n");
+    {
+        unsigned long long w = T2AudioClockHostTimeWrapNs(QPC_FREQ);
+        unsigned long long raw = 18446738975408907977ull;   // logged t2 at ~49.8 h
+        unsigned long long recv = 179280000000000ull;
+        unsigned long long u = T2AudioClockUnwrapHostTime(raw - 0, w - 5098300643639ull + 2000000ull, QPC_FREQ);
+
+        check("wrap period at 10 MHz = 2^64 * 1e-5 ns", w == 184467440737095ull);
+        check("logged wrapped value unwraps next to reception",
+              u == raw + w && T2AudioClockHostTimePlausible(u, w - 5098300643639ull + 2000000ull));
+        check("plausible hostTime unchanged",
+              T2AudioClockUnwrapHostTime(recv - 2000000ull, recv, QPC_FREQ) == recv - 2000000ull);
+        check("garbage stays garbage (caller falls back)",
+              T2AudioClockUnwrapHostTime(18446701622728035531ull, 1000000000ull, QPC_FREQ) ==
+                  18446701622728035531ull);
+        check("future hostTime not moved",
+              T2AudioClockUnwrapHostTime(recv + 5000000ull, recv, QPC_FREQ) == recv + 5000000ull);
+    }
 
     printf("T2AudioTicksToFramesPpb / T2AudioClockDriftPpb\n");
     check("ppb 0 matches T2AudioTicksToFrames",

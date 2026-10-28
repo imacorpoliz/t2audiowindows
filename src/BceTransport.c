@@ -896,6 +896,7 @@ T2AudioHandleVhciMessage(
             LARGE_INTEGER qpc, qpcFreq;
             ULONG64 anchorFrames;
             ULONG64 receptionNs;
+            ULONG64 hostNs;
             KIRQL oldIrql;
 
             // hostTime is on the host clock AppleUSBVHCI publishes to the T2
@@ -904,7 +905,13 @@ T2AudioHandleVhciMessage(
             // T2AudioClockFramesAtReception).
             qpc = KeQueryPerformanceCounter(&qpcFreq);
             receptionNs = T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart);
-            anchorFrames = T2AudioClockFramesAtReception(frames, timestamp,
+            // After ~25.6 h of uptime VHCI's hostTime has wrapped; undo it so
+            // the delivery delay still counts (the first timestamp after
+            // START_IO arrives ~13 ms late, which otherwise costs a second
+            // re-aim and an audible gap). The raw value is still logged.
+            hostNs = T2AudioClockUnwrapHostTime(timestamp, receptionNs,
+                                                (ULONG64)qpcFreq.QuadPart);
+            anchorFrames = T2AudioClockFramesAtReception(frames, hostNs,
                                                          receptionNs, 48000);
 
             KeAcquireSpinLock(&Context->ClockLock, &oldIrql);
@@ -913,7 +920,7 @@ T2AudioHandleVhciMessage(
             Context->LastT2UpdateSeed = seed;
             Context->ClockAnchorFrames = anchorFrames;
             Context->ClockAnchorQpc = (ULONG64)qpc.QuadPart;
-            Context->ClockAnchorNs = T2AudioClockAnchorNs(timestamp, receptionNs);
+            Context->ClockAnchorNs = T2AudioClockAnchorNs(hostNs, receptionNs);
             Context->ClockGeneration++;
             KeReleaseSpinLock(&Context->ClockLock, oldIrql);
         }

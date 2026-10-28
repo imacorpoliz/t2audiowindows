@@ -39,6 +39,8 @@
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo   # + START_IO (owner only, muted)
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
 #       -AudibleVolume 0.03 -OwnerApprovedAudible        # Stage E: quiet tone (owner only)
+#   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
+#       -Listen -OwnerApprovedAudible                     # driver stays on until Enter (owner listens)
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 5 -Mmio   # + BAR1 writes (risky)
 #   .\T2Audio-TestAgent.ps1 -Mode Recover
 
@@ -71,21 +73,27 @@ param(
 
     # Stage E (first audible run). After the muted probe, play a quiet tone
     # (tools\Test-WasapiTone.ps1) with the T2 endpoint un-muted at this
-    # volume (0.01..0.05); the endpoint is muted with volume 0 again when the
+    # volume (0.01..0.25); the endpoint is muted with volume 0 again when the
     # tone ends. -1 (default) keeps the run silent. Needs -BceIo -Mmio and the
     # owner's separate approval -OwnerApprovedAudible. The driver also cuts
-    # every sample by Parameters\OutputAttenuation (default -18 dB).
-    [ValidateRange(-1.0, 0.05)]
+    # every sample by Parameters\OutputAttenuation (default -6 dB).
+    [ValidateRange(-1.0, 0.25)]
     [double]$AudibleVolume = -1.0,
 
-    # The machine owner's explicit approval for -AudibleVolume.
+    # The machine owner's explicit approval for -AudibleVolume and -Listen.
     [switch]$OwnerApprovedAudible,
 
-    # Tone for -AudibleVolume: frequency (Hz), length (s), amplitude (<= 0.1).
+    # Listening session: start the driver (needs -Mmio -BceIo and both owner
+    # approvals), skip the probe and the tone, and keep the device running
+    # until Enter is pressed; the owner plays any audio meanwhile. The kernel
+    # log is captured for the whole session. Cleanup is the same as always.
+    [switch]$Listen,
+
+    # Tone for -AudibleVolume: frequency (Hz), length (s), amplitude (<= 0.3).
     [double]$ToneFrequency = 440.0,
     [double]$ToneSeconds = 3.0,
-    [ValidateRange(0.0, 0.1)]
-    [double]$ToneAmplitude = 0.05,
+    [ValidateRange(0.0, 0.3)]
+    [double]$ToneAmplitude = 0.2,
 
     # Channel for the tone (-1 = all). With -RawChannels (speaker layout
     # check, GEMINI.md §6.2) a single channel and >= 1 kHz are required:
@@ -418,6 +426,19 @@ function Invoke-Test {
         Write-Fail '-BceIo requires -Mmio (otherwise the T2 plays stale ring contents).'
         exit 1
     }
+    if ($Listen) {
+        if (-not ($BceIo -and $Mmio -and $OwnerApprovedAudible)) {
+            Write-Fail '-Listen needs -Mmio -BceIo -OwnerApprovedBceIo -OwnerApprovedAudible.'
+            exit 1
+        }
+        if ($RawChannels -or $AudibleVolume -ge 0.0) {
+            Write-Fail '-Listen is refused with -RawChannels or -AudibleVolume.'
+            exit 1
+        }
+        # Capture until Enter; the capture process is stopped at cleanup.
+        $CaptureSeconds = 86400
+        Write-Warn 'Listening session: the T2 driver stays enabled until you press Enter.'
+    }
     $audible = ($AudibleVolume -ge 0.0)
     if ($audible) {
         if (-not ($BceIo -and $Mmio)) {
@@ -511,7 +532,21 @@ function Invoke-Test {
 
         $endpoint = $DeviceId
         if (-not $endpoint) { $endpoint = Get-T2Endpoint -InstanceId $instanceId }
-        if (-not $endpoint) {
+        if ($Listen) {
+            Write-Host ''
+            Write-Host '  The T2 driver is running. To listen:' -ForegroundColor Cyan
+            Write-Host '   1. Sound settings: choose the T2 speakers as the output device.' -ForegroundColor Cyan
+            Write-Host '   2. Earlier probes left that endpoint MUTED at volume 0: unmute it and' -ForegroundColor Cyan
+            Write-Host '      raise the volume slowly (start at 5-10 %).' -ForegroundColor Cyan
+            Write-Host '   3. Play anything. Note when you hear crackles (time of day).' -ForegroundColor Cyan
+            Write-Host "  Endpoint: $endpoint" -ForegroundColor Gray
+            $listenStart = Get-Date
+            Read-Host '  Press Enter to stop the T2 driver (the device is then disabled; restore AppleAudio afterwards)'
+            $listenMinutes = [math]::Round(((Get-Date) - $listenStart).TotalMinutes, 1)
+            "listen session: $listenStart, $listenMinutes min" | Out-File (Join-Path $captureDir 'listen.txt') -Encoding utf8
+            Write-Info "Listened for $listenMinutes min."
+            $endpoint = $null   # no probe after listening
+        } elseif (-not $endpoint) {
             Write-Warn 'Could not discover T2 render endpoint; probe skipped.'
         } else {
             Write-Info "Endpoint    : $endpoint"
@@ -556,6 +591,11 @@ function Invoke-Test {
         $disableCode = Set-DeviceStateBounded -InstanceId $instanceId -Action 'disable'
 
         if ($proc) {
+            if ($Listen) {
+                # Give DbgView a moment to flush the teardown lines, then stop it.
+                Start-Sleep -Seconds 3
+                if (-not $proc.HasExited) { $proc.Kill() }
+            }
             $proc.WaitForExit(($CaptureSeconds + 30) * 1000) | Out-Null
             if (-not $proc.HasExited) { $proc.Kill() }
             $raw = Join-Path $captureDir 'kernel_raw.csv'

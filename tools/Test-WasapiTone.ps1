@@ -5,9 +5,9 @@
 # mirror (T2AudioStreamCopyTick) has real samples to deliver to the hardware.
 # Listen for the tone to confirm end-to-end playback.
 #
-# Stage E (first audible run, GEMINI.md): pass -EndpointVolume 0.02..0.05.
+# Stage E (first audible run, GEMINI.md): pass -EndpointVolume 0.02..0.25.
 # The probe then requires an explicit -DeviceId (no fallback to another
-# endpoint), refuses an endpoint volume above 0.05 or an amplitude above 0.1,
+# endpoint), refuses an endpoint volume above 0.25 or an amplitude above 0.3,
 # un-mutes the T2 endpoint at that volume only after reading it back, and
 # mutes it again with volume 0 when the tone ends (also on errors). Without
 # -EndpointVolume the endpoint volume and mute are left as they are.
@@ -115,9 +115,10 @@ public interface IAudioRenderClient {
 public static class Tone {
     static string H(int hr) { return "0x" + ((uint)hr).ToString("X8"); }
 
-    // Stage E limits (GEMINI.md): low endpoint volume and a quiet tone.
-    public const double MaxEndpointVolume = 0.05;
-    public const double MaxLowVolumeAmplitude = 0.1;
+    // Stage E limits (GEMINI.md). Raised after the 2026-10-28 run, where
+    // 0.03 x 0.05 x the driver's -18 dB (about -80 dB) was inaudible.
+    public const double MaxEndpointVolume = 0.25;
+    public const double MaxLowVolumeAmplitude = 0.3;
 
     static IAudioEndpointVolume EndpointVolume(IMMDevice device, StringBuilder sb) {
         Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");

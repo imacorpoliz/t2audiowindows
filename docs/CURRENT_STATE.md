@@ -1,9 +1,22 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
-**Last Updated**: 2026-10-28 (Stage E Complete)  
+**Last Updated**: 2026-10-28 (after Stage E; Claude analysis and fixes, see the first entry)  
 **Current status**: **STAGE E FIRST SOUND ACHIEVED (PROVEN ON HARDWARE).** Physical sound successfully produced on MacBookPro16,1 on bare-metal Windows via custom T2Audio driver! Streams verified both via WASAPI automated tone and live Windows system audio. Complete stability: zero BSODs, clean START_IO and STOP_IO. Owner acoustic observations recorded: sound is present, flat, occasionally crackles, and not very loud. Deep analysis and action plan documented in [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).  
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
-**Physical Machine Status**: MacBookPro16,1 running official [`AppleAudio.sys`](file:///C:/Windows/System32/drivers/AppleAudio.sys) (Status OK).
+**Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+
+### 2026-10-28 (after Stage E): log analysis; start-of-stream gap fixed; listening mode; copy-timing counters (source only, not hardware-tested)
+
+Analysis of `docs/logs/EXCERPT_20261028_143928.md` and the owner's report ("звука в тесте не было"; live playback: flat, sometimes crackles, not loud):
+
+- **The automated tone was inaudible by design error (Claude):** endpoint volume 0.03 × tone amplitude 0.05 × `OutputAttenuation=3` (−18 dB) ≈ −80 dB. The kernel log of that run is nevertheless normal (START_IO, RUN, timestamps, copy, STOP_IO). The sound the owner heard came from the later live-playback session with `OutputAttenuation=1`.
+- **Clock drift is NOT the likely crackle cause (correction to the entry below):** the T2 timestamps of the run give a drift of about **+10 ppm** (lap intervals 346.656–346.671 ms vs 346.667 ms nominal). At 10 ppm the lead leaves the ±500-frame window only after ~18 minutes, so drift re-aims are rare. `ClockRateTracking` still removes them, but it does not explain "sometimes".
+- **Found: an audible gap at the start of every stream.** Each RUN logs two re-aims: `-1748` then `+615` (Stage D: `-1906`, `+768`). The second one zero-fills ~13 ms in the middle of the audio. Cause: uptime was ~49.8 h, so VHCI's `hostTime` had wrapped (`qpc*1e7` overflow, value `2^64 − 5.1·10^12`); the driver then anchors on the reception time, and the first timestamp after START_IO arrives ~13 ms late (#1→#2 received 333 ms apart, hostTime 346.67 ms apart). Windows starts and stops the render stream often, hence "sometimes".
+- **Fix:** `T2AudioClockUnwrapHostTime` (`src/T2AudioSpeakerLogic.h`) moves a wrapped hostTime back by whole wrap periods (`2^64·100/freq` ns, 51.2 h at 10 MHz) next to the reception time; used in `BceTransport.c` before the anchor is computed. A plausible hostTime is returned unchanged, so machines with < 25.6 h uptime are unaffected. `tests/T2AudioPipelineTest.c` reproduces the hardware log (old driver: 2 re-aims and a gap; with unwrap: 1 re-aim, no gap) and checks the logged value unwraps to ~49.8 h.
+- **Second suspect, now measured:** DPC latency. If no copy runs for longer than the lead (~20.8 ms), the T2 plays stale ring data. New per-run log line when leaving RUN: `run summary: reAims=… rateUpdates=… ratePpb=… maxCopyGapUs=… gaps>10ms=… gaps>lead=… skips=…`. `gaps>lead` > 0 or `skips` > 0 point to DPC latency (fix would be a larger lead).
+- **Listening mode:** `T2Audio-TestAgent.ps1 … -Listen -OwnerApprovedAudible` starts the driver, skips probe and tone, and keeps it running until Enter while the kernel log is captured.
+- **Levels:** `OutputAttenuation` default 3 → **1** (−6 dB, the value the owner listened at); tone limits raised to endpoint volume ≤ 0.25, amplitude ≤ 0.3 (default 0.2).
+- "Not loud": besides the −6 dB cut, Windows' endpoint volume and the missing DSP/loudness processing (F1/F2). Whether AppleAudio also sets amplifier gain over BCE is open (R7).
 
 ### 2026-10-28: Stage E Hardware Verification — First Sound Achieved! (PROVEN ON HARDWARE)
 
@@ -16,7 +29,7 @@
 - **Physical Acoustic Observations (Owner):**
   - **Звук есть (Sound present):** Core audio engine, DMA buffer mirroring, and co-processor stream confirmed operational.
   - **Плоский (Flat):** Expected due to absence of Apple's CoreAudio DSP/EQ and speaker compensation curves (Task F1).
-  - **Иногда хрепит (Occasional crackles):** Exactly matches the predicted clock-drift behavior from `tests/T2AudioPipelineTest.c` when `ClockRateTracking=0`. Periodic re-aiming across crystal offset causes micro-discontinuities (Task E3).
+  - **Иногда хрепит (Occasional crackles):** *(Corrected in the entry above: measured drift is ~10 ppm, so this is more likely the start-of-stream re-aim gap or DPC latency.)* Exactly matches the predicted clock-drift behavior from `tests/T2AudioPipelineTest.c` when `ClockRateTracking=0`. Periodic re-aiming across crystal offset causes micro-discontinuities (Task E3).
   - **Не особо громкий (Low volume):** Result of conservative OutputAttenuation=1 (-6 dB) safety cut and unconfigured hardware smart-amp gain registers (Task R7).
 - **Post-Test Recovery (PASS):** Package cleanly uninstalled, device disabled and re-bound to official `AppleAudio.sys` (`oem16.inf`, Status: OK). Sound scheme restored to `.Default`.
 
@@ -37,7 +50,7 @@
 
 ### 2026-10-28 (evening): Stage E preparation - output attenuation, low-volume tone tooling (source only, not hardware-tested)
 
-- **Driver:** new `Parameters\OutputAttenuation` (6 dB steps, default 3 = -18 dB, 0 = off, clamped to 16), applied to every sample on both the stereo path (`T2AudioRenderStereoToSpeakers`, new `AttenuationShift` argument) and the raw 6-channel path (added to `SpeakerSampleShift`). Logged as `mode parameters: ... OutputAttenuation=3 (-18 dB)`. Host tests extended (`tests/T2AudioSpeakerLogicTest.c`, "Output attenuation"); gcc and clang pass locally. The kernel build has not been compiled yet (CI / builder).
+- **Driver:** new `Parameters\OutputAttenuation` (6 dB steps, default 3 = -18 dB (changed to 1 after Stage E), 0 = off, clamped to 16), applied to every sample on both the stereo path (`T2AudioRenderStereoToSpeakers`, new `AttenuationShift` argument) and the raw 6-channel path (added to `SpeakerSampleShift`). Logged as `mode parameters: ... OutputAttenuation=3 (-18 dB)`. Host tests extended (`tests/T2AudioSpeakerLogicTest.c`, "Output attenuation"); gcc and clang pass locally. The kernel build has not been compiled yet (CI / builder).
 - **`tools/Test-WasapiTone.ps1`:** `-EndpointVolume 0.01..0.05` low-volume mode: requires an explicit `-DeviceId` (no fallback to another endpoint), refuses volume > 0.05 or amplitude > 0.1, un-mutes only after the volume reads back, and always re-mutes with volume 0 afterwards (`after run: endpoint mute=True volume=0`). Fixed: 32-bit integer mix formats were written as 16-bit samples.
 - **`tools/T2Audio-TestAgent.ps1`:** `-AudibleVolume <= 0.05` with a separate owner approval `-OwnerApprovedAudible`; needs `-BceIo -Mmio`, refused with `-RawChannels`; plays the tone only after the muted probe passed; output in `tone.txt`.
 - Not compiled on Windows yet (no C#/WDK in this environment): see `GEMINI.md` §7 S1.

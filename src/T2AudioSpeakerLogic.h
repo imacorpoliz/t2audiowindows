@@ -28,11 +28,12 @@
 
 // Output safety attenuation, in 6 dB steps (an arithmetic right shift of the
 // host sample before it reaches any speaker). While the driver is
-// experimental the default keeps the speakers at -18 dB below what Windows
-// asks for: the first audible runs (Stage E) must not drive the small woofers
-// to full excursion if a volume or format error slips through. 0 disables it;
+// experimental the default keeps the speakers 6 dB below what Windows asks
+// for, so a volume or format error cannot drive the small woofers to full
+// excursion. The owner listened at 1 (-6 dB) on 2026-10-28 ("not very
+// loud", no harshness); the first runs used 3 (-18 dB). 0 disables it;
 // values above the maximum are clamped (-96 dB is silence for 24-bit).
-#define T2AUDIO_ATTENUATION_DEFAULT    3u
+#define T2AUDIO_ATTENUATION_DEFAULT    1u
 #define T2AUDIO_ATTENUATION_MAX        16u
 
 static __inline unsigned int
@@ -244,6 +245,64 @@ T2AudioClockHostTimePlausible(unsigned long long HostTimeNs,
 {
     return HostTimeNs <= ReceptionNs &&
            ReceptionNs - HostTimeNs <= T2AUDIO_CLOCK_MAX_DELIVERY_NS;
+}
+
+// AppleUSBVHCI publishes hostTime as (s64)(qpc * 1e7) / freq * 100 ns, so the
+// 64-bit product wraps (signed) after ~25.6 h of uptime at 10 MHz and the
+// value jumps by -2^64 * 100 / freq ns (docs/analysis/RE_speaker_layout_and_clock.md
+// §1; confirmed on hardware at ~39 h and ~50 h uptime). The wrap period in ns
+// for a QPC frequency:
+static __inline unsigned long long
+T2AudioClockHostTimeWrapNs(unsigned long long QpcFrequency)
+{
+    unsigned long long q, r;
+
+    if (QpcFrequency == 0) {
+        return 0;
+    }
+    // 2^64 = q * freq + r
+    q = 0xFFFFFFFFFFFFFFFFull / QpcFrequency;
+    r = 0xFFFFFFFFFFFFFFFFull % QpcFrequency + 1u;
+    if (r == QpcFrequency) {
+        q++;
+        r = 0;
+    }
+    return q * 100u + (r * 100u) / QpcFrequency;
+}
+
+// Undo that wrap: returns the hostTime moved by a whole number of wrap
+// periods so that it lands next to our reception time, if the result is
+// plausible; otherwise HostTimeNs unchanged (the caller then anchors on the
+// reception time as before). A hostTime that is already plausible is
+// returned as is, so this never changes a correct value.
+static __inline unsigned long long
+T2AudioClockUnwrapHostTime(unsigned long long HostTimeNs,
+                           unsigned long long ReceptionNs,
+                           unsigned long long QpcFrequency)
+{
+    unsigned long long wrap = T2AudioClockHostTimeWrapNs(QpcFrequency);
+    long long hs = (long long)HostTimeNs;
+    long long diff;
+    unsigned long long k, candidate;
+
+    if (T2AudioClockHostTimePlausible(HostTimeNs, ReceptionNs) || wrap == 0 ||
+        ReceptionNs > 0x3FFFFFFFFFFFFFFFull) {
+        return HostTimeNs;
+    }
+    // hs is within +-wrap/2 (|hs| < 2^63 * 100 / freq); diff fits in 63 bits.
+    if (hs < -(long long)(wrap / 2u) - 1 || hs > (long long)(wrap / 2u) + 1) {
+        return HostTimeNs;
+    }
+    diff = (long long)ReceptionNs - hs;
+    if (diff <= 0) {
+        return HostTimeNs;
+    }
+    k = ((unsigned long long)diff + wrap / 2u) / wrap;
+    if (k == 0) {
+        return HostTimeNs;
+    }
+    candidate = (unsigned long long)(hs + (long long)(k * wrap));
+    return T2AudioClockHostTimePlausible(candidate, ReceptionNs) ? candidate : HostTimeNs;
 }
 
 // Time (our ns) an anchor stands for: hostTime when plausible, else reception.

@@ -64,6 +64,16 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG64 DriftBaseFrames;
     ULONG64 DriftBaseNs;
     ULONG RateUpdates;
+    // Copy-timing diagnostics for this run (logged when leaving RUN): the
+    // longest gap between two ring writes and how many gaps exceeded 10 ms
+    // and the lead (T2AUDIO_LEAD_FRAMES, ~20.8 ms; the T2 may then read
+    // stale ring data, an audible crackle), plus client-buffer overruns
+    // (frames skipped because the copy fell more than a buffer behind).
+    ULONG64 LastCopyQpc;
+    ULONG MaxCopyGapUs;
+    ULONG CopyGapsOver10ms;
+    ULONG CopyGapsOverLead;
+    ULONG SkipEvents;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
     KTIMER CopyTimer;
@@ -277,6 +287,27 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
         ULONG remainingFrames = (ULONG)pendingFrames;
         ULONG hwFrames = (ULONG)context->SpeakerBufferSize / T2AUDIO_RING_BYTES_PER_FRAME;
+
+        // Diagnostics only: time since the previous ring write.
+        if (instance->LastCopyQpc != 0 && (ULONG64)qpc.QuadPart > instance->LastCopyQpc &&
+            qpcFreq.QuadPart > 0) {
+            ULONG64 gapUs = (((ULONG64)qpc.QuadPart - instance->LastCopyQpc) * 1000000ull) /
+                            (ULONG64)qpcFreq.QuadPart;
+
+            if (gapUs > instance->MaxCopyGapUs) {
+                instance->MaxCopyGapUs = (gapUs > MAXULONG) ? MAXULONG : (ULONG)gapUs;
+            }
+            if (gapUs > 10000ull) {
+                instance->CopyGapsOver10ms++;
+            }
+            if (gapUs * instance->SampleRate > (ULONG64)T2AUDIO_LEAD_FRAMES * 1000000ull) {
+                instance->CopyGapsOverLead++;
+            }
+        }
+        instance->LastCopyQpc = (ULONG64)qpc.QuadPart;
+        if (skippedFrames != 0) {
+            instance->SkipEvents++;
+        }
 
         // Silence the ring slots of skipped frames. Left alone they still hold
         // audio from the previous lap (~347 ms earlier), which the T2 would
@@ -673,6 +704,12 @@ T2AudioStreamSetState(
                 // START_IO restarts the T2: measure its rate afresh.
                 instance->RatePpb = 0;
                 instance->DriftBaseValid = FALSE;
+                instance->LastCopyQpc = 0;
+                instance->MaxCopyGapUs = 0;
+                instance->CopyGapsOver10ms = 0;
+                instance->CopyGapsOverLead = 0;
+                instance->SkipEvents = 0;
+                instance->ClockCorrections = 0;
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
                                                       (ULONG64)qpcFreq.QuadPart);
                 if (instance->LastCopiedFrame == 0) {
@@ -711,6 +748,11 @@ T2AudioStreamSetState(
                  State, instance->GetPositionCalls,
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
+        // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u\n",
+                 instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
+                 instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
+                 instance->CopyGapsOverLead, instance->SkipEvents));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 
