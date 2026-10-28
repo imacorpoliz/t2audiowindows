@@ -1,4 +1,4 @@
-﻿# T2AudioPort - установщик и настройка звука (MacBookPro16,1).
+# T2AudioPort - установщик и настройка звука (MacBookPro16,1).
 #
 # Меню (запуск без параметров) или параметры:
 #   .\T2Audio-Setup.ps1                                  # интерактивное меню
@@ -369,6 +369,7 @@ function Write-PresetValues($name) {
 function Get-EffectiveParam($name) {
     $v = Get-Param $name
     if ($null -eq $v) { return [int]$ParamDefaults[$name] }
+    if ($v -gt [int]::MaxValue) { return [int]($v - 0x100000000) }
     return [int]$v
 }
 
