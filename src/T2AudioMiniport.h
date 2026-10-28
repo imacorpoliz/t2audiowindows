@@ -89,6 +89,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // before D3) sends the one matching STOP_IO.
     volatile LONG HardwareIoActive;
     ULONG64 BceSpeakerDeviceId;
+    // Headphone jack (first step, read-only): the BCE device "Codec Output"
+    // and its 'jack' state at probe time (1 = plugged). Logged only; the
+    // headphone output itself is not driven yet (docs/HEADPHONES.md).
+    ULONG64 BceHeadphoneDeviceId;
+    ULONG HeadphoneJackPlugged;
     BOOLEAN BceProbed;
     // Speaker output stream as reported by the T2 (BCE probe, stage 3+).
     // SpeakerFormatValid is set only when its 'pft ' physical format was read
@@ -163,6 +168,13 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // is set, and the copy DPC never writes device memory unless
     // MmioCopyEnabled is set. On a normal boot neither is present.
     BOOLEAN TestModeEnabled;
+    // Persistent mode (Parameters\EnableProduction=1, no TestSession): the
+    // driver runs the stage-5 + BCE I/O configuration on every boot under the
+    // crash guard (T2AudioCrashGuard.h). CrashGuardArmed mirrors the registry
+    // flag; ShutdownRegistered tracks IoRegisterShutdownNotification.
+    BOOLEAN ProductionMode;
+    BOOLEAN CrashGuardArmed;
+    BOOLEAN ShutdownRegistered;
     BOOLEAN MmioCopyEnabled;
     // Whether SetState may actually issue START_IO/STOP_IO (session
     // EnableBceIo=1). Off by default, so stage 4 can wire the speaker and hold
@@ -220,6 +232,7 @@ NTSTATUS T2AudioMapResources(
     _In_ PRESOURCELIST ResourceList);
 
 VOID T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioCrashGuardSetArmed(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ BOOLEAN Armed);
 
 NTSTATUS T2AudioFindSpeakerBuffer(
     _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,

@@ -1,5 +1,6 @@
 #include "T2AudioMiniport.h"
 #include "T2AudioSpeakerLogic.h"
+#include "T2AudioCrashGuard.h"
 
 // Registry subkeys under HKLM\SYSTEM\CurrentControlSet\Services. Parameters is
 // persistent (diagnostic tuning). TestSession MUST be created as a volatile key
@@ -7,6 +8,7 @@
 // bugcheck the driver comes back with no test session and refuses to start.
 #define T2AUDIO_PARAMETERS_KEY   L"T2AudioMiniport\\Parameters"
 #define T2AUDIO_TESTSESSION_KEY  L"T2AudioMiniport\\TestSession"
+#define T2AUDIO_PARAMETERS_PATH  L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\T2AudioMiniport\\Parameters"
 
 // Diagnostic stages, cumulative (see T2AUDIO_DEVICE_CONTEXT::DiagStage).
 #define T2AUDIO_STAGE_RAM_ONLY 1u
@@ -47,6 +49,12 @@ T2AudioPnpHandler(
             // driver would leave AppleAudio without audio until VHCI
             // re-initializes.
             T2AudioUnmapResources(context);
+            // Persistent mode: clean end of the session.
+            T2AudioCrashGuardSetArmed(context, FALSE);
+            if (stack->MinorFunction != IRP_MN_STOP_DEVICE && context->ShutdownRegistered) {
+                IoUnregisterShutdownNotification(DeviceObject);
+                context->ShutdownRegistered = FALSE;
+            }
         }
         break;
     default:
@@ -54,6 +62,22 @@ T2AudioPnpHandler(
     }
 
     return PcDispatchIrp(DeviceObject, Irp);
+}
+
+// System shutdown/restart (persistent mode only): the session ends cleanly,
+// so the next boot must not count it as a crash.
+static NTSTATUS
+T2AudioShutdown(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    if (DeviceObject->DeviceExtension != NULL) {
+        T2AudioCrashGuardSetArmed(T2AudioGetContext(DeviceObject), FALSE);
+    }
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
 }
 
 // AppleUSBVHCI pushes every message bridgeOS sends on its own (for example
@@ -119,6 +143,8 @@ DriverEntry(
     // dispatch table; T2AudioPnpHandler forwards to PcDispatchIrp.
     DriverObject->MajorFunction[IRP_MJ_PNP] = T2AudioPnpHandler;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = T2AudioDeviceControl;
+    // Only sent to a device that registered (persistent mode, see StartDevice).
+    DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = T2AudioShutdown;
 
     KdPrint(("T2Audio: PortCls driver initialized\n"));
     return STATUS_SUCCESS;
@@ -187,8 +213,82 @@ T2AudioReadDwordParameter(
     return value;
 }
 
+// Writes a DWORD to HKLM\SYSTEM\CurrentControlSet\Services\<SubKey>\<ValueName>.
+static NTSTATUS
+T2AudioWriteDwordParameter(
+    _In_ PCWSTR SubKey,
+    _In_ PCWSTR ValueName,
+    _In_ ULONG Value)
+{
+    return RtlWriteRegistryValue(RTL_REGISTRY_SERVICES, SubKey, ValueName,
+                                 REG_DWORD, &Value, sizeof(Value));
+}
+
+// Forces Parameters to disk, so the crash-guard flag survives a bugcheck
+// that follows within seconds (the registry otherwise flushes lazily).
+static VOID
+T2AudioFlushParametersKey(VOID)
+{
+    UNICODE_STRING path;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE key;
+
+    RtlInitUnicodeString(&path, T2AUDIO_PARAMETERS_PATH);
+    InitializeObjectAttributes(&attributes, &path,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&key, KEY_WRITE, &attributes))) {
+        (VOID)ZwFlushKey(key);
+        ZwClose(key);
+    }
+}
+
+// Persistent mode only: mark the hardware session as running (Armed) or as
+// ended cleanly (not armed; also clears the strike counter). PASSIVE_LEVEL
+// only (registry); silently skipped above it. See T2AudioCrashGuard.h.
+VOID
+T2AudioCrashGuardSetArmed(
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_ BOOLEAN Armed)
+{
+    if (Context == NULL || !Context->ProductionMode ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL || Context->CrashGuardArmed == Armed) {
+        return;
+    }
+    (VOID)T2AudioWriteDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardArmed", Armed ? 1u : 0u);
+    if (!Armed) {
+        (VOID)T2AudioWriteDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardStrikes", 0);
+    }
+    T2AudioFlushParametersKey();
+    Context->CrashGuardArmed = Armed;
+    KdPrint(("T2Audio: crash guard %s\n", Armed ? "armed" : "disarmed (clean end of session)"));
+}
+
+static NTSTATUS
+T2AudioStartDeviceInner(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PRESOURCELIST ResourceList);
+
+// Start wrapper: a start that fails after the crash guard was armed is a
+// clean end, not a crash.
 NTSTATUS
 T2AudioStartDevice(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PRESOURCELIST ResourceList)
+{
+    NTSTATUS status;
+
+    PAGED_CODE();
+    status = T2AudioStartDeviceInner(DeviceObject, Irp, ResourceList);
+    if (!NT_SUCCESS(status) && DeviceObject != NULL && DeviceObject->DeviceExtension != NULL) {
+        T2AudioCrashGuardSetArmed(T2AudioGetContext(DeviceObject), FALSE);
+    }
+    return status;
+}
+
+static NTSTATUS
+T2AudioStartDeviceInner(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList)
@@ -229,16 +329,55 @@ T2AudioStartDevice(
         return STATUS_UNSUCCESSFUL;
     }
 
-    // The experimental driver must not activate hardware on a normal boot.
-    // Only an explicitly enabled volatile diagnostic session may start it.
+    // The driver activates hardware only in one of two modes:
+    //  - a volatile diagnostic session (TestSession, made by the test agent,
+    //    wiped on every reboot), or
+    //  - the persistent mode (Parameters\EnableProduction=1, set by the
+    //    installer) under the crash guard (T2AudioCrashGuard.h).
+    // Otherwise a normal boot never touches the hardware.
     {
         ULONG sessionFlag = T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY,
                                                       L"EnableTestMode", 0);
         context->TestModeEnabled = (sessionFlag != 0);
-        if (!context->TestModeEnabled) {
-            KdPrint(("T2Audio: test session disabled - refusing to start device\n"));
+        if (!context->TestModeEnabled &&
+            T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"EnableProduction", 0) == 1) {
+            ULONG armed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardArmed", 0);
+            ULONG strikes = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardStrikes", 0);
+            unsigned int newStrikes = 0;
+            int allow = T2AudioCrashGuardAllowStart(armed, strikes, &newStrikes);
+
+            (VOID)T2AudioWriteDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardStrikes", newStrikes);
+            if (!allow) {
+                (VOID)T2AudioWriteDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CrashGuardArmed", 0);
+                T2AudioFlushParametersKey();
+                KdPrint(("T2Audio: persistent mode: %u unclean ends in a row - refusing to start "
+                         "(reset with the installer)\n", newStrikes));
+                return STATUS_UNSUCCESSFUL;
+            }
+            if (armed) {
+                KdPrint(("T2Audio: persistent mode: previous session did not end cleanly "
+                         "(strike %u of %u)\n", newStrikes, T2AUDIO_CRASHGUARD_MAX_STRIKES));
+            }
+            // Same configuration as the hardware-verified diagnostic stage 5
+            // with BCE I/O (stereo endpoint only).
+            context->ProductionMode = TRUE;
+            context->DiagStage = T2AUDIO_STAGE_MMIO;
+            context->MmioCopyEnabled = TRUE;
+            context->BceIoEnabled = TRUE;
+            context->RawSpeakerChannels = FALSE;
+            T2AudioCrashGuardSetArmed(context, TRUE);
+            if (DeviceObject->DeviceExtension != NULL &&
+                NT_SUCCESS(IoRegisterShutdownNotification(DeviceObject))) {
+                context->ShutdownRegistered = TRUE;
+            }
+            KdPrint(("T2Audio: persistent mode active (stage %u, mmioCopy=1, bceIo=1)\n",
+                     context->DiagStage));
+        } else if (!context->TestModeEnabled) {
+            KdPrint(("T2Audio: no test session and persistent mode off - refusing to start device\n"));
             return STATUS_UNSUCCESSFUL;
         }
+    }
+    if (context->TestModeEnabled) {
         context->DiagStage =
             T2AudioReadDwordParameter(T2AUDIO_TESTSESSION_KEY, L"DiagStage",
                                       T2AUDIO_STAGE_RAM_ONLY);

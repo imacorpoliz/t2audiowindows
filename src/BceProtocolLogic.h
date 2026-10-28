@@ -315,6 +315,23 @@ T2AudioBceParseCommandResponse(const unsigned char *Reply,
 
 // Exact, case-sensitive match of a device UID against "Speaker", as kaiT2en
 // does with strcmp() against the BufferStruct device name.
+// 1 if the UID (not NUL-terminated, UidLength bytes) equals Name.
+static __inline int
+T2AudioBceUidEquals(const char *Uid, unsigned long long UidLength, const char *Name)
+{
+    unsigned long long i;
+
+    if (Uid == 0 || Name == 0) {
+        return 0;
+    }
+    for (i = 0; i < UidLength; i++) {
+        if (Name[i] == '\0' || Uid[i] != Name[i]) {
+            return 0;
+        }
+    }
+    return Name[UidLength] == '\0';
+}
+
 static __inline int
 T2AudioBceUidIsSpeaker(const char *Uid, unsigned long long UidLength)
 {

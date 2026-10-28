@@ -85,6 +85,8 @@ T2AudioPowerChangeState(
         KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
         context->PoweredDown = FALSE;
         KeReleaseSpinLock(&context->HardwareLock, oldIrql);
+        // Persistent mode: a hardware session runs again (crash guard).
+        T2AudioCrashGuardSetArmed(context, TRUE);
         // Like AppleAudio, START_IO is not re-sent here: it comes from the
         // next SetState(RUN).
         return;
@@ -93,6 +95,8 @@ T2AudioPowerChangeState(
     if (NewState.DeviceState > PowerDeviceD0 &&
         NewState.DeviceState < PowerDeviceMaximum) {
         T2AudioPowerQuiesce(context, "D1-D3");
+        // Persistent mode: the session ended cleanly (idle, sleep, hibernate).
+        T2AudioCrashGuardSetArmed(context, FALSE);
         // The copy DPC must not write device memory of a powered-down device.
         KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
         context->PoweredDown = TRUE;

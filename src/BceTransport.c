@@ -15,6 +15,7 @@
 // Property scope/selector values (kaiT2en modules/t2bce_audio/protocol.h).
 #define T2AUDIO_PROP_SCOPE_GLOBAL 0x676c6f62u   // 'glob'
 #define T2AUDIO_PROP_SCOPE_OUTPUT 0x6f757470u   // 'outp'
+#define T2AUDIO_PROP_JACK_PLUGGED 0x6a61636bu   // 'jack'
 #define T2AUDIO_PROP_UID          0x75696420u   // 'uid '
 #define T2AUDIO_PROP_LATENCY      0x6c746e63u   // 'ltnc'
 #define T2AUDIO_PROP_SAFETY_OFFSET 0x73616674u  // 'saft'
@@ -996,6 +997,23 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         if (Context->BceSpeakerDeviceId == 0 &&
             T2AudioBceUidIsSpeaker(uid, uidLength)) {
             Context->BceSpeakerDeviceId = deviceList[i];
+        }
+        // Headphone jack, read-only first step (KAIT2EN reads the same
+        // property: 'outp'/'jack' on device "Codec Output", u32 plugged).
+        if (Context->BceHeadphoneDeviceId == 0 &&
+            T2AudioBceUidEquals(uid, uidLength, "Codec Output")) {
+            ULONG plugged = 0;
+            NTSTATUS jackStatus;
+
+            Context->BceHeadphoneDeviceId = deviceList[i];
+            jackStatus = T2AudioGetU32Property(deviceList[i], deviceList[i],
+                                               T2AUDIO_PROP_SCOPE_OUTPUT,
+                                               T2AUDIO_PROP_JACK_PLUGGED, &plugged);
+            Context->HeadphoneJackPlugged = NT_SUCCESS(jackStatus) ? (plugged != 0 ? 1u : 0u) : 0u;
+            KdPrint(("T2Audio: BCE probe: headphone jack device 0x%I64X: %s (status 0x%08X)\n",
+                     deviceList[i],
+                     !NT_SUCCESS(jackStatus) ? "unknown" : (plugged ? "PLUGGED" : "unplugged"),
+                     jackStatus));
         }
     }
 

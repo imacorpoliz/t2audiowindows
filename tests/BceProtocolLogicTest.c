@@ -88,6 +88,13 @@ static void test_property_offset(void)
 
 static void test_uid_match(void)
 {
+    printf("T2AudioBceUidEquals\n");
+    check("\"Codec Output\" (12) equals", T2AudioBceUidEquals("Codec Output", 12, "Codec Output"));
+    check("prefix only -> no", !T2AudioBceUidEquals("Codec Out", 9, "Codec Output"));
+    check("longer -> no", !T2AudioBceUidEquals("Codec Output2", 13, "Codec Output"));
+    check("empty vs name -> no", !T2AudioBceUidEquals("", 0, "Codec Output"));
+    check("NULL -> no", !T2AudioBceUidEquals(0, 3, "abc"));
+
     printf("T2AudioBceUidIsSpeaker\n");
 
     check("\"Speaker\" (7) -> match",
