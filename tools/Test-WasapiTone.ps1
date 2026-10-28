@@ -5,6 +5,13 @@
 # mirror (T2AudioStreamCopyTick) has real samples to deliver to the hardware.
 # Listen for the tone to confirm end-to-end playback.
 #
+# Stage E (first audible run, GEMINI.md): pass -EndpointVolume 0.02..0.05.
+# The probe then requires an explicit -DeviceId (no fallback to another
+# endpoint), refuses an endpoint volume above 0.05 or an amplitude above 0.1,
+# un-mutes the T2 endpoint at that volume only after reading it back, and
+# mutes it again with volume 0 when the tone ends (also on errors). Without
+# -EndpointVolume the endpoint volume and mute are left as they are.
+#
 # All COM work is done inside C# so the RCW-to-interface casts happen in the
 # CLR (PowerShell cannot cast a raw COM object to a [ComImport] interface).
 
@@ -12,7 +19,8 @@ param(
     [string]$DeviceId = '',
     [double]$Seconds = 4.0,
     [double]$Frequency = 440.0,
-    [double]$Amplitude = 0.25
+    [double]$Amplitude = 0.25,
+    [double]$EndpointVolume = -1.0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +83,22 @@ public interface IAudioClient {
     [PreserveSig] int SetEventHandle(IntPtr eventHandle);
     [PreserveSig] int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
 }
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume {
+    [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+    [PreserveSig] int GetChannelCount(out uint count);
+    [PreserveSig] int SetMasterVolumeLevel(float levelDb, ref Guid context);
+    [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid context);
+    [PreserveSig] int GetMasterVolumeLevel(out float levelDb);
+    [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+    [PreserveSig] int SetChannelVolumeLevel(uint channel, float levelDb, ref Guid context);
+    [PreserveSig] int SetChannelVolumeLevelScalar(uint channel, float level, ref Guid context);
+    [PreserveSig] int GetChannelVolumeLevel(uint channel, out float levelDb);
+    [PreserveSig] int GetChannelVolumeLevelScalar(uint channel, out float level);
+    [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid context);
+    [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
 [Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IAudioRenderClient {
     [PreserveSig] int GetBuffer(uint numFramesRequested, out IntPtr ppData);
@@ -84,8 +108,56 @@ public interface IAudioRenderClient {
 public static class Tone {
     static string H(int hr) { return "0x" + ((uint)hr).ToString("X8"); }
 
-    public static string Run(string targetId, double seconds, double frequency, double amplitude) {
+    // Stage E limits (GEMINI.md): low endpoint volume and a quiet tone.
+    public const double MaxEndpointVolume = 0.05;
+    public const double MaxLowVolumeAmplitude = 0.1;
+
+    static IAudioEndpointVolume EndpointVolume(IMMDevice device, StringBuilder sb) {
+        Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        object o;
+        int hr = device.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o);
+        sb.AppendLine("Activate(IAudioEndpointVolume) hr=" + H(hr));
+        return (hr == 0 && o != null) ? (IAudioEndpointVolume)o : null;
+    }
+
+    // Set volume first, then un-mute, then read both back.
+    static bool SetLowVolume(IAudioEndpointVolume vol, float level, StringBuilder sb) {
+        Guid ctx = Guid.Empty;
+        int hr = vol.SetMasterVolumeLevelScalar(level, ref ctx);
+        sb.AppendLine("SetMasterVolumeLevelScalar(" + level + ") hr=" + H(hr));
+        if (hr != 0) return false;
+        float back;
+        if (vol.GetMasterVolumeLevelScalar(out back) != 0 || back > (float)MaxEndpointVolume + 0.001f) {
+            sb.AppendLine("volume read back " + back + " - refusing to un-mute");
+            return false;
+        }
+        hr = vol.SetMute(false, ref ctx);
+        sb.AppendLine("SetMute(false) hr=" + H(hr));
+        bool muted;
+        int mhr = vol.GetMute(out muted);
+        int lhr = vol.GetMasterVolumeLevelScalar(out back);
+        sb.AppendLine("endpoint mute=" + muted + " volume=" + back + " (hr " + H(mhr) + "/" + H(lhr) + ")");
+        return hr == 0 && mhr == 0 && lhr == 0 && !muted && back <= (float)MaxEndpointVolume + 0.001f;
+    }
+
+    static void Silence(IAudioEndpointVolume vol, StringBuilder sb) {
+        Guid ctx = Guid.Empty;
+        vol.SetMute(true, ref ctx);
+        vol.SetMasterVolumeLevelScalar(0.0f, ref ctx);
+        bool muted; float level;
+        vol.GetMute(out muted);
+        vol.GetMasterVolumeLevelScalar(out level);
+        sb.AppendLine("after run: endpoint mute=" + muted + " volume=" + level);
+    }
+
+    public static string Run(string targetId, double seconds, double frequency, double amplitude, double endpointVolume) {
         var sb = new StringBuilder();
+        bool lowVolume = endpointVolume >= 0.0;
+        if (lowVolume) {
+            if (string.IsNullOrEmpty(targetId)) { sb.AppendLine("LOW-VOLUME RUN REFUSED: -DeviceId is required"); return sb.ToString(); }
+            if (endpointVolume > MaxEndpointVolume) { sb.AppendLine("LOW-VOLUME RUN REFUSED: endpoint volume " + endpointVolume + " > " + MaxEndpointVolume); return sb.ToString(); }
+            if (amplitude > MaxLowVolumeAmplitude) { sb.AppendLine("LOW-VOLUME RUN REFUSED: amplitude " + amplitude + " > " + MaxLowVolumeAmplitude); return sb.ToString(); }
+        }
         var enumerator = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(MMDeviceEnumerator));
 
         IMMDevice device = null;
@@ -94,6 +166,7 @@ public static class Tone {
             sb.AppendLine("GetDevice hr=" + H(ghr));
             if (ghr != 0) device = null;
         }
+        if (device == null && lowVolume) { sb.AppendLine("TARGET NOT FOUND - low-volume run refused"); return sb.ToString(); }
         if (device == null) {
             IMMDeviceCollection col;
             enumerator.EnumAudioEndpoints(EDataFlow.eRender, 1, out col);
@@ -108,25 +181,48 @@ public static class Tone {
         string devId; device.GetId(out devId);
         sb.AppendLine("device = " + devId);
 
+        IAudioEndpointVolume vol = null;
+        if (lowVolume) {
+            vol = EndpointVolume(device, sb);
+            if (vol == null) { sb.AppendLine("LOW-VOLUME RUN REFUSED: no endpoint volume"); return sb.ToString(); }
+            if (!SetLowVolume(vol, (float)endpointVolume, sb)) {
+                Silence(vol, sb);
+                sb.AppendLine("LOW VOLUME NOT CONFIRMED - endpoint muted again, no stream started.");
+                return sb.ToString();
+            }
+            sb.AppendLine("T2 endpoint at low volume " + endpointVolume + ".");
+        }
+        try {
+            Play(device, seconds, frequency, amplitude, sb);
+        } finally {
+            if (vol != null) Silence(vol, sb);
+        }
+        return sb.ToString();
+    }
+
+    static void Play(IMMDevice device, double seconds, double frequency, double amplitude, StringBuilder sb) {
         Guid iid = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         object o;
         int hr = device.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o);
         sb.AppendLine("Activate hr=" + H(hr));
-        if (hr != 0 || o == null) return sb.ToString();
+        if (hr != 0 || o == null) return;
         var client = (IAudioClient)o;
 
         IntPtr pfmt;
         hr = client.GetMixFormat(out pfmt);
-        if (hr != 0 || pfmt == IntPtr.Zero) { sb.AppendLine("GetMixFormat hr=" + H(hr)); return sb.ToString(); }
+        if (hr != 0 || pfmt == IntPtr.Zero) { sb.AppendLine("GetMixFormat hr=" + H(hr)); return; }
         var fmt = (WAVEFORMATEXTENSIBLE)Marshal.PtrToStructure(pfmt, typeof(WAVEFORMATEXTENSIBLE));
         int ch = fmt.Format.nChannels;
         int rate = (int)fmt.Format.nSamplesPerSec;
-        bool isFloat = fmt.SubFormat == new Guid("00000003-0000-0010-8000-00aa00389b71");
+        bool isFloat = fmt.SubFormat == new Guid("00000003-0000-0010-8000-00aa00389b71") ||
+                       fmt.Format.wFormatTag == 3;
+        int bits = fmt.Format.wBitsPerSample;
+        if (!isFloat && bits != 16 && bits != 32) { sb.AppendLine("unsupported PCM container: " + bits + " bits"); return; }
         sb.AppendLine("MixFormat: ch=" + ch + " rate=" + rate + " bits=" + fmt.Format.wBitsPerSample + " float=" + isFloat);
 
         hr = client.Initialize(0, 0, 10000000, 0, pfmt, IntPtr.Zero);
         sb.AppendLine("Initialize hr=" + H(hr));
-        if (hr != 0) return sb.ToString();
+        if (hr != 0) return;
 
         uint frames;
         hr = client.GetBufferSize(out frames);
@@ -136,12 +232,12 @@ public static class Tone {
         object ro;
         hr = client.GetService(ref riid, out ro);
         sb.AppendLine("GetService(IAudioRenderClient) hr=" + H(hr));
-        if (hr != 0 || ro == null) return sb.ToString();
+        if (hr != 0 || ro == null) return;
         var render = (IAudioRenderClient)ro;
 
         hr = client.Start();
         sb.AppendLine("Start hr=" + H(hr));
-        if (hr != 0) return sb.ToString();
+        if (hr != 0) return;
 
         double phase = 0.0;
         double step = 2.0 * Math.PI * frequency / rate;
@@ -169,6 +265,15 @@ public static class Tone {
                     for (int c = 0; c < ch; c++) buf[f * ch + c] = s;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
+            } else if (bits == 32) {
+                // 32-bit container, MSB-aligned (24-in-32 included).
+                int[] buf = new int[avail * ch];
+                for (int f = 0; f < avail; f++) {
+                    int s = (int)(amplitude * 2147483647.0 * Math.Sin(phase));
+                    phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = s;
+                }
+                Marshal.Copy(buf, 0, p, buf.Length);
             } else {
                 short[] buf = new short[avail * ch];
                 for (int f = 0; f < avail; f++) {
@@ -188,7 +293,6 @@ public static class Tone {
         sb.AppendLine("wrote frames=" + written + " iterations=" + iterations);
         hr = client.Stop();
         sb.AppendLine("Stop hr=" + H(hr));
-        return sb.ToString();
     }
 }
 }
@@ -198,4 +302,4 @@ if (-not ('T2WasapiTone.Tone' -as [type])) {
     Add-Type -TypeDefinition $code
 }
 
-[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude)
+[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude, $EndpointVolume)

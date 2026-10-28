@@ -26,6 +26,21 @@
 #define T2AUDIO_TWEETER_MUTE           0u  // tweeters get silence
 #define T2AUDIO_TWEETER_HIGHPASS       1u  // 4th-order high-pass (default)
 
+// Output safety attenuation, in 6 dB steps (an arithmetic right shift of the
+// host sample before it reaches any speaker). While the driver is
+// experimental the default keeps the speakers at -18 dB below what Windows
+// asks for: the first audible runs (Stage E) must not drive the small woofers
+// to full excursion if a volume or format error slips through. 0 disables it;
+// values above the maximum are clamped (-96 dB is silence for 24-bit).
+#define T2AUDIO_ATTENUATION_DEFAULT    3u
+#define T2AUDIO_ATTENUATION_MAX        16u
+
+static __inline unsigned int
+T2AudioClampAttenuation(unsigned int Shift)
+{
+    return Shift > T2AUDIO_ATTENUATION_MAX ? T2AUDIO_ATTENUATION_MAX : Shift;
+}
+
 // Q30 fixed-point biquad (direct form I). The a0 term is normalized to 1.
 typedef struct _T2AUDIO_BIQUAD_Q30 {
     int B0, B1, B2, A1, A2;
@@ -144,8 +159,9 @@ T2AudioS24ToRing(long long Sample24, unsigned int Shift)
 }
 
 // Render Frames stereo frames (two MSB-aligned 32-bit samples, L then R) into
-// the 6-channel speaker ring: each side's sample goes to its woofer pair as
-// is and to its tweeter through the high-pass (or silence). Dest may be device
+// the 6-channel speaker ring: each side's sample, attenuated by
+// AttenuationShift (6 dB steps), goes to its woofer pair as is and to its
+// tweeter through the high-pass (or silence). Dest may be device
 // memory: every store is one aligned 32-bit write.
 static __inline void
 T2AudioRenderStereoToSpeakers(volatile unsigned int *Dest,
@@ -153,17 +169,20 @@ T2AudioRenderStereoToSpeakers(volatile unsigned int *Dest,
                               unsigned long Frames,
                               unsigned int Shift,
                               unsigned int TweeterMode,
+                              unsigned int AttenuationShift,
                               T2AUDIO_SPEAKER_STATE *State)
 {
     unsigned long i;
     unsigned int side;
+
+    AttenuationShift = T2AudioClampAttenuation(AttenuationShift);
 
     for (i = 0; i < Frames; i++) {
         unsigned int out[2];
         unsigned int tweeter[2];
 
         for (side = 0; side < 2; side++) {
-            unsigned int host = Source[i * 2u + side];
+            unsigned int host = T2AudioSar32(Source[i * 2u + side], AttenuationShift);
             long long s24 = T2AudioS24ToLL(T2AudioSar32(host, 8));
 
             out[side] = T2AudioSar32(host, Shift);

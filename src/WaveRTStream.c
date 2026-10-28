@@ -280,8 +280,10 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // delivers MSB-aligned 32-bit samples, so each sample is shifted
             // (kaiT2en maps the same descriptor to SNDRV_PCM_FORMAT_S24_LE).
             // Stereo is laid out over the woofer pairs and the high-passed
-            // tweeters; the raw 6-channel format is copied as is. Frames are
-            // 4-byte aligned in both rings.
+            // tweeters; the raw 6-channel format is copied as is. Both paths
+            // apply the OutputAttenuation safety shift (two arithmetic shifts
+            // compose, so the raw path adds it to the sample shift). Frames
+            // are 4-byte aligned in both rings.
             if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
@@ -289,13 +291,14 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                     chunkFrames,
                     context->SpeakerSampleShift,
                     context->TweeterMode,
+                    context->OutputAttenuation,
                     &instance->SpeakerState);
             } else {
                 T2AudioConvertSamples(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
                     (const unsigned int *)(sourceBase + srcOffset),
                     byteLen / sizeof(unsigned int),
-                    context->SpeakerSampleShift);
+                    context->SpeakerSampleShift + context->OutputAttenuation);
             }
 
             frame += chunkFrames;

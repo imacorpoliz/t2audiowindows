@@ -37,6 +37,8 @@
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 3   # + BAR + BCE discovery
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 4   # speaker wired, NO I/O sent
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo   # + START_IO (owner only, muted)
+#   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
+#       -AudibleVolume 0.03 -OwnerApprovedAudible        # Stage E: quiet tone (owner only)
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 5 -Mmio   # + BAR1 writes (risky)
 #   .\T2Audio-TestAgent.ps1 -Mode Recover
 
@@ -66,6 +68,24 @@ param(
     # before the IOCTL 0x222020 fix (docs/analysis/START_IO_BSOD_ROOT_CAUSE.md);
     # the fix is not hardware-verified yet. Only the owner may pass this.
     [switch]$OwnerApprovedBceIo,
+
+    # Stage E (first audible run). After the muted probe, play a quiet tone
+    # (tools\Test-WasapiTone.ps1) with the T2 endpoint un-muted at this
+    # volume (0.01..0.05); the endpoint is muted with volume 0 again when the
+    # tone ends. -1 (default) keeps the run silent. Needs -BceIo -Mmio and the
+    # owner's separate approval -OwnerApprovedAudible. The driver also cuts
+    # every sample by Parameters\OutputAttenuation (default -18 dB).
+    [ValidateRange(-1.0, 0.05)]
+    [double]$AudibleVolume = -1.0,
+
+    # The machine owner's explicit approval for -AudibleVolume.
+    [switch]$OwnerApprovedAudible,
+
+    # Tone for -AudibleVolume: frequency (Hz), length (s), amplitude (<= 0.1).
+    [double]$ToneFrequency = 440.0,
+    [double]$ToneSeconds = 3.0,
+    [ValidateRange(0.0, 0.1)]
+    [double]$ToneAmplitude = 0.05,
 
     # Offer the 6 raw ring channels to Windows instead of the stereo endpoint
     # (RawSpeakerChannels=1), for per-speaker diagnostics. The tweeters then
@@ -106,6 +126,7 @@ $AutoTaskName     = 'T2Audio-AutoCapture-AfterBoot'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ProbeScript = Join-Path $ProjectRoot 'tools\Test-WasapiRender.ps1'
+$ToneScript  = Join-Path $ProjectRoot 'tools\Test-WasapiTone.ps1'
 $CaptureRoot = Join-Path $ProjectRoot 'docs\logs'
 
 function Write-Header($text) {
@@ -385,7 +406,22 @@ function Invoke-Test {
         Write-Fail '-BceIo requires -Mmio (otherwise the T2 plays stale ring contents).'
         exit 1
     }
-    if ($BceIo) {
+    $audible = ($AudibleVolume -ge 0.0)
+    if ($audible) {
+        if (-not ($BceIo -and $Mmio)) {
+            Write-Fail '-AudibleVolume needs -BceIo -Mmio (the tone must reach the ring).'
+            exit 1
+        }
+        if (-not $OwnerApprovedAudible) {
+            Write-Fail '-AudibleVolume plays sound through the speakers. It needs the owner''s explicit approval: -OwnerApprovedAudible.'
+            exit 1
+        }
+        if ($RawChannels) {
+            Write-Fail '-AudibleVolume is refused with -RawChannels (no tweeter protection on the raw endpoint).'
+            exit 1
+        }
+        Write-Warn "Stage E: after the muted probe a $ToneFrequency Hz tone (amplitude $ToneAmplitude) plays for $ToneSeconds s at endpoint volume $AudibleVolume."
+    } elseif ($BceIo) {
         Write-Warn 'START_IO run: Windows must be MUTED with volume 0 (rule 0 - silent runs only).'
     }
 
@@ -470,10 +506,29 @@ function Invoke-Test {
             try {
                 $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ProbeScript -DeviceId $endpoint 2>&1 | Out-String
                 $out | Out-File (Join-Path $captureDir 'wasapi.txt') -Encoding utf8
-                if ($out -match 'MUTE NOT CONFIRMED') {
+                $muted = $out -notmatch 'MUTE NOT CONFIRMED'
+                if (-not $muted) {
                     Write-Fail 'T2 endpoint could not be muted; the probe did not start a stream.'
                 } else {
                     Write-Ok 'WASAPI probe complete (T2 endpoint muted, volume 0)'
+                }
+                # Stage E: only after the muted run proved the stream path.
+                if ($audible -and $muted) {
+                    Write-Warn "Playing the Stage E tone at endpoint volume $AudibleVolume..."
+                    $toneOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ToneScript `
+                        -DeviceId $endpoint -EndpointVolume $AudibleVolume -Amplitude $ToneAmplitude `
+                        -Frequency $ToneFrequency -Seconds $ToneSeconds 2>&1 | Out-String
+                    $toneOut | Out-File (Join-Path $captureDir 'tone.txt') -Encoding utf8
+                    if ($toneOut -match 'REFUSED|NOT CONFIRMED|NOT FOUND') {
+                        Write-Fail 'Stage E tone did not play (see tone.txt).'
+                    } else {
+                        Write-Ok 'Stage E tone played; endpoint muted again (see tone.txt).'
+                    }
+                    if ($toneOut -notmatch 'after run: endpoint mute=True volume=0') {
+                        Write-Warn 'Could not confirm the endpoint is muted again - mute it by hand.'
+                    }
+                } elseif ($audible) {
+                    Write-Fail 'Stage E tone skipped: the muted probe did not pass.'
                 }
             } catch {
                 Write-Warn "Probe error: $_"

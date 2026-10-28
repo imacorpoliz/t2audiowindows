@@ -125,7 +125,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // (TestSession\RawSpeakerChannels=1) offers the 6 raw ring channels to
     // Windows instead of stereo, for per-speaker diagnostics only: the
     // client then drives the tweeters directly, with no protection filter.
+    // OutputAttenuation (Parameters\OutputAttenuation, 6 dB steps, default
+    // T2AUDIO_ATTENUATION_DEFAULT, clamped to T2AUDIO_ATTENUATION_MAX) is a
+    // safety cut applied to every sample before it reaches the ring.
     ULONG TweeterMode;
+    ULONG OutputAttenuation;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

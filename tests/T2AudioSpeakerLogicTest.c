@@ -33,15 +33,47 @@ static void test_layout(void)
     printf("T2AudioRenderStereoToSpeakers layout\n");
 
     T2AudioSpeakerStateReset(&state);
-    T2AudioRenderStereoToSpeakers(dst, src, 2, 8, T2AUDIO_TWEETER_MUTE, &state);
+    T2AudioRenderStereoToSpeakers(dst, src, 2, 8, T2AUDIO_TWEETER_MUTE, 0, &state);
     check("L -> woofers 0,1", dst[0] == 0x00123456u && dst[1] == 0x00123456u);
     check("R -> woofers 3,4 (sign-extended)",
           dst[3] == 0xFFFEDCBAu && dst[4] == 0xFFFEDCBAu);
     check("muted tweeters 2,5", dst[2] == 0 && dst[5] == 0);
     check("frame 2 full scale", dst[6] == 0x007FFFFFu && dst[9] == 0xFF800000u);
 
-    T2AudioRenderStereoToSpeakers(dst, src, 1, 0, T2AUDIO_TWEETER_MUTE, &state);
+    T2AudioRenderStereoToSpeakers(dst, src, 1, 0, T2AUDIO_TWEETER_MUTE, 0, &state);
     check("shift 0 keeps the 32-bit sample", dst[0] == 0x12345600u);
+}
+
+static void test_attenuation(void)
+{
+    unsigned int src[2] = { 0x7FFFFF00u, 0x80000000u };
+    unsigned int dst[6];
+    unsigned int raw[2];
+    T2AUDIO_SPEAKER_STATE state;
+
+    printf("Output attenuation\n");
+
+    T2AudioSpeakerStateReset(&state);
+    T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_MUTE, 3, &state);
+    check("-18 dB: +full scale / 8", dst[0] == (0x007FFFFFu >> 3) && dst[1] == dst[0]);
+    check("-18 dB: -full scale / 8 (sign kept)",
+          ring_sample(dst[3]) == -(0x800000ll >> 3) && dst[4] == dst[3]);
+
+    T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_MUTE, 1000, &state);
+    check("attenuation clamped to the maximum",
+          dst[0] == (0x007FFFFFu >> T2AUDIO_ATTENUATION_MAX) &&
+              ring_sample(dst[3]) == -(0x800000ll >> T2AUDIO_ATTENUATION_MAX));
+    check("clamp helper", T2AudioClampAttenuation(99) == T2AUDIO_ATTENUATION_MAX &&
+                              T2AudioClampAttenuation(2) == 2);
+    check("default is a cut", T2AUDIO_ATTENUATION_DEFAULT > 0);
+
+    // The raw path adds the attenuation to the sample shift; two arithmetic
+    // shifts compose, so the result matches the stereo path.
+    raw[0] = T2AudioSar32(T2AudioSar32(src[0], 3), 8);
+    raw[1] = T2AudioSar32(src[1], 3 + 8);
+    check("raw path: shifts compose",
+          raw[0] == (0x007FFFFFu >> 3) &&
+              ring_sample(raw[1]) == -(0x800000ll >> 3));
 }
 
 // Steady-state gain of the tweeter path for a sine at Hz, in dB.
@@ -62,7 +94,7 @@ static double tweeter_gain_db(double hz)
 
         src[0] = w;
         src[1] = w;
-        T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_HIGHPASS, &state);
+        T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_HIGHPASS, 0, &state);
         if (n > 24000) {
             double y = fabs((double)ring_sample(dst[T2AUDIO_SPK_LEFT_TWEETER]));
             if (y > peakOut) {
@@ -107,7 +139,7 @@ static void test_clipping(void)
 
         src[0] = w;
         src[1] = w;
-        T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_HIGHPASS, &state);
+        T2AudioRenderStereoToSpeakers(dst, src, 1, 8, T2AUDIO_TWEETER_HIGHPASS, 0, &state);
         y = ring_sample(dst[T2AUDIO_SPK_RIGHT_TWEETER]);
         if (y > 0x7FFFFF || y < -0x800000) {
             ok = 0;
@@ -166,6 +198,7 @@ static void test_clock(void)
 int main(void)
 {
     test_layout();
+    test_attenuation();
     test_tweeter_filter();
     test_clipping();
     test_clock();

@@ -273,9 +273,14 @@ T2AudioStartDevice(
         (T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TweeterMode",
                                    T2AUDIO_TWEETER_HIGHPASS) == T2AUDIO_TWEETER_MUTE)
             ? T2AUDIO_TWEETER_MUTE : T2AUDIO_TWEETER_HIGHPASS;
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u\n",
+    // Safety cut in 6 dB steps before any sample reaches the speakers.
+    context->OutputAttenuation = T2AudioClampAttenuation(
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"OutputAttenuation",
+                                  T2AUDIO_ATTENUATION_DEFAULT));
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB)\n",
              context->ForceSystemBuffer ? 1u : 0u,
-             context->MdlVariant, context->TweeterMode));
+             context->MdlVariant, context->TweeterMode,
+             context->OutputAttenuation, context->OutputAttenuation * 6u));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the
     // driver runs purely on system memory and never touches a BAR.
