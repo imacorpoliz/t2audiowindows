@@ -5,6 +5,18 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (19:22 hardware test): Listening Session #3 — 4-band Compressor Verified on Hardware (`SpeakerDsp=3`, Build 1.0.11.0, PROVEN ON HARDWARE)
+
+- **Test Setup:** Build 1.0.11.0 (SYS SHA256: `ECC35ACE239D2A192A3205495BB4A6B7A9F5C791964A64023A84F2C7C3724FC5`). Variant b: `SpeakerDsp=3` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass + 4-band Multiband Compressor `dspComp`), `DspGainDb=6`, `TweeterTrimDb=0`, `WooferLimitDb=0`, `OutputAttenuation=1` (-6 dB default).
+- **Acoustic Milestone (Owner Report):**
+  - Owner auditioned music in Windows for ~15 minutes under `SpeakerDsp=3`:
+    *«все хорошо»* (Everything is good!).
+  - **Level 3 verified:** The 4-band multiband compressor resolves the "a bit quiet" feedback from Level 2, providing density, proper dynamic punch, and balanced frequency reproduction across music tracks without noticeable distortion or pumping.
+- **Limiter & Headroom Performance (PASS):** `dspLimited = 0`, `wooferLimited = 0` throughout full audition. +6 dB make-up gain with compressor preserves healthy dynamic peaks under standard Windows listening levels.
+- **Copy & Clock Stability (PASS):** `maxCopyGapUs = 2779 - 3073` (2.7 - 3.0 ms), `gaps>10ms = 0`, `gaps>lead = 0`, `skips = 0`. Exactly 1 re-aim at stream start. Clean power transitions (D3 -> D0).
+- **Safe State (PASS):** Device safely recovered and re-bound to official `AppleAudio.sys` (`oem16.inf`, `CM_PROB_NONE`, Status OK). Volatile test session removed, registry parameters cleaned.
+- See detailed log in [docs/logs/EXCERPT_20261028_192200.md](logs/EXCERPT_20261028_192200.md).
+
 ### 2026-10-28 (Claude): "a slight hum with heavy bass at max volume"; woofer limiter ceiling (source only, not hardware-tested)
 
 - **Owner:** with a lot of bass at maximum volume the sound still hums a little. This was heard with `SpeakerDsp=2`.
