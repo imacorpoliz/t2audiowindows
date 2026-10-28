@@ -5,6 +5,26 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): analysis of the 18:14 speaker check (1.0.10.0)
+
+Based on `docs/logs/EXCERPT_20261028_181400.md`:
+
+- **Confirmed on hardware:**
+  - 1.0.10.0 runs; Stage 1 shows the expected defaults.
+  - Left/right separation is correct; 1 kHz and 8 kHz play cleanly with no crackle or click (the tone fade works).
+  - Copy timing is clean (2.6 ms max gap, no gaps over the lead, no skips); one re-aim per stream.
+  - With `TweeterMode=0` (ring channels 2/5 at zero) a 1 kHz tone is audible, so **channels 0/1/3/4 drive physical speakers** and no BCE "unmute" is needed.
+- **Not yet proven (correction to the entry below): which physical drivers are woofers.** The observations so far fit both layouts:
+  - If 0/1/3/4 were the tweeters, 1 kHz would still be heard with 2/5 muted.
+  - 100 Hz would still be silent (tweeters cannot play it).
+  - 8 kHz through channels 2/5 would still be heard.
+
+  The per-driver check (step 3a, `-RawChannels`) discriminates the two: a sweep 50→500 Hz on one channel becomes audible around 100–150 Hz on a woofer but only near 1 kHz on a tweeter. That run was not done.
+- **100 Hz inaudible in the plain path:** plausible physics. The tone reached the speakers at roughly −30 to −36 dBFS (endpoint 0.2, amplitude 0.3, −6 dB attenuation). Laptop woofers are far less efficient at 100 Hz, and the ear is ~20–30 dB less sensitive there than at 1 kHz. Consistent with the earlier analysis (plain path: mids/highs 13–23 dB hot relative to bass).
+- **Still open:**
+  - step 3a (per-driver, louder);
+  - step 4, the actual listening comparison of `SpeakerDsp=0..4` (with `DspGainDb=6`). This is what should bring the bass back (woofer EQ, virtual bass, compressor).
+
 ### 2026-10-28 (18:15 hardware test): Build 1.0.10.0 speaker check & breakthrough woofer verification (PROVEN ON HARDWARE)
 
 - **Build 1.0.10.0:** Verified on physical MacBookPro16,1 (SYS SHA256: `7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB`).
