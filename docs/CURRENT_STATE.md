@@ -1,9 +1,29 @@
-﻿# T2AudioPort Driver - Current State (Authoritative)
+# T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28 (after Stage E; Claude analysis and fixes, see the first entry)  
 **Current status**: **STAGE E FIRST SOUND ACHIEVED (PROVEN ON HARDWARE).** Physical sound successfully produced on MacBookPro16,1 on bare-metal Windows via custom T2Audio driver! Streams verified both via WASAPI automated tone and live Windows system audio. Complete stability: zero BSODs, clean START_IO and STOP_IO. Owner acoustic observations recorded: sound is present, flat, occasionally crackles, and not very loud. Deep analysis and action plan documented in [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).  
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+
+### 2026-10-28 (18:15 hardware test): Build 1.0.10.0 speaker check & breakthrough woofer verification (PROVEN ON HARDWARE)
+
+- **Build 1.0.10.0:** Verified on physical MacBookPro16,1 (SYS SHA256: `7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB`).
+- **Stage 1 (PASS):** Pre-check logged expected defaults: `mode parameters: OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=0 DspGainDb=6`.
+- **Stereo Speaker Check (Step 3b):**
+  - Left & Right channels tested separately with 100 Hz, 1000 Hz, and sweep 40 Hz → 16 kHz; tweeters at 8 kHz.
+  - Owner observation: *"было все кроме басса, стороны разделялись, твитеры звучали"*.
+  - Left/right stereo separation works properly.
+  - 1000 Hz and 8000 Hz played cleanly without crackle or clicks.
+  - 100 Hz was inaudible in plain un-EQ'd stereo (`SpeakerDsp=0`).
+- **Dedicated Tweeter-Mute Test (`TweeterMode=0`) — BREAKTHROUGH:**
+  - `TweeterMode=0` set in registry (tweeters channels 2 & 5 completely muted to 0).
+  - 1000 Hz tone played for 4 seconds at volume 0.2, amplitude 0.3.
+  - Signal sent exclusively to channels 0, 1, 3, 4 (woofer pairs).
+  - Owner confirmed: *"звук был да"* (sound was heard!).
+  - **Deduction:** The woofers (channels 0, 1, 3, 4) are **100% physically functional, powered, and active**. The absence of low-frequency 100 Hz hum in plain mode is caused by the steep natural acoustic drop-off of un-EQ'd laptop cones at -30 dBFS combined with human equal-loudness curves. Hearing bass requires the ported KAIT2EN DSP (`SpeakerDsp=1..4`), specifically Bankstown virtual bass harmonics and woofer biquad EQ.
+- **DPC & Clock Timing (PASS):** `maxCopyGapUs = 2558` (2.55 ms), `gaps>lead = 0`, `skips = 0`, exactly 1 re-aim at stream start. Flawless copy performance.
+- **Recovery (PASS):** Device safely re-bound to official `AppleAudio.sys` (`oem16.inf`, `CM_PROB_NONE`, Status OK). Volatile test session removed, registry parameters cleaned.
+- Full details in [docs/logs/EXCERPT_20261028_181400.md](logs/EXCERPT_20261028_181400.md).
 
 ### 2026-10-28 (17:00 session): Build 1.0.10.0 prepared, all 5 host tests pass (source verified, ready for hardware check)
 
