@@ -1,9 +1,24 @@
 # T2AudioPort Driver - Current State (Authoritative)
 
-**Last Updated**: 2026-10-28 (evening)  
-**Current status**: **STAGE D COMPLETE (PROVEN ON HARDWARE).** All Stage D criteria passed: BSOD 0x7E fixed, `START_IO`/`STOP_IO` handshake verified against bridgeOS, `SetState RUN` transitions cleanly, T2 clock locks at 1000-frame lead with DPC copy active, and hardware cleanly halts on stop. Ready for Stage E (first sound at low volume).  
-**Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
-**Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+**Last Updated**: 2026-10-28 (Stage E Complete)  
+**Current status**: **STAGE E FIRST SOUND ACHIEVED (PROVEN ON HARDWARE).** Physical sound successfully produced on MacBookPro16,1 on bare-metal Windows via custom T2Audio driver! Streams verified both via WASAPI automated tone and live Windows system audio. Complete stability: zero BSODs, clean START_IO and STOP_IO. Owner acoustic observations recorded: sound is present, flat, occasionally crackles, and not very loud. Deep analysis and action plan documented in [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).  
+**Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
+**Physical Machine Status**: MacBookPro16,1 running official [`AppleAudio.sys`](file:///C:/Windows/System32/drivers/AppleAudio.sys) (Status OK).
+
+### 2026-10-28: Stage E Hardware Verification — First Sound Achieved! (PROVEN ON HARDWARE)
+
+- **Test Report:** [docs/logs/EXCERPT_20261028_143928.md](logs/EXCERPT_20261028_143928.md) & [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).
+- **Tested Build:** DriverVer `10/28/2026,1.0.8.0`, SHA256 `26A701DCA40DEF0EFBF6DC74D0D30849A83AA12D0B1E31F82436F25959ED7D7B`, signed with test cert CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE.
+- **Pre-check (PASS):** Stage 1 verified mute and endpoint parameters (wasapi.txt: ndpoint mute=True volume=0, T2 endpoint muted, volume 0.).
+- **Stage D Regression (PASS):** Clean `START_IO reply msg=1 status=0x0`, `SetState RUN StartIo status=0x0`, sample delta 16640, `STOP_IO reply msg=3 status=0x0`.
+- **Stage E Automated Tone (PASS):** 440 Hz tone played for 3 seconds at 0.03 volume; 144,000 frames rendered in 201 iterations; endpoint automatically re-muted.
+- **Stage E Live Playback (PASS):** Driver enabled with `OutputAttenuation=1` (-6 dB) and `DiagStage=5` (MMIO+BCE); default Windows audio endpoint played audio directly from user applications.
+- **Physical Acoustic Observations (Owner):**
+  - **Звук есть (Sound present):** Core audio engine, DMA buffer mirroring, and co-processor stream confirmed operational.
+  - **Плоский (Flat):** Expected due to absence of Apple's CoreAudio DSP/EQ and speaker compensation curves (Task F1).
+  - **Иногда хрепит (Occasional crackles):** Exactly matches the predicted clock-drift behavior from `tests/T2AudioPipelineTest.c` when `ClockRateTracking=0`. Periodic re-aiming across crystal offset causes micro-discontinuities (Task E3).
+  - **Не особо громкий (Low volume):** Result of conservative OutputAttenuation=1 (-6 dB) safety cut and unconfigured hardware smart-amp gain registers (Task R7).
+- **Post-Test Recovery (PASS):** Package cleanly uninstalled, device disabled and re-bound to official `AppleAudio.sys` (`oem16.inf`, Status: OK). Sound scheme restored to `.Default`.
 
 ### 2026-10-28 (night): session summary, layout tooling (source only, not hardware-tested)
 
