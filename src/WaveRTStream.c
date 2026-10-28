@@ -369,6 +369,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                                                             : context->SpeakerDsp,
                     context->DspGainDb,
                     context->TweeterTrimDb,
+                    context->WooferLimitDb,
                     &instance->Dsp);
             } else if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(
@@ -767,11 +768,11 @@ T2AudioStreamSetState(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u dspLimited=%lu\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u dspLimited=%lu wooferLimited=%lu\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
                  instance->CopyGapsOverLead, instance->SkipEvents,
-                 instance->Dsp.LimitedFrames));
+                 instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 

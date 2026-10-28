@@ -104,8 +104,10 @@ typedef struct _T2DSP_STATE {
     unsigned int SidePos;
     // Limiter gains (Q30): left woofers, right woofers, tweeters.
     long long Gain[3];
-    // Diagnostics: frames where a limiter reduced the gain.
+    // Diagnostics: frames where a limiter reduced the gain (all limiters),
+    // and those of the woofer limiters alone.
     unsigned long LimitedFrames;
+    unsigned long WooferLimitedFrames;
 } T2DSP_STATE;
 
 static __inline void
@@ -402,7 +404,8 @@ T2DspXtc(T2DSP_STATE *S, long long *L, long long *R)
 // Peak limiter on Count linked samples (full scale 2^31, |x| < 2^40): scales
 // them by the shared gain (Q30) kept in *Gain.
 static __inline void
-T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned long *Limited)
+T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, long long Threshold,
+           unsigned long *Limited)
 {
     long long peak = 0;
     long long g = *Gain;
@@ -416,9 +419,9 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
     }
     // Release toward unity, then attack instantly if needed.
     g += (T2DSP_GAIN_ONE - g) >> T2DSP_RELEASE_SHIFT;
-    if (peak > 0 && T2DspSar(peak * (g >> 8), 22) > T2DSP_LIMIT_THRESHOLD) {
-        // g = threshold / peak in Q30 (peak < 2^33, threshold < 2^31).
-        g = (T2DSP_LIMIT_THRESHOLD << 30) / peak;
+    if (peak > 0 && T2DspSar(peak * (g >> 8), 22) > Threshold) {
+        // g = threshold / peak in Q30 (peak < 2^40, threshold < 2^31).
+        g = (Threshold << 30) / peak;
         (*Limited)++;
     }
     *Gain = g;
@@ -432,7 +435,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 // T2DSP_LEVEL_VIRTBASS, T2DSP_LEVEL_COMP (virtual bass + compressor) or
 // T2DSP_LEVEL_BUZZ (all of it + the woofer buzz compressor). GainDb is the
 // make-up gain (0..12 dB) in front of the limiter; TweeterTrimDb (0..12 dB)
-// lifts the tweeters only. AttenuationShift is the same safety cut as the
+// lifts the tweeters only; WooferLimitDb (0..12 dB) lowers the woofers'
+// limiter ceiling below -1 dBFS. AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
 // S24_LE).
 static __inline void
@@ -444,6 +448,7 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             unsigned int Level,
                             unsigned int GainDb,
                             unsigned int TweeterTrimDb,
+                            unsigned int WooferLimitDb,
                             T2DSP_STATE *S)
 {
     unsigned long f;
@@ -451,6 +456,9 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
     // Tweeter trim: extra 0..12 dB on the tweeters only, on top of the
     // make-up gain (the chain leaves them ~13 dB under the woofers).
     long long tgain = T2DspSar(gain * T2DspGainFromDb(TweeterTrimDb), T2DSP_Q);
+    // Woofer limiter ceiling: WooferLimitDb (0..12 dB) below the -1 dBFS
+    // threshold, against woofer overload / rattle at full volume.
+    long long wooferThreshold = (T2DSP_LIMIT_THRESHOLD << T2DSP_Q) / T2DspGainFromDb(WooferLimitDb);
 
     AttenuationShift = T2AudioClampAttenuation(AttenuationShift);
     for (f = 0; f < Frames; f++) {
@@ -508,9 +516,14 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
         rw[0] = w[1];
         tw[0] = t[0];
         tw[1] = t[1];
-        T2DspLimit(&S->Gain[0], lw, 1, &S->LimitedFrames);
-        T2DspLimit(&S->Gain[1], rw, 1, &S->LimitedFrames);
-        T2DspLimit(&S->Gain[2], tw, 2, &S->LimitedFrames);
+        {
+            unsigned long woofersBefore = S->WooferLimitedFrames;
+
+            T2DspLimit(&S->Gain[0], lw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Gain[1], rw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Gain[2], tw, 2, T2DSP_LIMIT_THRESHOLD, &S->LimitedFrames);
+            S->LimitedFrames += S->WooferLimitedFrames - woofersBefore;
+        }
 
         {
             unsigned int lwWord = T2AudioSar32((unsigned int)(lw[0] & 0xFFFFFFFFll), Shift);

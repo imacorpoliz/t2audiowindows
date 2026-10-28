@@ -5,6 +5,14 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): "a slight hum with heavy bass at max volume"; woofer limiter ceiling (source only, not hardware-tested)
+
+- **Owner:** with a lot of bass at maximum volume the sound still hums a little. This was heard with `SpeakerDsp=2`.
+- **Reading:** woofer overload or chassis rattle. Level 2 has no dynamics control except the −1 dBFS peak limiter, which limits peaks, not cone excursion. KAIT2EN normally runs this chain after an autogain to about −12 LUFS; here, at 100 % Windows volume plus +6 dB make-up, the woofers are driven close to full scale.
+- **First remedy (already in 1.0.10.0):** `SpeakerDsp=4`. It adds the 4-band compressor (bass band: −24 dB threshold, ratio 4) and the woofer buzz compressor (110–145 Hz, ratio 8), which exist for this case.
+- **Added `Parameters\WooferLimitDb`** (0–12 dB, default 0): lowers the woofer limiters' ceiling below −1 dBFS; tweeters keep −1 dBFS. `run summary` gains `wooferLimited=`. Test: at 6 dB a full-scale 100 Hz is held exactly at −7 dBFS on the woofers (also under UBSan).
+- CI green on `c973ef8` (`TweeterTrimDb`).
+
 ### 2026-10-28 (Claude): analysis of Listening Session #2 (SpeakerDsp=2); tweeter trim (source only, not hardware-tested)
 
 Based on `docs/logs/EXCERPT_20261028_184300.md` and the owner: "good sound, a bit quiet, the bass appeared, but not quite like macOS"; later also "as if the sample rate is a little too low".

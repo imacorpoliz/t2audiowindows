@@ -148,6 +148,10 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // TweeterTrimDb (Parameters\TweeterTrimDb, default 0, 0..12): extra gain
     // on the tweeters in the DSP path only (brightness / "air").
     ULONG TweeterTrimDb;
+    // WooferLimitDb (Parameters\WooferLimitDb, default 0, 0..12): lowers the
+    // woofers' limiter ceiling below -1 dBFS in the DSP path (overload /
+    // rattle at full volume with heavy bass).
+    ULONG WooferLimitDb;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;
