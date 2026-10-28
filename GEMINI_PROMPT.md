@@ -1,28 +1,30 @@
-# Промпт для Gemini (установщик, постоянный режим, перезагрузка; звук разрешён)
+# Prompt for Gemini (installer, persistent mode, reboot; sound allowed)
 
-Вставь текст ниже в Gemini как задание. Подробности: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md`, `docs/INSTALL.md` и первая запись в `docs/CURRENT_STATE.md`.
+Paste the text below into Gemini as its task. Details: the "▶ NEXT RUN" block in `GEMINI.md`, `docs/INSTALL.md` and the first entry in `docs/CURRENT_STATE.md`.
 
 ```text
-Ты работаешь в репозитории imacorpoliz/t2audiowindows на Windows-машине с WDK и на тестовом MacBookPro16,1. Ты — билдер и тестировщик драйвера T2AudioPort.
+You work in the repository imacorpoliz/t2audiowindows on a Windows machine with the WDK and on the test MacBookPro16,1. You are the builder and tester of the T2AudioPort driver.
 
-РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ: звук разрешён; установка драйвера в постоянный режим установщиком tools\T2Audio-Setup.ps1 разрешена; перезагрузка Windows разрешена. Сон Mac (шаг 6) — только если владелец отдельно скажет «разрешаю сон».
+OWNER PERMISSIONS FOR THIS SESSION: sound is allowed; installing the driver in persistent mode with the installer tools\T2Audio-Setup.ps1 is allowed; restarting Windows is allowed. Mac sleep (step 6) only if the owner separately says "I allow sleep" («разрешаю сон»).
 
-Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md (шаги 1–8 по порядку), docs/INSTALL.md, §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md.
+Read: the "▶ NEXT RUN" block in GEMINI.md (steps 1–8 in order), docs/INSTALL.md, §1 "Hard rules", the first entry in docs/CURRENT_STATE.md.
 
-Цель: проверить на железе то, что Claude сделал для ежедневного использования:
-1) сборка 1.0.12.0 в packaging\ (подписанные .sys/.cat/.inf);
-2) установка: T2Audio-Setup.ps1 -Action Install -Preset macos;
-3) обычная перезагрузка: драйвер стартует сам, CrashGuardStrikes остаётся 0 (главный тест);
-4) строка разъёма наушников в логе — вставлены и вынуты;
-5) пресеты bright / loud / maxvolume / even / macos (even = автоусиление: ровнее ли громкость между тихой и громкой записью, нет ли «качания»; autoGainDb10 из run summary);
-6) сон (только с разрешения);
-7) T2Audio-Setup.ps1 -Action Uninstall — возврат AppleAudio.
+Goal: verify on hardware what Claude built for daily use:
+1) build 1.0.12.0 into packaging\ (signed .sys/.cat/.inf);
+2) install: T2Audio-Setup.ps1 -Action Install -Preset macos;
+3) ordinary reboot: the driver starts by itself, CrashGuardStrikes stays 0 (the main test);
+4) the headphone jack line in the log, with headphones plugged in and unplugged;
+5) presets bright / loud / maxvolume / even / macos (even = autogain: is the level more even between a quiet and a loud recording, any "pumping"? autoGainDb10 from run summary);
+6) sleep (only with permission);
+7) T2Audio-Setup.ps1 -Action Uninstall: back to AppleAudio.
 
-Лог ядра снимай DbgView с начала каждого шага. Отчёт: docs/logs/EXCERPT_*.md (вывод установщика, строки лога: persistent mode, crash guard, headphone jack, mode parameters, run summary с maxCopyUs; слова владельца), запись в docs/CURRENT_STATE.md, PR в diagnostics. «Доказано» — только проверенное.
+The installer's UI is in Russian; GEMINI.md gives the English meaning of the strings to check.
 
-Правила:
-- Сбой или BSOD — стоп. После перезагрузки T2Audio-Setup.ps1 -Action Status (покажет удар защиты), минидамп из C:\Windows\Minidump, отчёт, вопрос владельцу. Код не чинить.
-- Если после обычной перезагрузки защита показывает удар — стоп, это ошибка для Claude.
-- В конце: по решению владельца либо оставить установленным (пресет macos), либо -Action Uninstall. Запиши, что выбрано.
-- В diagnostics напрямую не пушить, только PR.
+Capture the kernel log with DbgView from the start of every step. Report: docs/logs/EXCERPT_*.md (installer output; log lines: persistent mode, crash guard, headphone jack, mode parameters, run summary with maxCopyUs; the owner's words verbatim with an English translation), an entry in docs/CURRENT_STATE.md, a PR into diagnostics. All documentation in English. "Proven" means verified only.
+
+Rules:
+- A failure or BSOD: stop. After the reboot run T2Audio-Setup.ps1 -Action Status (it shows the crash-guard strike), take the minidump from C:\Windows\Minidump, write the report, ask the owner. Do not fix code.
+- If the crash guard shows a strike after an ordinary reboot: stop, this is a bug for Claude.
+- At the end, as the owner decides: either keep it installed (preset macos) or -Action Uninstall. Record the choice.
+- Never push to diagnostics directly, only a PR.
 ```

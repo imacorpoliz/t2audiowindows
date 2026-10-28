@@ -1,171 +1,174 @@
-# T2AudioPort — подробное руководство по драйверу
+# T2AudioPort — detailed driver guide
 
-> Документ описывает **текущий исходный код** ветки и то, как с ним работать: устройство железа, протокол, архитектуру драйвера, потоковый тракт, модель безопасности, сборку, тестирование на железе и диагностику.
-> Хронология и доказательства с железа — в [`CURRENT_STATE.md`](CURRENT_STATE.md) (единственный авторитетный статус-документ). Отчёты реверс-инжиниринга — в [`analysis/`](analysis/).
+> This document describes the **current source code** of the branch and how to work with it: the hardware, the protocol, the driver architecture, the streaming path, the DSP, the safety model, building, hardware testing and diagnostics.
+> Chronology and hardware evidence are in [`CURRENT_STATE.md`](CURRENT_STATE.md) (the only authoritative status document). What is left to do is in [`ROADMAP.md`](ROADMAP.md). Reverse-engineering reports are in [`analysis/`](analysis/).
 
-## Содержание
+## Contents
 
-1. [Статус и ограничения](#1-статус-и-ограничения)
-2. [Аппаратура: T2 audio controller](#2-аппаратура-t2-audio-controller)
-3. [Протокол BCE](#3-протокол-bce)
-4. [Архитектура драйвера](#4-архитектура-драйвера)
-5. [Жизненный цикл устройства](#5-жизненный-цикл-устройства)
-6. [Потоковый тракт (WaveRT → BAR0)](#6-потоковый-тракт-wavert--bar0)
-7. [Синхронизация и IRQL](#7-синхронизация-и-irql)
-8. [Модель безопасности, стадии и параметры реестра](#8-модель-безопасности-стадии-и-параметры-реестра)
-9. [Сборка и тесты](#9-сборка-и-тесты)
-10. [Установка и тест на железе](#10-установка-и-тест-на-железе)
-11. [Диагностика: что должно быть в логе](#11-диагностика-что-должно-быть-в-логе)
-12. [Известные проблемы](#12-известные-проблемы)
-13. [Сравнение с kaiT2en](#13-сравнение-с-kait2en)
-14. [Как вносить изменения](#14-как-вносить-изменения)
-15. [Глоссарий](#15-глоссарий)
+1. [Status and limitations](#1-status-and-limitations)
+2. [Hardware: the T2 audio controller](#2-hardware-the-t2-audio-controller)
+3. [The BCE protocol](#3-the-bce-protocol)
+4. [Driver architecture](#4-driver-architecture)
+5. [Device life cycle](#5-device-life-cycle)
+6. [Streaming path (WaveRT → BAR0)](#6-streaming-path-wavert--bar0)
+7. [Synchronisation and IRQL](#7-synchronisation-and-irql)
+8. [Safety model, stages and registry parameters](#8-safety-model-stages-and-registry-parameters)
+9. [Build and tests](#9-build-and-tests)
+10. [Installation and hardware tests](#10-installation-and-hardware-tests)
+11. [Diagnostics: what the log should show](#11-diagnostics-what-the-log-should-show)
+12. [Known issues](#12-known-issues)
+13. [Comparison with kaiT2en](#13-comparison-with-kait2en)
+14. [How to make changes](#14-how-to-make-changes)
+15. [Glossary](#15-glossary)
 
 ---
 
-## 1. Статус и ограничения
+## 1. Status and limitations
 
-| Что | Состояние |
+| What | State |
 |---|---|
-| Сборка | В CI (`.github/workflows/build.yml`): WDK, Release x64 + хост-тесты MSVC/gcc/clang. |
-| Хост-тесты | `tests/BceProtocolLogicTest.c`, `tests/T2AudioBufferLogicTest.c` — проходят. |
-| Стадии 1–3 на железе (RAM, BAR, BCE discovery) | Проверялись на MacBookPro16,1 на более ранних сборках: BAR, `BufferStruct` и устройство `Speaker` `0x39` находятся. |
-| `START_IO` на железе | Падал с BSOD `0x7E`. Причина найдена статически (IOCTL `0x222020` от AppleUSBVHCI), обработчик добавлен; **на железе не проверено**. Агент принимает `-BceIo` только вместе с `-Mmio` и флагом владельца `-OwnerApprovedBceIo`. |
-| Запись PCM в BAR0 (стадия 5) | В текущем виде на железе **не проверялась**. |
-| Сон / пробуждение | Не реализовано. **Не уводите Mac в сон во время сессии стадии ≥ 4.** |
-| Микрофон, наушники, громкость | Не реализовано (только встроенные динамики). |
+| Build | In CI (`.github/workflows/build.yml`): WDK, Release x64, plus host tests on MSVC/gcc/clang. |
+| Host tests | Six suites in `tests/` (§9.3); all pass. |
+| Stages 1–5 on hardware (RAM, BAR, BCE discovery, transport, MMIO copy) | **Verified** on MacBookPro16,1 (1.0.7.0 and later). |
+| `START_IO` on hardware | **Verified** (Stage D, 1.0.7.0): no BSOD, the T2 clock locks, `STOP_IO` stops cleanly. |
+| Sound through the speakers | **Verified** (Stage E, 1.0.8.0), DSP level 3 approved by the owner (1.0.11.0). |
+| Persistent mode (start on every boot), installer | Implemented, **not verified on hardware**. |
+| Sleep / wake | Power callbacks stop and restart I/O (`src/Power.c`); **not verified on hardware**. |
+| Headphones | Only the jack state is read at probe time (`HEADPHONES.md`); no output. |
+| Microphone, hardware volume | Not implemented. |
 
-Драйвер **не стартует при обычной загрузке**: для запуска нужен волатильный ключ реестра `TestSession` (§8). Это сделано намеренно, чтобы падение не превратилось в бесконечную перезагрузку.
+By default the driver **does not start on an ordinary boot**: it needs the volatile registry key `TestSession` (§8.1), or the persistent mode `Parameters\EnableProduction=1` that the installer sets, which is protected by the crash guard (§8.3). This is deliberate: a crash must not turn into an endless reboot loop.
 
 ---
 
-## 2. Аппаратура: T2 audio controller
+## 2. Hardware: the T2 audio controller
 
-### 2.1 Устройство
+### 2.1 The device
 
-* PCI `VEN_106B&DEV_1803` (на тестовой машине `SUBSYS_1887106B&REV_01`). Это функция T2, через которую bridgeOS отдаёт хосту аудио.
-* Штатный драйвер Boot Camp — `AppleAudio.sys`. Он даёт **стерео**-endpoint. Попытки открыть 6 каналов через него отклоняются (`NOTES.md` §1).
-* Командный канал идёт не через этот PCI-device, а через виртуальный хост-контроллер **`AppleUSBVHCI.sys`** (BCE — Buffer Copy Engine), IOCTL `0x222018` (§3).
+* PCI `VEN_106B&DEV_1803` (on the test machine `SUBSYS_1887106B&REV_01`). This is the T2 function through which bridgeOS exposes audio to the host.
+* The stock Boot Camp driver is `AppleAudio.sys`. It exposes a **stereo** endpoint. Attempts to open 6 channels through it are rejected (`archive/planning/NOTES.md` §1).
+* The command channel does not go through this PCI device but through the virtual host controller **`AppleUSBVHCI.sys`** (BCE, Buffer Copy Engine), IOCTL `0x222018` (§3).
 
-### 2.2 Ресурсы памяти
+### 2.2 Memory resources
 
-| Ресурс | Назначение | Как драйвер его находит |
+| Resource | Purpose | How the driver finds it |
 |---|---|---|
-| Memory resource `[0]` (kaiT2en: BAR0) | Окно кольцевых аудиобуферов и `BufferStruct` | Первый memory-ресурс. Мапится R/W. Если ресурс prefetchable (`CM_RESOURCE_MEMORY_PREFETCHABLE`) — write-combining, иначе uncached. |
-| Config BAR (kaiT2en: BAR4) | GPR-блок по смещению `+0xC000` | Перебор всех memory-ресурсов: используется первый, у которого `GPR[1] == 0x19870423` и `GPR[0] >= 2`. Порядок ресурсов в Windows не обязан совпадать с порядком BAR. Мапится read-only. |
+| Memory resource `[0]` (kaiT2en: BAR0) | Window of the audio rings and `BufferStruct` | The first memory resource. Mapped R/W. If the resource is prefetchable (`CM_RESOURCE_MEMORY_PREFETCHABLE`), write-combining; otherwise uncached. |
+| Config BAR (kaiT2en: BAR4) | GPR block at offset `+0xC000` | All memory resources are tried: the first one with `GPR[1] == 0x19870423` and `GPR[0] >= 2` is used. The order of resources in Windows need not match the BAR order. Mapped read-only. |
 
-GPR (`config + 0xC000`, по 32 бита):
+GPR (`config + 0xC000`, 32 bits each):
 
-| Смещение | Поле |
+| Offset | Field |
 |---|---|
-| `+0x00` | version (драйвер требует ≥ 2, kaiT2en — ≥ 3) |
+| `+0x00` | version (the driver requires ≥ 2, kaiT2en ≥ 3) |
 | `+0x04` | signature `0x19870423` |
-| `+0x08` | смещение `BufferStruct` внутри BAR0 |
-| `+0x10` | sleep marker `0x19770525` (пишется перед сном; драйвер его пока не использует) |
+| `+0x08` | offset of `BufferStruct` inside BAR0 |
+| `+0x10` | sleep marker `0x19770525` (written before sleep; the driver does not use it yet) |
 
-### 2.3 `BufferStruct` (в BAR0)
+### 2.3 `BufferStruct` (in BAR0)
 
-Упаковка 4 байта, все смещения проверены `C_ASSERT` в `src/T2AudioMiniport.h`:
+Packing 4 bytes; every offset is checked by `C_ASSERT` in `src/T2AudioMiniport.h`:
 
 ```
-T2AUDIO_BUFFER_STRUCT            (заголовок 0x10)
+T2AUDIO_BUFFER_STRUCT            (header 0x10)
   +0x00 u32 Version
   +0x04 u32 Signature            = 0x19870423
   +0x08 u32 Flags
   +0x0C u8  NumDevices (+3 reserved)
-  +0x10 DEVICE_METADATA Devices[20]          шаг 0xBDEC
+  +0x10 DEVICE_METADATA Devices[20]          stride 0xBDEC
 
 DEVICE_METADATA                  (0xBDEC)
   +0x0000 char Name[128]          "Speaker", "Codec Output", ...
   +0x0080 u8   NumInputStreams
   +0x0081 u8   NumOutputStreams
-  +0x0084 STREAM_METADATA InputStreams[5]    шаг 0x12E4
+  +0x0084 STREAM_METADATA InputStreams[5]    stride 0x12E4
   +0x5EF8 STREAM_METADATA OutputStreams[5]
   +0xBD6C u8   Filler[128]
 
 STREAM_METADATA                  (0x12E4)
   +0x0000 u8  NumBuffers
-  +0x0004 BUFFER_ENTRY Buffers[100]          шаг 0x30
+  +0x0004 BUFFER_ENTRY Buffers[100]          stride 0x30
   +0x12C4 u8  Filler[32]
 
 BUFFER_ENTRY                     (0x30)
-  +0x00 u64 Address               смещение буфера ОТ НАЧАЛА BAR0
+  +0x00 u64 Address               buffer offset FROM THE START OF BAR0
   +0x08 u64 Size
   +0x10 u64 Pad[4]
 ```
 
-`T2AudioMapResources` читает `NumDevices` **один раз**. Эту копию он проверяет через `T2AudioDeviceTableFits` (таблица должна целиком помещаться в смапленный BAR) и её же передаёт в `T2AudioFindSpeakerBuffer`. Это защищает от изменения значения в device memory между проверкой и обходом. Устройство ищется по точному имени `"Speaker"` с терминатором. Его буфер — `OutputStreams[0].Buffers[0]`, а `Address + Size` должны помещаться в BAR0.
+`T2AudioMapResources` reads `NumDevices` **once**. It validates that copy with `T2AudioDeviceTableFits` (the table must fit entirely inside the mapped BAR) and passes the same copy to `T2AudioFindSpeakerBuffer`. This protects against the value changing in device memory between the check and the walk. The device is found by the exact name `"Speaker"` with its terminator. Its buffer is `OutputStreams[0].Buffers[0]`, and `Address + Size` must fit inside BAR0.
 
-### 2.4 Кольцо динамиков
+### 2.4 The speaker ring
 
-* Размер `0x61800` = **399 360 байт** = 16 640 кадров × 24 байта ≈ **346,7 мс** при 48 кГц.
-* Формат (свойство `'pft '` потока `0x3A`, снят на MacBookPro16,1, `NOTES.md` §4):
+* Size `0x61800` = **399 360 bytes** = 16 640 frames × 24 bytes ≈ **346.7 ms** at 48 kHz.
+* Format (property `'pft '` of stream `0x3A`, captured on MacBookPro16,1, `archive/planning/NOTES.md` §4):
 
-| Поле | Значение |
+| Field | Value |
 |---|---|
 | sample rate | 48 000 |
 | format id | `'lpcm'` (`0x6C70636D`) |
-| flags | `0x4` = SIGNED (не float, little-endian, interleaved, не packed, не aligned-high) |
+| flags | `0x4` = SIGNED (not float, little-endian, interleaved, not packed, not aligned-high) |
 | bytes per frame / packet | 24 / 24, frames per packet 1 |
 | channels | **6** |
 | bits per channel | **24** |
 
-* Итого: 6 каналов по 4 байта, в каждом 24 значащих бита в **младших** трёх байтах (`S24_LE` в терминах ALSA, так это интерпретирует kaiT2en). Windows отдаёт 32-битный PCM, выровненный по **старшим** битам, поэтому при копировании каждый сэмпл сдвигается на 8 бит вправо со знаком (§6.5).
-* bridgeOS читает кольцо по кругу после `START_IO`. Аппаратная позиция чтения хосту напрямую не видна: kaiT2en получает её из сообщений `UPDATE_TIMESTAMP`, а этот драйвер — пока нет (§12).
+* In total: 6 channels of 4 bytes, each with 24 significant bits in the **low** three bytes (`S24_LE` in ALSA terms, which is how kaiT2en interprets it). Windows delivers 32-bit PCM aligned to the **high** bits, so each sample is shifted right by 8 bits with sign on copy (§6.5).
+* bridgeOS reads the ring in a circle after `START_IO`. The hardware read position is not directly visible to the host: it is derived from `UPDATE_TIMESTAMP` messages (§6.2).
 
 ---
 
-## 3. Протокол BCE
+## 3. The BCE protocol
 
-### 3.1 Транспорт (`src/BceTransport.c`)
+### 3.1 Transport (`src/BceTransport.c`)
 
-* Устройство `\Device\AppleUSBVHCI`, открывается `IoGetDeviceObjectPointer(FILE_ALL_ACCESS)`. Ссылка на file object удерживается всё время, пока транспорт открыт.
-* `IOCTL 0x222018` = `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)`. Входной буфер — сообщение, выходной — ответ. `IoStatus.Information` — длина ответа (обрезается до размера буфера).
-* IRP строится `IoBuildDeviceIoControlRequest`, `FileObject` в стеке IRP **не** выставляется (как у `AppleAudio.sys`; см. §12 — BSOD это не исправило).
-* Все отправки сериализуются `KMUTEX`. Захват ждёт не дольше 7000 мс, сама отправка — не дольше **6000 мс**: это больше 5 с, которые ждёт ответа сам AppleUSBVHCI (`0x140002128`). Поэтому медленный ответ завершает IRP на стороне VHCI, а не приводит к «отравлению».
-* **Тег запроса** (первые 4 байта): счётчик 1..127, как у AppleAudio; его проставляет `T2AudioSendBceMessage`. Ответ с другим тегом отклоняется (`STATUS_DEVICE_PROTOCOL_ERROR`): AppleUSBVHCI будит ожидающий запрос любым RESPONSE, а также `NOTIFICATION_ALIVE`.
-* **Poisoning.** Если ответ не пришёл за 6000 мс, IRP бросается как есть (без `IoCancelIrp` — это была бы гонка с освобождением IRP), контекст намеренно утекает, транспорт помечается «отравленным». После этого все отправки сразу возвращают `STATUS_IO_TIMEOUT`, а транспорт никогда не закрывается: ссылка на file object держит целевое устройство живым для зависшего IRP.
-* Отправка запрещена выше `PASSIVE_LEVEL` (`STATUS_INVALID_DEVICE_STATE`).
+* Device `\Device\AppleUSBVHCI`, opened with `IoGetDeviceObjectPointer(FILE_ALL_ACCESS)`. The file object reference is held for as long as the transport is open.
+* `IOCTL 0x222018` = `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)`. The input buffer is the message, the output buffer the reply. `IoStatus.Information` is the reply length (clipped to the buffer size).
+* The IRP is built with `IoBuildDeviceIoControlRequest`; `FileObject` in the IRP stack is **not** set (as in `AppleAudio.sys`).
+* All sends are serialised by a `KMUTEX`. Acquiring it waits at most 7000 ms, the send itself at most **6000 ms**: longer than the 5 s that AppleUSBVHCI itself waits for a reply (`0x140002128`). So a slow reply completes the IRP on the VHCI side instead of "poisoning" the transport.
+* **Request tag** (first 4 bytes): a counter 1..127, as in AppleAudio; set by `T2AudioSendBceMessage`. A reply with a different tag is rejected (`STATUS_DEVICE_PROTOCOL_ERROR`): AppleUSBVHCI wakes a waiting request with any RESPONSE, and also with `NOTIFICATION_ALIVE`.
+* **Poisoning.** If no reply arrives within 6000 ms, the IRP is abandoned as is (no `IoCancelIrp`, which would race with the IRP being freed), its context is deliberately leaked, and the transport is marked "poisoned". From then on every send returns `STATUS_IO_TIMEOUT` immediately, and the transport is never closed: the file object reference keeps the target device alive for the hung IRP.
+* Sending above `PASSIVE_LEVEL` is refused (`STATUS_INVALID_DEVICE_STATE`).
 
-### 3.2 Формат сообщения (little-endian, без выравнивания)
+### 3.2 Message format (little-endian, unaligned)
 
 ```
-header (13 байт)
-  +0  u32  tag      счётчик запросов 1..127 (bridgeOS возвращает его в ответе)
+header (13 bytes)
+  +0  u32  tag      request counter 1..127 (bridgeOS returns it in the reply)
   +4  u8   type     1 = COMMAND, 2 = RESPONSE, 3 = NOTIFICATION
   +5  u64  device_id
-base (8 байт)
-  +13 u32  msg       код сообщения
-  +17 u32  status    0 = успех
-payload — с +21
+base (8 bytes)
+  +13 u32  msg       message code
+  +17 u32  status    0 = success
+payload from +21
 ```
 
-### 3.3 Используемые команды
+### 3.3 Commands used
 
-| Команда (msg) | Ответ | device_id | Payload запроса | Payload ответа | Где |
+| Command (msg) | Reply | device_id | Request payload | Reply payload | Where |
 |---|---|---|---|---|---|
 | `GET_DEVICE_LIST` (101) | 102 | 0 | — | `count u64`, `count × id u64` | `T2AudioGetDeviceList` |
-| `GET_PROPERTY` (7) | 8 | устройство | `obj u64, element u32, scope u32, selector u32, qualifier_size u64` (28 байт) | `obj, element, scope, selector, data_size u64`, затем данные (с +49) | `T2AudioGetProperty` |
-| `GET_OUTPUT_STREAM_LIST` (26) | 27 | устройство | — | как у списка устройств | `T2AudioGetOutputStreamList` |
-| `SET_REMOTE_ACCESS` (32) | 33 | 0 | `mode u64` | — | `T2AudioSetRemoteAccess` — **не используется**: на Windows его шлёт сам AppleUSBVHCI (`mode 1` при старте/пробуждении, `0` при сне), AppleAudio не шлёт никогда |
+| `GET_PROPERTY` (7) | 8 | device | `obj u64, element u32, scope u32, selector u32, qualifier_size u64` (28 bytes) | `obj, element, scope, selector, data_size u64`, then the data (from +49) | `T2AudioGetProperty` |
+| `GET_OUTPUT_STREAM_LIST` (26) | 27 | device | — | as for the device list | `T2AudioGetOutputStreamList` |
+| `SET_REMOTE_ACCESS` (32) | 33 | 0 | `mode u64` | — | `T2AudioSetRemoteAccess`, **not used**: on Windows AppleUSBVHCI sends it itself (`mode 1` at start/wake, `0` at sleep); AppleAudio never sends it |
 | `START_IO` (0) | 1 | speaker | — | — | `T2AudioStartIo` (`Phase4.c`) |
 | `STOP_IO` (2) | 3 | speaker | — | — | `T2AudioStopIo` |
 
-Каждый ответ проверяется: тег, `type == RESPONSE`, ожидаемый код, `status == 0`, длина. Для простых команд дополнительно проверяется эхо `device_id`, для свойств — эхо `obj/element/scope/selector`. Все разборщики — чистые функции в `src/BceProtocolLogic.h`, покрытые тестами.
+Every reply is checked: tag, `type == RESPONSE`, expected code, `status == 0`, length. Simple commands also check the `device_id` echo; properties check the `obj/element/scope/selector` echo. All parsers are pure functions in `src/BceProtocolLogic.h`, covered by tests.
 
-### 3.4 Используемые свойства
+### 3.4 Properties used
 
-| Selector | Scope | Объект | Значение |
+| Selector | Scope | Object | Value |
 |---|---|---|---|
-| `'uid '` `0x75696420` | `'glob'` | устройство | имя, например `Speaker` (≤ 128 байт, без NUL) |
-| `'pft '` `0x70667420` | `'glob'` | поток | 40-байтный дескриптор формата (§3.5) |
-| `'ltnc'` `0x6C746E63` | `'glob'` / `'outp'` | поток / устройство | задержка, кадры (u32) |
-| `'saft'` `0x73616674` | `'outp'` | устройство | safety offset, кадры (u32) |
+| `'uid '` `0x75696420` | `'glob'` | device | name, e.g. `Speaker` (≤ 128 bytes, no NUL) |
+| `'pft '` `0x70667420` | `'glob'` | stream | 40-byte format descriptor (§3.5) |
+| `'ltnc'` `0x6C746E63` | `'glob'` / `'outp'` | stream / device | latency, frames (u32) |
+| `'saft'` `0x73616674` | `'outp'` | device | safety offset, frames (u32) |
+| `'jack'` `0x6A61636B` | `'outp'` | headphone device (`"Codec Output"`) | 1 = plugged in (read at probe only) |
 
-### 3.5 Дескриптор `'pft '`
+### 3.5 The `'pft '` descriptor
 
 ```
-+0  u64 sample_rate   IEEE-754 double (декодируется без FPU: T2AudioBceDecodeIntegralDouble)
++0  u64 sample_rate   IEEE-754 double (decoded without the FPU: T2AudioBceDecodeIntegralDouble)
 +8  u32 format_id     'lpcm'
 +12 u32 format_flags  1 FLOAT, 2 BIG_ENDIAN, 4 SIGNED, 8 PACKED, 16 ALIGNED_HIGH,
                       32 NON_INTERLEAVED, 64 NON_MIXABLE
@@ -177,453 +180,490 @@ payload — с +21
 +36 u32 reserved
 ```
 
-`T2AudioBceDeviceSampleShift` принимает только 6 каналов / 48 кГц / контейнер 4 байта / signed / little-endian / interleaved / не packed / не float:
+`T2AudioBceDeviceSampleShift` accepts only 6 channels / 48 kHz / 4-byte container / signed / little-endian / interleaved / not packed / not float:
 
-* 32 бита → сдвиг 0;
-* 24 бита + `ALIGNED_HIGH` → 0;
-* 24 бита без него → **8** (случай динамиков);
-* всё остальное → `-1`: копирование в MMIO запрещено.
+* 32 bits → shift 0;
+* 24 bits + `ALIGNED_HIGH` → 0;
+* 24 bits without it → **8** (the speaker case);
+* anything else → `-1`: copying to MMIO is forbidden.
 
-### 3.6 Устройства на MacBookPro16,1
+### 3.6 Devices on MacBookPro16,1
 
-`0x21` Digital Mic, `0x25` Codec Output, `0x39` **Speaker** (поток `0x3A`), `0x43` Codec Input, `0x47` Bridge Loopback.
+`0x21` Digital Mic, `0x25` Codec Output (headphones), `0x39` **Speaker** (stream `0x3A`), `0x43` Codec Input, `0x47` Bridge Loopback.
 
 ---
 
-## 4. Архитектура драйвера
+## 4. Driver architecture
 
-### 4.1 Файлы
+### 4.1 Files
 
-| Файл | Язык | Отвечает за |
+| File | Language | Responsible for |
 |---|---|---|
-| `src/Driver.c` | C++ | `DriverEntry`, `AddDevice`, `StartDevice` (порядок стадий, регистрация портов), PnP-хук освобождения ресурсов, чтение реестра. |
-| `src/Device.c` | C++ | Маппинг/размаппинг BAR, поиск GPR и `BufferStruct`, `T2AudioFindSpeakerBuffer`. |
-| `src/BceTransport.c` | C | Транспорт BCE, `GET_DEVICE_LIST` / `GET_PROPERTY` / `GET_OUTPUT_STREAM_LIST` / `SET_REMOTE_ACCESS`, probe и запрос формата потока. |
-| `src/Phase4.c` | C | `START_IO` / `STOP_IO`, (устаревший) hardware MDL. |
-| `src/WaveRTMiniport.c` | C | `IMiniportWaveRT`: описание фильтра, пины, `DataRangeIntersection`, проверка формата. Здесь же `INITGUID`. |
-| `src/WaveRTStream.c` | C | `IMiniportWaveRTStream`: буфер, состояния, позиция, копирование в BAR0, латентность. |
-| `src/Topology.c` | C | `IMiniportTopology`: bridge-пин → пин динамика. |
-| `src/T2AudioMiniport.h` | — | Структуры железа (`C_ASSERT` на размеры), контекст устройства, прототипы. |
-| `src/BceProtocolLogic.h` | C (чистый) | Разбор/сборка BCE-сообщений, `'pft '`, сдвиг сэмплов. Компилируется и в драйвер, и в тесты. |
-| `src/T2AudioBufferLogic.h` | C (чистый) | Арифметика буферов: выравнивание, куски копирования, QPC → кадры, конверсия сэмплов, решения по освобождению буфера и I/O. |
+| `src/Driver.c` | C++ | `DriverEntry`, `AddDevice`, `StartDevice` (stage order, port registration), PnP hook for releasing resources, shutdown notification, registry reads, persistent mode and crash guard, the `0x222020` interception. |
+| `src/Device.c` | C++ | Mapping/unmapping the BARs, finding GPR and `BufferStruct`, `T2AudioFindSpeakerBuffer`. |
+| `src/BceTransport.c` | C | BCE transport, `GET_DEVICE_LIST` / `GET_PROPERTY` / `GET_OUTPUT_STREAM_LIST` / `SET_REMOTE_ACCESS`, probe (including the headphone jack) and the stream format query, `UPDATE_TIMESTAMP` handling. |
+| `src/Phase4.c` | C | `START_IO` / `STOP_IO`, the (obsolete) hardware MDL. |
+| `src/Power.c` | C | Power callbacks (`IAdapterPowerManagement`): STOP_IO before the device leaves D0 (query D3 and D1–D3), no MMIO writes while powered down, crash guard disarmed on D1–D3 and re-armed on D0. I/O starts again when the stream re-enters RUN. |
+| `src/WaveRTMiniport.c` | C | `IMiniportWaveRT`: filter description, pins, `DataRangeIntersection`, format validation. `INITGUID` lives here. |
+| `src/WaveRTStream.c` | C | `IMiniportWaveRTStream`: buffer, states, position, copying into BAR0 (plain or DSP path), clock following, latency, `run summary`. |
+| `src/Topology.c` | C | `IMiniportTopology`: bridge pin → speaker pin. |
+| `src/T2AudioMiniport.h` | — | Hardware structures (`C_ASSERT` on sizes), device context, prototypes. |
+| `src/BceProtocolLogic.h` | C (pure) | Parsing/building BCE messages, `'pft '`, sample shift, UID comparison. Compiled into both the driver and the tests. |
+| `src/T2AudioBufferLogic.h` | C (pure) | Buffer arithmetic: alignment, copy chunks, QPC → frames (with rate), sample conversion, buffer release and I/O decisions. |
+| `src/T2AudioSpeakerLogic.h` | C (pure) | Plain stereo → 6-channel layout, tweeter high-pass, attenuation, clock correction and rate tracking maths. |
+| `src/T2AudioDsp.h`, `src/T2AudioDspProfile16_1.h` | C (pure) | Integer speaker DSP (§8.3 `SpeakerDsp`) and its generated KAIT2EN tables (`tools/dsp/gen_kait2en_dsp.py`). |
+| `src/T2AudioCrashGuard.h` | C (pure) | Crash guard decision (strikes, Safe Mode). |
 
-Правило проекта: вся нетривиальная арифметика и разбор вынесены в чистые заголовки без зависимостей от ядра, и каждая такая функция покрыта хост-тестом.
+Project rule: all non-trivial arithmetic and parsing live in pure headers with no kernel dependencies, and every such function is covered by a host test.
 
-### 4.2 Объекты PortCls
+### 4.2 PortCls objects
 
 ```
 Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
  ├─ Subdevice "Topology"  (PortTopology + T2AUDIO_TOPOLOGY)
  │    pin 0 bridge IN  (analog) ──► pin 1 Speaker OUT (KSNODETYPE_SPEAKER)
  ├─ Subdevice "Wave"      (PortWaveRT + T2AUDIO_MINIPORT)
- │    pin 0 render sink (PCM 6ch/32bit/48k, KSCATEGORY_AUDIO) ──► pin 1 bridge OUT
+ │    pin 0 render sink (PCM 2ch/32bit/48k, KSCATEGORY_AUDIO) ──► pin 1 bridge OUT
  └─ PcRegisterPhysicalConnection(Wave pin 1 → Topology pin 0)
 ```
 
-Контекст устройства `T2AUDIO_DEVICE_CONTEXT` лежит сразу за `PORT_CLASS_DEVICE_EXTENSION_SIZE` в device extension (`T2AudioGetContext`). Основные поля:
+The device context `T2AUDIO_DEVICE_CONTEXT` sits right after `PORT_CLASS_DEVICE_EXTENSION_SIZE` in the device extension (`T2AudioGetContext`). Main fields:
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `Bar1Mapped/Size/Physical`, `Bar1WriteCombined` | BAR0 (кольца). Имя «Bar1» историческое. |
+| `Bar1Mapped/Size/Physical`, `Bar1WriteCombined` | BAR0 (the rings). The name "Bar1" is historical. |
 | `Bar2Mapped/Size` | config BAR (GPR) |
-| `BufferStruct`, `SpeakerBufferOffset/Size` | найденное кольцо динамиков |
-| `HardwareLock`, `HardwareReady` | защита MMIO от teardown (§7) |
-| `BceSpeakerDeviceId`, `SpeakerDeviceId` | найденный / «подключённый» speaker (второе — только на стадии ≥ 4) |
-| `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | результат запроса потока (§5.3) |
-| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode`, `OutputAttenuation`, `ClockRateTracking` | гейты и параметры (§8) |
-| `ClockLock`, `ClockGeneration`, `ClockAnchorFrames/Qpc` | якорь часов T2 из `UPDATE_TIMESTAMP` (§6.3) |
+| `BufferStruct`, `SpeakerBufferOffset/Size` | the speaker ring found |
+| `HardwareLock`, `HardwareReady` | protects MMIO against teardown (§7) |
+| `BceSpeakerDeviceId`, `SpeakerDeviceId` | speaker found / "connected" (the latter only at stage ≥ 4) |
+| `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | result of the stream query (§5.3) |
+| `BceHeadphoneDeviceId`, `HeadphoneJackPlugged` | headphone device and jack state at probe time |
+| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode`, `OutputAttenuation`, `ClockRateTracking`, `SpeakerDsp`, `DspGainDb`, `TweeterTrimDb`, `WooferLimitDb`, `DspAutoGain` | gates and parameters (§8) |
+| `ProductionMode`, `CrashGuardArmed`, `ShutdownRegistered` | persistent mode and crash guard state |
+| `ClockLock`, `ClockGeneration`, `ClockAnchorFrames/Qpc` | T2 clock anchor from `UPDATE_TIMESTAMP` (§6.2) |
 
-### 4.3 Формат на пине
+### 4.3 Pin format
 
-* Endpoint — **стерео**: `KSDATARANGE_AUDIO`, PCM, `MaximumChannels` 2, 32 бита, 48 000 Гц. При `TestSession\RawSpeakerChannels=1` — 6 (диапазон правится в `T2AudioMiniportInit`).
-* `DataRangeIntersection` (pin 0) возвращает **`KSDATAFORMAT_WAVEFORMATEXTENSIBLE`**: 2 канала, 48 кГц, 32/32 бита, `nBlockAlign` 8, маска `KSAUDIO_SPEAKER_STEREO`, subformat PCM. В режиме raw — 6 каналов, `nBlockAlign` 24, маска `0x60F`. При `OutputBufferLength == 0` возвращается требуемый размер и `STATUS_BUFFER_OVERFLOW`.
-* `T2AudioValidateRenderFormat(format, allowRaw, &channels)` принимает:
-  * стерео (маска `0x3`);
-  * в режиме raw — 6 каналов (маска `0x60F` или `0x3F`);
-  * `wValidBitsPerSample` от 1 до 32 и «плоский» `WAVE_FORMAT_PCM` с тем же числом каналов.
+* The endpoint is **stereo**: `KSDATARANGE_AUDIO`, PCM, `MaximumChannels` 2, 32 bits, 48 000 Hz. With `TestSession\RawSpeakerChannels=1` it is 6 (the range is patched in `T2AudioMiniportInit`).
+* `DataRangeIntersection` (pin 0) returns **`KSDATAFORMAT_WAVEFORMATEXTENSIBLE`**: 2 channels, 48 kHz, 32/32 bits, `nBlockAlign` 8, mask `KSAUDIO_SPEAKER_STEREO`, subformat PCM. In raw mode: 6 channels, `nBlockAlign` 24, mask `0x60F`. With `OutputBufferLength == 0` it returns the required size and `STATUS_BUFFER_OVERFLOW`.
+* `T2AudioValidateRenderFormat(format, allowRaw, &channels)` accepts:
+  * stereo (mask `0x3`);
+  * in raw mode, 6 channels (mask `0x60F` or `0x3F`);
+  * `wValidBitsPerSample` from 1 to 32, and a "flat" `WAVE_FORMAT_PCM` with the same channel count.
 
-Раскладка динамиков MacBookPro16,1 (по DSP-профилю kaiT2en, [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md)):
+Speaker layout of the MacBookPro16,1 (from the kaiT2en DSP profile, [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md)):
 
-| Канал кольца | 0 | 1 | 2 | 3 | 4 | 5 |
+| Ring channel | 0 | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|
-| Динамик | вуфер L | вуфер L | **твитер L** | вуфер R | вуфер R | **твитер R** |
-| Из стерео | L | L | L через ФВЧ 3 кГц | R | R | R через ФВЧ 3 кГц |
+| Speaker | woofer L | woofer L | **tweeter L** | woofer R | woofer R | **tweeter R** |
+| From stereo (plain path) | L | L | L through 3 kHz HPF | R | R | R through 3 kHz HPF |
+| From stereo (DSP path) | L woofer chain | L woofer chain | L tweeter chain | R woofer chain | R woofer chain | R tweeter chain |
 
-После обновления со старой 6-канальной версии Windows может держать в кэше прежний формат endpoint, а новый драйвер его отклоняет (`Validate: 6 channels not offered`). Тогда выберите в «Дополнительно» формат 2 канала / 32 бит / 48 кГц или переустановите устройство.
+After an upgrade from the old 6-channel version Windows may keep the old endpoint format cached, and the new driver rejects it (`Validate: 6 channels not offered`). Then choose 2 channels / 32 bit / 48 kHz under "Advanced", or reinstall the device.
 
-Почему не 5.1: Windows не размножает стерео на 5.1, поэтому стерео играло бы только на каналах 0 и 1 (оба левых вуфера). Твитерам нельзя отдавать полный диапазон: у Apple на 500 Гц там −90 дБ. Остальную эквализацию Apple (компрессоры, XTC, виртуальный бас) драйвер не воспроизводит. На стерео-endpoint можно поставить Equalizer APO.
+Why not 5.1: Windows does not upmix stereo to 5.1, so stereo would play only on channels 0 and 1 (both left woofers). The tweeters must never get the full range: Apple's curve has −90 dB at 500 Hz there. Apple's full processing (EQ, XTC, compressors, virtual bass) is reproduced by the in-driver DSP (`SpeakerDsp`, §8.3); do not add Equalizer APO with the same profile on top of it.
 
 ---
 
-## 5. Жизненный цикл устройства
+## 5. Device life cycle
 
 ### 5.1 `DriverEntry`
 
-1. `T2AudioInitializeBceTransport` — инициализация мьютекса транспорта.
+1. `T2AudioInitializeBceTransport`: initialises the transport mutex.
 2. `PcInitializeAdapterDriver(…, T2AudioAddDevice)`.
-3. `MajorFunction[IRP_MJ_PNP] = T2AudioPnpHandler` (обязательно **после** PortCls; хук передаёт IRP в `PcDispatchIrp`).
+3. `MajorFunction[IRP_MJ_PNP] = T2AudioPnpHandler` (must come **after** PortCls; the hook passes the IRP to `PcDispatchIrp`), plus the `IRP_MJ_DEVICE_CONTROL` hook for `0x222020` and the `IRP_MJ_SHUTDOWN` handler.
 
-### 5.2 `T2AudioStartDevice` — шаг за шагом
+### 5.2 `T2AudioStartDevice` step by step
 
-1. `T2AudioUnmapResources` (на случай повторного старта), обнуление контекста, `KeInitializeSpinLock(HardwareLock)`.
-2. Safe Mode → отказ (`STATUS_UNSUCCESSFUL`).
-3. Нет `TestSession\EnableTestMode=1` → отказ (Code 10). Иначе читаются `DiagStage`, `EnableMmioCopy` (работает только на стадии ≥ 5), `EnableBceIo` (только на стадии ≥ 4).
-4. `Parameters\ForceSystemBuffer`, `Parameters\MdlVariant`.
-5. **Стадия ≥ 2:** `T2AudioMapResources`: маппинг BAR0, поиск config BAR по GPR, проверки, `BufferStruct`, кольцо динамиков. При успехе `HardwareReady = TRUE`.
-6. Создание и регистрация Topology, затем WaveRT, затем физического соединения. При ошибке всё созданное освобождается и BAR размапливаются.
-7. **Стадия ≥ 3 и `HardwareReady`:** `T2AudioProbeBceDevices` (§5.3).
-8. **Стадия ≥ 4, speaker найден:** `SpeakerDeviceId = BceSpeakerDeviceId`. `SET_REMOTE_ACCESS` драйвер не шлёт (его отправляет AppleUSBVHCI, см. `analysis/RE_appleaudio_protocol.md` §1). Транспорт остаётся открытым. Иначе транспорт закрывается.
+1. `T2AudioUnmapResources` (in case of a restart), the context is zeroed, `KeInitializeSpinLock(HardwareLock)`.
+2. Safe Mode → refuse (`STATUS_UNSUCCESSFUL`).
+3. Either a `TestSession` with `EnableTestMode=1` (then `DiagStage`, `EnableMmioCopy` (only at stage ≥ 5) and `EnableBceIo` (only at stage ≥ 4) are read), or the persistent mode `Parameters\EnableProduction=1` (stage 5 with MMIO copy and BCE I/O, after the crash guard allows the start and arms itself). Otherwise refuse (Code 10).
+4. `Parameters\…`: everything in §8.3.
+5. **Stage ≥ 2:** `T2AudioMapResources`: map BAR0, find the config BAR by GPR, checks, `BufferStruct`, the speaker ring. On success `HardwareReady = TRUE`.
+6. Create and register Topology, then WaveRT, then the physical connection. On any error everything created is released and the BARs unmapped.
+7. **Stage ≥ 3 and `HardwareReady`:** `T2AudioProbeBceDevices` (§5.3).
+8. **Stage ≥ 4, speaker found:** `SpeakerDeviceId = BceSpeakerDeviceId`. The driver does not send `SET_REMOTE_ACCESS` (AppleUSBVHCI does, see `analysis/RE_appleaudio_protocol.md` §1). The transport stays open. Otherwise the transport is closed.
 
-### 5.3 BCE probe и запрос потока (стадия ≥ 3)
+A failed start disarms the crash guard (wrapper `T2AudioStartDevice` → `T2AudioStartDeviceInner`).
+
+### 5.3 BCE probe and stream query (stage ≥ 3)
 
 ```
 Open \Device\AppleUSBVHCI
 GET_DEVICE_LIST                       → [0x21, 0x25, 0x39, 0x43, 0x47]
-для каждого: GET_PROPERTY 'uid '      → лог, "Speaker" → BceSpeakerDeviceId
+for each: GET_PROPERTY 'uid '         → log; "Speaker" → BceSpeakerDeviceId,
+                                        "Codec Output" → BceHeadphoneDeviceId
+GET_PROPERTY(headphones, outp 'jack') → log PLUGGED/unplugged (read only)
 GET_OUTPUT_STREAM_LIST(speaker)       → [0x3A]            → SpeakerStreamId
-GET_PROPERTY(0x3A, 'pft ')            → формат → SpeakerSampleShift, SpeakerFormatValid
+GET_PROPERTY(0x3A, 'pft ')            → format → SpeakerSampleShift, SpeakerFormatValid
 GET_PROPERTY(0x3A, 'ltnc')            ┐
-GET_PROPERTY(speaker, outp 'ltnc')    ├→ SpeakerLatencyFrames (сумма), SpeakerSafetyOffsetFrames
-GET_PROPERTY(speaker, outp 'saft')    ┘   (необязательные, ошибка = 0)
+GET_PROPERTY(speaker, outp 'ltnc')    ├→ SpeakerLatencyFrames (sum), SpeakerSafetyOffsetFrames
+GET_PROPERTY(speaker, outp 'saft')    ┘   (optional, error = 0)
 ```
 
-Если формат не прочитан или не поддерживается, драйвер продолжает работать, но **никогда не пишет PCM в BAR0**.
+If the format cannot be read or is not supported, the driver keeps working but **never writes PCM into BAR0**.
 
-### 5.4 Остановка и удаление
+### 5.4 Stop and removal
 
-`T2AudioPnpHandler` на `IRP_MN_STOP_DEVICE`, `IRP_MN_SURPRISE_REMOVAL`, `IRP_MN_REMOVE_DEVICE`:
+`T2AudioPnpHandler` on `IRP_MN_STOP_DEVICE`, `IRP_MN_SURPRISE_REMOVAL`, `IRP_MN_REMOVE_DEVICE`:
 
-1. `T2AudioUnmapResources`: под `HardwareLock` — `HardwareReady = FALSE` и обнуление указателей. Затем `KeFlushQueuedDpcs`, закрытие транспорта (если он не «отравлен»), освобождение MDL и `MmUnmapIoSpace`. Функция идемпотентна.
+1. Disarm the crash guard and unregister the shutdown notification.
+2. `T2AudioUnmapResources`: under `HardwareLock`, `HardwareReady = FALSE` and the pointers are cleared. Then `KeFlushQueuedDpcs`, the transport is closed (unless poisoned), the MDL freed and `MmUnmapIoSpace` called. The function is idempotent.
 3. `PcDispatchIrp`.
 
 ---
 
-## 6. Потоковый тракт (WaveRT → BAR0)
+## 6. Streaming path (WaveRT → BAR0)
 
-### 6.1 Почему зеркало, а не прямой буфер
+### 6.1 Why a mirror and not a direct buffer
 
-PortCls мапит буфер WaveRT в user mode через `MmMapLockedPagesSpecifyCache(UserMode)`, а страницы устройства (BAR) так смапить нельзя. Попытка отдать MDL на BAR давала `0x8007001F` при инициализации потока. Поэтому:
+PortCls maps the WaveRT buffer into user mode with `MmMapLockedPagesSpecifyCache(UserMode)`, and device pages (BAR) cannot be mapped that way. Handing out an MDL on the BAR produced `0x8007001F` at stream initialisation. Therefore:
 
-* `AllocateAudioBuffer` выделяет обычную память `AllocatePagesForMdl` ровно запрошенного размера (с округлением до кадра). Ядерный адрес получается через `MapAllocatedPages(MmCached)`, буфер заполняется нулями.
-* Драйвер сам копирует данные из этого буфера в кольцо BAR0.
-* `FreeAudioBuffer` / финальный `Release`: остановка таймера → отвязка буфера под `StreamLock` → `UnmapAllocatedPages` → `FreePagesFromMdl`.
+* `AllocateAudioBuffer` allocates ordinary memory with `AllocatePagesForMdl` of exactly the requested size (rounded to a frame). The kernel address comes from `MapAllocatedPages(MmCached)`, and the buffer is zeroed.
+* The driver copies the data from that buffer into the BAR0 ring itself.
+* `FreeAudioBuffer` / the final `Release`: stop the timer → detach the buffer under `StreamLock` → `UnmapAllocatedPages` → `FreePagesFromMdl`.
 
-Типичный размер, который просит движок, — 11 520 байт (480 кадров = 10 мс).
+The engine typically asks for 11 520 bytes (480 frames = 10 ms).
 
-### 6.2 Часы и «потреблённый» курсор
+### 6.2 Clock and the "consumed" cursor
 
-* При входе в RUN фиксируется `AnchorQpc` — **до** `START_IO`, потому что T2 не может начать читать раньше. Вместе с ним задаётся `AnchorFrames = LastCopiedFrame`.
-* Текущий кадр источника: `playFrame = AnchorFrames + TicksToFrames(QPC − AnchorQpc)`. `T2AudioTicksToFrames` не переполняется при любой длительности.
-* `LastCopiedFrame` — **потреблённый курсор**: все кадры до него уже скопированы в BAR0 (или пропущены, если MMIO выключен). Именно он сообщается движку как позиция воспроизведения.
-* Кадр источника `N` пишется в кадр кольца `N + DestOffset` (по модулю 16 640). При входе в RUN `DestOffset` выбирается так, чтобы следующая запись была на 1000 кадров (~21 мс) впереди слота 0, с которого T2 начинает читать после `START_IO`.
-* **Часы T2.** Каждое `UPDATE_TIMESTAMP` (≈ раз за круг кольца) даёт якорь: `sampleTime` плюс задержка доставки `now_ns − hostTime`, если она в пределах 0…50 мс. `hostTime` — наносекунды QPC: их публикует для T2 сам AppleUSBVHCI. На новом якоре DPC экстраполирует позицию чтения T2 по QPC и, если опережение вышло из 1000 ± 500, переприцеливает `DestOffset` (так делает AppleAudio). Слоты, пропущенные прыжком вперёд, обнуляются. Без этого расхождение кварцев (~50 ppm) съело бы опережение за минуты.
+* On entering RUN, `AnchorQpc` is taken **before** `START_IO`, because the T2 cannot start reading earlier. `AnchorFrames = LastCopiedFrame` is set with it.
+* Current source frame: `playFrame = AnchorFrames + TicksToFrames(QPC − AnchorQpc)` (with `ClockRateTracking=1`: at the tracked rate). `T2AudioTicksToFrames` never overflows, whatever the duration.
+* `LastCopiedFrame` is the **consumed cursor**: every frame before it has been copied into BAR0 (or skipped if MMIO is off). It is what the engine is told as the play position.
+* Source frame `N` is written to ring frame `N + DestOffset` (modulo 16 640). On entering RUN, `DestOffset` is chosen so that the next write lands 1000 frames (~21 ms) ahead of slot 0, where the T2 starts reading after `START_IO`.
+* **T2 clock.** Each `UPDATE_TIMESTAMP` (about once per ring revolution) gives an anchor: `sampleTime` plus the delivery delay `now_ns − hostTime` if it is within 0…50 ms. `hostTime` is QPC nanoseconds, published for the T2 by AppleUSBVHCI itself; the driver unwraps the 64-bit overflow of `qpc × 10⁷` that happens after ~25.6 h of uptime. On a new anchor the DPC extrapolates the T2 read position by QPC and, if the lead left 1000 ± 500, re-aims `DestOffset` (as AppleAudio does). Slots skipped by a forward jump are zeroed. Measured T2 drift is ~10 ppm (one re-aim every ~18 min); `ClockRateTracking=1` removes even those.
 
-### 6.3 Алгоритм `T2AudioStreamAdvanceLocked`
+### 6.3 The `T2AudioStreamAdvanceLocked` algorithm
 
-Вызывается под `StreamLock` и только в RUN — из `GetPosition`, из DPC (таймер 2 мс как подстраховка) и при выходе из RUN (финальный сброс).
+Called under `StreamLock` and only in RUN: from `GetPosition`, from the DPC (a 2 ms timer as a safety net) and when leaving RUN (final flush).
 
 ```
 playFrame = AnchorFrames + elapsed
 frame     = LastCopiedFrame
-если playFrame <= frame → ничего
+if playFrame <= frame → nothing
 pending = playFrame - frame
-если pending > кадров_в_буфере_клиента:        # клиент уже перезаписал старые кадры
-    frame = playFrame - кадров_в_буфере_клиента
-если можно писать в MMIO (под HardwareLock):
-    пока остались кадры:
-    если пришёл новый якорь T2 → T2AudioClockCorrection(frame, DestOffset, readT2)
-    пока остались кадры:
-        кусок = T2AudioCalculateCopyChunk(
-                    src = frame,      (кадр клиента: 8 байт стерео / 24 raw)
-                    dst = frame + DestOffset,   (кадр кольца: 24 байта)
-                    …)                           # не пересекает конец ни одного кольца
-        стерео: T2AudioRenderStereoToSpeakers(dst, src, кусок, shift, TweeterMode, OutputAttenuation)
-        raw:    T2AudioConvertSamples(dst, src, кусок, SpeakerSampleShift + OutputAttenuation)
-    _mm_sfence()                                 # слить WC-буферы
+if pending > client_buffer_frames:        # the client has already overwritten old frames
+    frame = playFrame - client_buffer_frames
+if MMIO writes are allowed (under HardwareLock):
+    if a new T2 anchor arrived → T2AudioClockCorrection(frame, DestOffset, readT2)
+    while frames remain:
+        chunk = T2AudioCalculateCopyChunk(
+                    src = frame,                (client frame: 8 bytes stereo / 24 raw)
+                    dst = frame + DestOffset,   (ring frame: 24 bytes)
+                    …)                          # never crosses the end of either ring
+        stereo + DSP: T2DspRenderStereoToSpeakers(dst, src, chunk, shift, OutputAttenuation, level, …)
+        stereo plain: T2AudioRenderStereoToSpeakers(dst, src, chunk, shift, TweeterMode, OutputAttenuation)
+        raw:          T2AudioConvertSamples(dst, src, chunk, SpeakerSampleShift + OutputAttenuation)
+    _mm_sfence()                                 # flush the WC buffers
 LastCopiedFrame = playFrame
 ```
 
-Свойства алгоритма:
+Properties of the algorithm:
 
-* **Движок не может перезаписать кадр раньше, чем тот скопирован.** Позиция, которую он видит, — это уже скопированный курсор, и `GetPosition` сам докопирует данные перед ответом. Поэтому тракт не зависит от того, что системный таймер по умолчанию тикает раз в 15,6 мс, а не каждые 2 мс.
-* Кадр источника `F` попадает в кольцо T2 по индексу `(F + DestOffset) mod 16640`. Данные опережают чтение T2 на ~21 мс, и это опережение держится по часам T2.
-* На PAUSE → RUN продолжение идёт ровно с `LastCopiedFrame`: ни пропусков, ни повторов.
+* **The engine cannot overwrite a frame before it has been copied.** The position it sees is the copied cursor, and `GetPosition` itself copies pending data before answering. So the path does not depend on the system timer ticking every 15.6 ms by default rather than every 2 ms.
+* Source frame `F` lands in the T2 ring at index `(F + DestOffset) mod 16640`. The data is ~21 ms ahead of the T2 read position, and that lead is kept by the T2 clock.
+* On PAUSE → RUN playback resumes exactly at `LastCopiedFrame`: no gaps, no repeats.
 
-### 6.4 Состояния (`SetState`)
+### 6.4 States (`SetState`)
 
-| Переход | Действия |
+| Transition | Actions |
 |---|---|
-| → RUN (из STOP/ACQUIRE/PAUSE) | нужен выделенный буфер. Если `LastCopiedFrame == 0` (свежий запуск) — кольцо BAR0 обнуляется (под `HardwareLock`, только при разрешённом MMIO). Затем QPC-якорь. `START_IO`, если `EnableBceIo` и speaker подключён и I/O ещё не запущен (ошибка `START_IO` = ошибка перехода). Потом публикация якоря, `State = RUN` и старт таймера. |
-| RUN → PAUSE/ACQUIRE/STOP | остановка таймера (`KeCancelTimer` + `KeFlushQueuedDpcs`), финальный `Advance`, `AnchorFrames = LastCopiedFrame`. На STOP курсоры обнуляются, кольцо BAR0 обнуляется. `STOP_IO`, если I/O был запущен этим потоком; при ошибке флаг всё равно сбрасывается. |
+| → RUN (from STOP/ACQUIRE/PAUSE) | needs an allocated buffer. If `LastCopiedFrame == 0` (fresh start), the BAR0 ring is zeroed (under `HardwareLock`, only when MMIO is allowed) and the DSP state is reset. Then the QPC anchor. `START_IO` if `EnableBceIo` is set, the speaker is connected and I/O is not running yet (a `START_IO` failure fails the transition). Then the anchor is published, `State = RUN` and the timer started. |
+| RUN → PAUSE/ACQUIRE/STOP | stop the timer (`KeCancelTimer` + `KeFlushQueuedDpcs`), final `Advance`, `AnchorFrames = LastCopiedFrame`, `run summary` line. On STOP the cursors are reset and the BAR0 ring is zeroed. `STOP_IO` if this stream started I/O; on error the flag is cleared anyway. |
 
-`KSSTATE`: 0 STOP, 1 ACQUIRE, 2 PAUSE, 3 RUN — эти числа видны в логе `SetState %u`.
+`KSSTATE`: 0 STOP, 1 ACQUIRE, 2 PAUSE, 3 RUN; these numbers appear in the log line `SetState %u`.
 
-### 6.5 Конверсия сэмплов
+### 6.5 Sample conversion
 
-`T2AudioConvertSamples(dst, src, n, shift)` делает одну выровненную 32-битную запись на сэмпл и арифметический сдвиг вправо с переносимой обработкой знака:
+`T2AudioConvertSamples(dst, src, n, shift)` does one aligned 32-bit write per sample and an arithmetic right shift with portable sign handling:
 
-| Вход (Windows, 32 бит) | Выход в кольцо (S24_LE) |
+| Input (Windows, 32 bit) | Output to the ring (S24_LE) |
 |---|---|
 | `0x7FFFFF00` (+full scale) | `0x007FFFFF` |
 | `0x80000000` (−full scale) | `0xFF800000` |
-| `0x00000100` (+1 LSB 24-бит) | `0x00000001` |
+| `0x00000100` (+1 LSB of 24 bits) | `0x00000001` |
 
-### 6.6 Позиция и латентность
+### 6.6 Position and latency
 
-* `GetPosition`: `PlayOffset = (LastCopiedFrame × размер кадра клиента) mod размер_буфера`, `WriteOffset = PlayOffset + 512 кадров`.
-* `GetPositionRegister` / `GetClockRegister` → `STATUS_NOT_SUPPORTED`: регистр в обычной памяти ядра пришлось бы отдавать в user mode, поэтому движок опрашивает `GetPosition`.
-* `GetHWLatency`: `FifoSize = 1000 × размер кадра клиента` (опережение в кольце), `CodecDelay = (latency потока + latency устройства) × 10⁷ / 48000` в единицах 100 нс.
+* `GetPosition`: `PlayOffset = (LastCopiedFrame × client frame size) mod buffer size`, `WriteOffset = PlayOffset + 512 frames`.
+* `GetPositionRegister` / `GetClockRegister` → `STATUS_NOT_SUPPORTED`: a register in ordinary kernel memory would have to be exposed to user mode, so the engine polls `GetPosition`.
+* `GetHWLatency`: `FifoSize = 1000 × client frame size` (the lead in the ring), `CodecDelay = (stream latency + device latency) × 10⁷ / 48000` in 100 ns units. The DSP limiter's extra 24 frames (0.5 ms) are not reported.
 
-### 6.7 Числа на одном примере
+### 6.7 Numbers for one example
 
-Буфер клиента 11 520 байт (480 кадров), кольцо 399 360 байт (16 640 кадров):
+Client buffer 11 520 bytes (480 frames), ring 399 360 bytes (16 640 frames):
 
-* через 100 мс после старта `playFrame = 4800`;
-* кадр источника 4800 лежит по смещению `(4800 mod 480) × 24 = 0`;
-* при свежем запуске `DestOffset = 1000`, и кадр пишется по смещению `((4800 + 1000) mod 16640) × 24 = 139 200` (пока часы T2 не потребовали поправки);
-* после кадра 16 639 запись в кольцо идёт снова с 0 — `T2AudioCalculateCopyChunk` режет кусок на границе.
+* 100 ms after the start, `playFrame = 4800`;
+* source frame 4800 is at byte offset `(4800 mod 480) × 8 = 0` in the client buffer;
+* on a fresh start `DestOffset = 1000`, and the frame is written at offset `((4800 + 1000) mod 16640) × 24 = 139 200` (until the T2 clock asks for a correction);
+* after frame 16 639 the ring is written from 0 again; `T2AudioCalculateCopyChunk` splits the chunk at the boundary.
 
 ---
 
-## 7. Синхронизация и IRQL
+## 7. Synchronisation and IRQL
 
-| Объект | Тип | Защищает | Кто берёт |
+| Object | Type | Protects | Taken by |
 |---|---|---|---|
-| `g_BceLock` | `KMUTEX` (PASSIVE) | транспорт BCE, весь IOCTL целиком | все отправки, open/close |
-| `StreamLock` (на поток) | spin lock | `State`, якоря, `LastCopiedFrame`, указатели буфера | `GetPosition`, DPC, `SetState`, освобождение буфера |
-| `HardwareLock` (на устройство) | spin lock | `HardwareReady` + маппинги BAR0 во время записи | копирование, обнуление кольца, `T2AudioUnmapResources` |
+| `g_BceLock` | `KMUTEX` (PASSIVE) | the BCE transport, the whole IOCTL | all sends, open/close |
+| `StreamLock` (per stream) | spin lock | `State`, anchors, `LastCopiedFrame`, buffer pointers, DSP state | `GetPosition`, DPC, `SetState`, buffer release |
+| `HardwareLock` (per device) | spin lock | `HardwareReady` + BAR0 mappings during writes | copying, ring zeroing, `T2AudioUnmapResources` |
+| `ClockLock` (per device) | spin lock | the T2 clock anchor | the `0x222020` handler (PASSIVE), the copy DPC |
+| `HardwareIoActive` (per device) | interlocked LONG | "START_IO in effect" | stream leaving RUN and power callbacks (`src/Power.c`); whoever flips 1 → 0 sends STOP_IO |
 
-| `ClockLock` (на устройство) | spin lock | якорь часов T2 | обработчик `0x222020` (PASSIVE), DPC копирования |
-| `HardwareIoActive` (на устройство) | interlocked LONG | «START_IO в силе» | выход потока из RUN и колбэки питания (`src/Power.c`); тот, кто сбросил 1 → 0, шлёт STOP_IO |
-
-* Порядок захвата: **`StreamLock` → `HardwareLock` → `ClockLock`**. Обработчик VHCI берёт только `ClockLock`. Обратного порядка нигде нет.
-* Все BCE-отправки — только на `PASSIVE_LEVEL` (проверяется явно).
-* Запись в BAR0 — только под `HardwareLock` и только при `HardwareReady`. Teardown снимает флаг под тем же локом до `MmUnmapIoSpace`, поэтому размаппинг посреди записи невозможен.
-* Таймер копирования: `KeSetTimerEx` с периодом 2 мс. Остановка — `KeCancelTimer` + `KeFlushQueuedDpcs` на PASSIVE (`SetState` и `FreeAudioBuffer` — PASSIVE-колбэки).
-* Поток держит ссылку на `PortStream` (AddRef при создании, Release при уничтожении).
+* Lock order: **`StreamLock` → `HardwareLock` → `ClockLock`**. The VHCI handler takes only `ClockLock`. The reverse order never occurs.
+* All BCE sends happen at `PASSIVE_LEVEL` only (checked explicitly).
+* BAR0 writes only under `HardwareLock` and only while `HardwareReady`. Teardown clears the flag under the same lock before `MmUnmapIoSpace`, so an unmap in the middle of a write is impossible.
+* Copy timer: `KeSetTimerEx` with a 2 ms period. Stopping: `KeCancelTimer` + `KeFlushQueuedDpcs` at PASSIVE (`SetState` and `FreeAudioBuffer` are PASSIVE callbacks).
+* The stream holds a reference to `PortStream` (AddRef on creation, Release on destruction).
+* The DSP runs in the copy DPC at `DISPATCH_LEVEL` under both spin locks; its cost is reported as `maxCopyUs` (§8.3).
 
 ---
 
-## 8. Модель безопасности, стадии и параметры реестра
+## 8. Safety model, stages and registry parameters
 
-### 8.1 `TestSession` (волатильный)
+### 8.1 `TestSession` (volatile)
 
-`HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\TestSession`. Создаётся **только** агентом `tools/T2Audio-TestAgent.ps1` как volatile-ключ. Ядро стирает его при любой перезагрузке, в том числе после BSOD.
+`HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\TestSession`. Created **only** by the agent `tools/T2Audio-TestAgent.ps1`, as a volatile key. The kernel erases it on any reboot, including after a BSOD.
 
-| Значение (DWORD) | Смысл | По умолчанию |
+| Value (DWORD) | Meaning | Default |
 |---|---|---|
-| `EnableTestMode` | 1 = драйвер может стартовать | нет → Code 10 |
-| `DiagStage` | 1–5, стадии накопительные | 1 |
-| `EnableMmioCopy` | 1 = разрешить запись PCM в BAR0 (только стадия 5) | 0 |
-| `EnableBceIo` | 1 = разрешить `START_IO`, `STOP_IO` (стадия ≥ 4) | 0 |
-| `RawSpeakerChannels` | 1 = endpoint с 6 сырыми каналами кольца вместо стерео (агент: `-RawChannels`). **Твитеры без защиты** — только тихие пробы по одному каналу | 0 |
+| `EnableTestMode` | 1 = the driver may start | absent → Code 10 (unless persistent mode) |
+| `DiagStage` | 1–5, cumulative stages | 1 |
+| `EnableMmioCopy` | 1 = allow writing PCM into BAR0 (stage 5 only) | 0 |
+| `EnableBceIo` | 1 = allow `START_IO`, `STOP_IO` (stage ≥ 4) | 0 |
+| `RawSpeakerChannels` | 1 = an endpoint with the 6 raw ring channels instead of stereo (agent: `-RawChannels`). **Tweeters unprotected**: quiet single-channel probes only | 0 |
 
-### 8.2 Стадии
+### 8.2 Stages
 
-| Стадия | Что добавляется | Что трогает железо |
+| Stage | What is added | What touches the hardware |
 |---|---|---|
-| 1 RAM only | endpoint и поток на системной памяти, позиция по QPC | ничего |
-| 2 BAR metadata | маппинг BAR, чтение GPR и `BufferStruct` | только чтение device memory |
-| 3 BCE discovery | открытие транспорта, `GET_DEVICE_LIST`, `uid`, список потоков, `'pft '`/`'ltnc'`/`'saft'` | только запросы-чтения по BCE |
-| 4 hardware I/O | speaker подключён, транспорт держится открытым. С `EnableBceIo`: `START_IO`/`STOP_IO` | команды управления (**BSOD-путь**) |
-| 5 MMIO copy | с `EnableMmioCopy` и валидным форматом: запись PCM в BAR0, обнуление кольца | запись в device memory |
+| 1 RAM only | endpoint and stream on system memory, position by QPC | nothing |
+| 2 BAR metadata | mapping the BARs, reading GPR and `BufferStruct` | device memory reads only |
+| 3 BCE discovery | opening the transport, `GET_DEVICE_LIST`, `uid`, stream list, `'pft '`/`'ltnc'`/`'saft'`, jack | BCE read requests only |
+| 4 hardware I/O | speaker connected, transport kept open. With `EnableBceIo`: `START_IO`/`STOP_IO` | control commands |
+| 5 MMIO copy | with `EnableMmioCopy` and a valid format: PCM written into BAR0, ring zeroing | device memory writes |
 
-Поднимайте стадию по одной, чтобы любой сбой можно было приписать одному шагу.
+Raise the stage one at a time, so that any failure can be attributed to a single step. The persistent mode always runs stage 5 with BCE I/O.
 
-### 8.3 `Parameters` (постоянный)
+### 8.3 `Parameters` (persistent)
 
 `…\T2AudioMiniport\Parameters`:
 
-| Значение | Смысл |
+| Value | Meaning |
 |---|---|
-| `ForceSystemBuffer` | 1 = никогда не делать hardware I/O (чисто программный поток) |
-| `MdlVariant` | эксперименты с MDL на BAR (`Phase4.c`). Текущий тракт всегда использует системный буфер, так что практически не используется. |
-| `TweeterMode` | стерео-путь: 1 (по умолчанию) = твитеры через ФВЧ 4-го порядка 3 кГц, 0 = твитеры молчат (звук только из вуферов) |
-| `OutputAttenuation` | защитное ослабление каждого сэмпла перед записью в кольцо, шаг 6 дБ (арифметический сдвиг вправо). По умолчанию **1 (−6 дБ)** с 2026-10-28, после этапа E. Раньше было 3 (−18 дБ). 0 — выключено, больше 16 обрезается до 16. Действует и на стерео, и на raw-путь. |
-| `ClockRateTracking` | 0 (по умолчанию) — поведение, проверенное на этапе D: курсор источника идёт по QPC, при дрейфе опережение исправляется скачком (`re-aimed`). 1 — курсор источника идёт со скоростью T2: `rate = drift + 1 ppm × (1000 − lead)`, дрейф меряется от первой метки прогона. Скачок остаётся аварийным путём. В логе появляется `T2 clock: rate=… ppb drift=… ppb lead=…`. **На железе не проверено.** Обоснование и симуляция — `tests/T2AudioPipelineTest.c`. |
-| `SpeakerDsp` | **По умолчанию 3** с 2026-10-28: этот уровень владелец одобрил на железе (1.0.11.0, «всё хорошо»). 0 — простой путь: вуферы получают полный диапазон, твитеры идут через ФВЧ 3 кГц. 1 — стерео-путь через `src/T2AudioDsp.h`, линейную часть DSP kaiT2en 16_1: Tone1 (ФВЧ 12-го порядка ~70 Гц, защита вуферов от суббаса) → XTC (подавление перекрёстных помех) → Tone2 (эквалайзер середины) → кроссовер и эквалайзер для каждого динамика → пиковый лимитер −1 дБFS с заглядыванием вперёд на 0,5 мс (как `lk` у ControlFreak в kaiT2en: усиление плавно снижается по прямой до пика, а не прыгает на нём; задержка звука +0,5 мс). **2** — то же плюс виртуальный бас (bankstown, MIT) в начале цепочки: из полосы 40–150 Гц синтезируются гармоники, ограничиваются полосой 200–450 Гц и подмешиваются к сигналу. Маленькие вуферы этот бас физически не воспроизводят, но слух его «достраивает». **3** — плюс 4-полосный компрессор `Comp` из графа после Tone2. Разделы 338 / 1590 / 6597 Гц, кроссовер Linkwitz–Riley 4-го порядка с фазовой компенсацией (без сжатия АЧХ ровная). Пороги −24 / −12,9 / −7,4 / −6,8 дБ, коэффициенты 4 / 1,7 / 1,72 / 2,15, подъём +2 дБ на басу, вход +2 дБ, атака 5 мс, восстановление 50 мс. Огибающая пиковая, общая для L/R, колено жёсткое, усиление пересчитывается каждые 16 кадров с плавным переходом. Тише — громче, громче — плотнее. **4** — плюс компрессор резонанса вуферов `Buzz` (узлы `Buzz_0_1`/`Buzz_3_4`). Полоса 110–145 Гц выделяется кроссовером LR4, порог −12 дБ, ratio 8, атака 2 мс, восстановление 50 мс, отдельно для левой и правой пары. Это защита от дребезга корпуса на ~125 Гц. Нумерацию полос lsp пришлось вывести: параметры полосы k привязаны к её начальной частоте `sf_k`, полосы сортируются по частоте; генератор проверяет, что включённые полосы идут подряд. Автоусиление `Norm` включается отдельно, `DspAutoGain` (ниже). `OutputAttenuation` действует на входе цепочки. В `run summary` есть `dspLimited` — сколько кадров ограничил лимитер. Цена ~45 (уровень 1), ~55 (2), ~70 (3–4) мкс на 2-мс тик на машине сборки. **На железе не проверено.** Лицензия таблиц — GPL-3.0-or-later (`THIRD_PARTY_LICENSES.md`). Не включай вместе с этим конфиг Equalizer APO из `SpeakerDSP-APO` (`imacorpoliz/mbp`): обработка kaiT2en применится дважды. |
-| `DspGainDb` | компенсирующее усиление после DSP (только при `SpeakerDsp ≥ 1`), 0–12 дБ, по умолчанию **6**. Ставится перед лимитером −1 дБFS. Цепочка kaiT2en без автоусиления `Norm` на музыкальном сигнале на 5–9 дБ тише простого пути. При −6 дБ `OutputAttenuation` и +6 дБ здесь громкость примерно такая (розовый шум −20 дБFS, сумма по динамикам): уровень 0 −22,8 дБ, 1 −26,1, 2 −22,4, 3–4 −18,6. |
-| `TweeterTrimDb` | дополнительное усиление только твитеров в пути DSP, 0–12 дБ, по умолчанию 0. Цепочка kaiT2en держит твитеры примерно на 13 дБ ниже вуферов. Если звук кажется тусклым («как будто частота дискретизации маловата»), попробуй 3 или 6. Пики держит лимитер −1 дБFS. |
-| `WooferLimitDb` | на сколько дБ ниже −1 дБFS ограничивать вуферы в пути DSP, 0–12, по умолчанию 0. Против гула и дребезга на максимальной громкости с большим басом. Твитеры и середина не затрагиваются. В `run summary` видно `wooferLimited=` — сколько кадров ограничил лимитер вуферов. Сначала попробуй `SpeakerDsp=4` (компрессор и защита от дребезга), потом 3–6 здесь. |
-| `DspAutoGain` | 0 (по умолчанию) или 1: автоусиление перед цепочкой DSP (приближение узла `Norm` kaiT2en; работает с любым `SpeakerDsp ≥ 1`). RMS входа (общий для L/R, постоянная времени ~341 мс) медленно приводится к −12 дБFS: тихие записи громче максимум на +6 дБ, громкие тише максимум на −12 дБ. Вниз быстрее, вверх медленнее; ниже −60 дБFS усиление замирает, поэтому тишина и затухания не «вытягиваются». От lsp-оригинала отличается: нет K-взвешивания (LUFS), нет быстрой защиты от всплесков (пики ловит лимитер), `weight` не используется. В `run summary` — `autoGainDb10=`: усиление в конце прогона в десятых дБ. **На железе не проверено.** |
-| `EnableProduction` | 1 — постоянный режим: без `TestSession` драйвер при каждой загрузке запускает конфигурацию стадии 5 с BCE I/O (стерео-точка) под защитой от падений. Ставит установщик `tools/T2Audio-Setup.ps1`. 0 или отсутствует — как раньше, только тестовая сессия. |
-| `CrashGuardArmed`, `CrashGuardStrikes` | пишет сам драйвер в постоянном режиме (`src/T2AudioCrashGuard.h`): флаг «сессия идёт» и число обрывов подряд. При 2 драйвер не стартует до сброса установщиком. Подробно — `docs/INSTALL.md`. |
+| `ForceSystemBuffer` | 1 = never do hardware I/O (pure software stream) |
+| `MdlVariant` | experiments with an MDL on the BAR (`Phase4.c`). The current path always uses the system buffer, so this is effectively unused. |
+| `TweeterMode` | plain stereo path: 1 (default) = tweeters through a 4th-order 3 kHz HPF, 0 = tweeters silent (woofers only) |
+| `OutputAttenuation` | safety cut applied to every sample before it is written into the ring, in 6 dB steps (arithmetic right shift). Default **1 (−6 dB)** since 2026-10-28, after Stage E; it used to be 3 (−18 dB). 0 = off, anything above 16 is clipped to 16. Applies to the stereo, DSP and raw paths. |
+| `ClockRateTracking` | 0 (default): the behaviour verified in Stage D: the source cursor runs on QPC, and under drift the lead is corrected by a jump (`re-aimed`). 1: the source cursor runs at the T2 rate: `rate = drift + 1 ppm × (1000 − lead)`, the drift is measured from the first timestamp of the run. The jump remains as an emergency path. The log shows `T2 clock: rate=… ppb drift=… ppb lead=…`. **Not verified on hardware.** Rationale and simulation: `tests/T2AudioPipelineTest.c`. |
+| `SpeakerDsp` | **Default 3** since 2026-10-28: the level the owner approved on hardware (1.0.11.0, "все хорошо" — "all good"). 0: the plain path: woofers get the full range, tweeters go through a 3 kHz HPF. **1**: the stereo path through `src/T2AudioDsp.h`, the linear part of the kaiT2en 16_1 DSP: Tone1 (12th-order HPF at ~70 Hz, protects the woofers from sub-bass) → XTC (crosstalk cancellation) → Tone2 (midrange EQ) → crossover and EQ per driver → −1 dBFS peak limiter with a 0.5 ms lookahead (like ControlFreak's `lk` in kaiT2en: the gain ramps down linearly before a peak instead of jumping on it; the sound is delayed by 0.5 ms). **2**: the same plus the virtual bass (bankstown, MIT) at the start of the chain: harmonics are synthesised from the 40–150 Hz band, limited to 200–450 Hz and mixed into the signal. The small woofers cannot reproduce that bass physically, but the ear "fills it in". **3**: plus the 4-band compressor `Comp` of the graph after Tone2. Splits at 338 / 1590 / 6597 Hz, a 4th-order Linkwitz–Riley crossover with phase compensation (flat response without compression). Thresholds −24 / −12.9 / −7.4 / −6.8 dB, ratios 4 / 1.7 / 1.72 / 2.15, +2 dB makeup on the bass, +2 dB input gain, attack 5 ms, release 50 ms. Peak envelope linked over L/R, hard knee, gain recomputed every 16 frames with a ramp. Quiet gets louder, loud gets denser. **4**: plus the woofer resonance compressor `Buzz` (nodes `Buzz_0_1`/`Buzz_3_4`). The 110–145 Hz band is split out with an LR4 crossover, threshold −12 dB, ratio 8, attack 2 ms, release 50 ms, separately for the left and right pairs. This protects against chassis rattle at ~125 Hz. The lsp band numbering had to be inferred: the parameters of band k are tied to its start frequency `sf_k`, and the bands are sorted by frequency; the generator checks that the enabled bands are contiguous. The `Norm` autogain is enabled separately with `DspAutoGain` (below). `OutputAttenuation` applies at the input of the chain. `run summary` has `dspLimited`: how many frames the limiter reduced. Cost ~35 (level 1), ~40 (2), ~70 (3), ~60 (4) µs per 2 ms tick on the build machine. Table licence: GPL-3.0-or-later (`THIRD_PARTY_LICENSES.md`). Do not enable the Equalizer APO config from `SpeakerDSP-APO` (`imacorpoliz/mbp`) together with this: the kaiT2en processing would be applied twice. |
+| `DspGainDb` | makeup gain after the DSP (only with `SpeakerDsp ≥ 1`), 0–12 dB, default **6**. Applied in front of the −1 dBFS limiter. Without the `Norm` autogain the kaiT2en chain is 5–9 dB quieter than the plain path on music. With −6 dB `OutputAttenuation` and +6 dB here the loudness is roughly (pink noise at −20 dBFS, summed over the speakers): level 0 −22.8 dB, 1 −26.1, 2 −22.4, 3–4 −18.6. |
+| `TweeterTrimDb` | extra gain on the tweeters only, in the DSP path, 0–12 dB, default 0. The kaiT2en chain keeps the tweeters about 13 dB below the woofers. If the sound seems dull ("as if the sample rate were a bit low"), try 3 or 6. Peaks are held by the −1 dBFS limiter. |
+| `WooferLimitDb` | how many dB below −1 dBFS to limit the woofers in the DSP path, 0–12, default 0. Against hum and rattle at maximum volume with heavy bass. The tweeters and midrange are not affected. `run summary` shows `wooferLimited=`: how many frames the woofer limiter reduced. Try `SpeakerDsp=4` (compressor and rattle protection) first, then 3–6 here. |
+| `DspAutoGain` | 0 (default) or 1: autogain in front of the DSP chain (an approximation of kaiT2en's `Norm` node; works with any `SpeakerDsp ≥ 1`). The input RMS (linked L/R, time constant ~341 ms) is slowly brought toward −12 dBFS: quiet recordings at most +6 dB louder, loud ones at most −12 dB quieter. Down faster, up slower; below −60 dBFS the gain freezes, so silence and fade-outs are not pulled up. Differences from the lsp original: no K-weighting (LUFS), no fast surge protection (peaks are caught by the limiter), `weight` unused. `run summary` has `autoGainDb10=`: the gain at the end of the run in tenths of a dB. **Not verified on hardware.** |
+| `EnableProduction` | 1: persistent mode: without a `TestSession` the driver starts the stage 5 configuration with BCE I/O (stereo endpoint) on every boot, under the crash guard. Set by the installer `tools/T2Audio-Setup.ps1`. 0 or absent: as before, test sessions only. |
+| `CrashGuardArmed`, `CrashGuardStrikes` | written by the driver itself in persistent mode (`src/T2AudioCrashGuard.h`): the "session running" flag and the number of consecutive aborted sessions. At 2 the driver does not start until the installer resets it. Details: `docs/INSTALL.md`. |
 
-В строке `run summary` (при каждом выходе из RUN) есть `maxCopyUs=`: самое долгое время одного рендера и копирования в кольцо (с DSP), в мкс, на `DISPATCH_LEVEL` под спинлоком. По рекомендациям Windows DPC должен укладываться примерно в 100 мкс; заметно больше — повод оптимизировать DSP.
+The `run summary` line (on every exit from RUN) has `maxCopyUs=`: the longest single render + copy into the ring (DSP included), in µs, at `DISPATCH_LEVEL` under a spin lock. Windows guidance is roughly ≤ 100 µs per DPC; much more would be a reason to optimise the DSP.
 
-### 8.4 Почему нет «нормального режима»
+### 8.4 Why there was no "normal mode" at first
 
-Пока `START_IO` может уронить систему, автозапуск на обычной загрузке означал бы BSOD при каждом старте Windows. Волатильный ключ гарантирует, что после падения система загрузится без драйвера. Ранние записи в документации, где утверждалось обратное, исправлены.
+While `START_IO` could crash the system, autostart on an ordinary boot would have meant a BSOD on every Windows start. The volatile key guarantees that after a crash the system boots without the driver. Now that `START_IO` is proven, the persistent mode adds autostart with the same guarantee in another form: the crash guard counts sessions that did not end cleanly and stops starting after two.
 
 ---
 
-## 9. Сборка и тесты
+## 9. Build and tests
 
 ### 9.1 CI
 
-`.github/workflows/build.yml` запускается на каждый push и PR:
+`.github/workflows/build.yml` runs on every push and PR:
 
-* **Linux:** оба теста с gcc и clang, `-Wall -Wextra -Werror`.
-* **windows-2022:** установка WDK, `msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.26100.0`, тесты на MSVC (`/W4`), выгрузка **неподписанного** `T2AudioMiniport.sys` и `.pdb` как артефакта.
+* **Linux:** all host tests with gcc and clang, `-Wall -Wextra -Werror`.
+* **windows-2022:** installs the WDK, `msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.26100.0`, the tests on MSVC (`/W4`), uploads the **unsigned** `T2AudioMiniport.sys` and `.pdb` as an artifact. It also compiles the C# embedded in `Test-WasapiRender.ps1`, `Test-WasapiTone.ps1` and `T2Audio-Setup.ps1`, and runs PSScriptAnalyzer, InfVerif and WDK code analysis in report-only mode.
 
-### 9.2 Локально
+### 9.2 Locally
 
-Нужны Visual Studio 2022 (или новее) с C++ и WDK той же версии SDK.
+You need Visual Studio 2022 (or newer) with C++ and a WDK of the same SDK version.
 
 ```powershell
 msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild
-# результат: src\bin\Release\T2AudioMiniport.sys
+# result: src\bin\Release\T2AudioMiniport.sys
 ```
 
-В проекте указан `WindowsTargetPlatformVersion 10.0.28000.0`. Если такого SDK нет, передайте установленную версию через `/p:WindowsTargetPlatformVersion=…`, как это делает CI.
+The project sets `WindowsTargetPlatformVersion 10.0.28000.0`. If that SDK is not installed, pass the installed version with `/p:WindowsTargetPlatformVersion=…`, as CI does.
 
-### 9.3 Хост-тесты
+### 9.3 Host tests
 
 ```powershell
-cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe   tests\BceProtocolLogicTest.c
-cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c
-tests\BceProtocolLogicTest.exe
-tests\T2AudioBufferLogicTest.exe
+foreach ($t in 'BceProtocolLogicTest','T2AudioBufferLogicTest','T2AudioSpeakerLogicTest',
+               'T2AudioPipelineTest','T2AudioDspTest','T2AudioCrashGuardTest') {
+    cl /nologo /W4 /Fe:tests\$t.exe tests\$t.c
+    & "tests\$t.exe"; if ($LASTEXITCODE) { throw "$t failed" }
+}
 ```
 
 ```bash
-gcc -Wall -Wextra -o /tmp/bce tests/BceProtocolLogicTest.c && /tmp/bce
-gcc -Wall -Wextra -o /tmp/buf tests/T2AudioBufferLogicTest.c && /tmp/buf
+for t in BceProtocolLogicTest T2AudioBufferLogicTest T2AudioSpeakerLogicTest \
+         T2AudioPipelineTest T2AudioDspTest T2AudioCrashGuardTest; do
+  gcc -Wall -Wextra -Werror -O2 -o /tmp/$t tests/$t.c -lm && /tmp/$t || break
+done
 ```
 
-Что покрыто:
+What is covered:
 
-| Набор | Проверки |
+| Suite | Checks |
 |---|---|
-| `BceProtocolLogicTest` | LE-аксессоры, список устройств, ответ `GET_PROPERTY` (границы, эхо, статус), ответы команд, `uid == "Speaker"`, дескриптор `'pft '` с железа, декодер double, выбор сдвига. |
-| `T2AudioBufferLogicTest` | выравнивание по кадру, решения о буфере и I/O, `DeviceTableFits` (переполнения), куски копирования (обе границы, раздельные src/dst, опережение), QPC → кадры, конверсия S24. |
+| `BceProtocolLogicTest` | LE accessors, device list, `GET_PROPERTY` reply (bounds, echo, status), command replies, `uid == "Speaker"`, the `'pft '` descriptor from hardware, the double decoder, the shift choice. |
+| `T2AudioBufferLogicTest` | frame alignment, buffer and I/O decisions, `DeviceTableFits` (overflows), copy chunks (both boundaries, separate src/dst, lead), QPC → frames, S24 conversion. |
+| `T2AudioSpeakerLogicTest` | stereo → 6-channel layout, tweeter HPF, output attenuation, clock correction and rate tracking maths. |
+| `T2AudioPipelineTest` | the whole copy path simulated on the host: ring continuity across wraps and re-aims, drift ±80/±300 ppm, wrapped hostTime, zeroing of skipped slots, no out-of-bounds writes. |
+| `T2AudioDspTest` | fixed-point DSP vs a double-precision model of the KAIT2EN graph at every level, response shape, stability, headroom and limiter (lookahead), virtual bass, compressors, makeup/trim/woofer limit, autogain, log/exp tables, cost. |
+| `T2AudioCrashGuardTest` | crash guard decisions: strikes, reset, Safe Mode. |
 
 ---
 
-## 10. Установка и тест на железе
+## 10. Installation and hardware tests
 
-> Перед каждым прогоном читайте последнюю запись в [`CURRENT_STATE.md`](CURRENT_STATE.md). Держите под рукой восстановление `AppleAudio.sys`.
+> Before every run read the latest entry in [`CURRENT_STATE.md`](CURRENT_STATE.md). Keep the `AppleAudio.sys` restore at hand.
+> For daily use the installer is enough: [`INSTALL.md`](INSTALL.md). The rest of this section is the test procedure.
 
-### 10.1 Подготовка (один раз)
+### 10.1 Preparation (once)
 
-1. Включите test signing (`bcdedit /set testsigning on`, перезагрузка). Сертификат проекта — `docs/T2AudioCert_thumbprint.txt`.
-2. Подпишите собранный `.sys` и каталог в `packaging/`: INF `T2AudioMiniport.inf`, CDF `t2audio.cdf`. При изменении `.sys` каталог нужно пересоздать и переподписать, а `DriverVer` в INF — поднять.
-3. `tools/PreInstall-Check.ps1` — проверки и резервные копии.
+1. Turn on test signing (`bcdedit /set testsigning on`, reboot). The project certificate: `docs/T2AudioCert_thumbprint.txt`.
+2. Sign the built `.sys` and the catalog in `packaging/`: INF `T2AudioMiniport.inf`, CDF `t2audio.cdf`. Whenever the `.sys` changes, regenerate and re-sign the catalog, and raise `DriverVer` in the INF.
+3. `tools/PreInstall-Check.ps1`: checks and backups.
 
-### 10.2 Установка
+### 10.2 Installation
 
-* `tools/Install-T2AudioDriver.ps1` по умолчанию только добавляет пакет в driver store (`pnputil /add-driver` без `/install`) и **не** привязывает его к устройству.
-* Привязка к устройству выполняется явно (см. `tools/INSTALL_SCRIPTS_README.md`). После неё может понадобиться перезагрузка (Code 14).
+* `tools/Install-T2AudioDriver.ps1` by default only adds the package to the driver store (`pnputil /add-driver` without `/install`) and does **not** bind it to the device.
+* Binding to the device is explicit (see `tools/INSTALL_SCRIPTS_README.md`). A reboot may be needed afterwards (Code 14).
+* `tools/T2Audio-Setup.ps1 -Action Install` does both and turns on persistent mode.
 
-### 10.3 Прогон
+### 10.3 Test run
 
 ```powershell
 .\tools\T2Audio-TestAgent.ps1 -Mode Status
-.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash <SHA256 .sys>
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash <SHA256 of the .sys>
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 2 -ExpectedSysHash <…>
-.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 3 -ExpectedSysHash <…>   # формат потока
-.\tools\T2Audio-TestAgent.ps1 -Mode Recover                               # после сбоя/перезагрузки
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 3 -ExpectedSysHash <…>   # stream format
+.\tools\T2Audio-TestAgent.ps1 -Mode Recover                               # after a failure/reboot
 ```
 
-Агент создаёт сессию, включает устройство, пишет лог ядра (DbgView) в `docs/logs/capture_*`, проверяет WASAPI-рендер (`tools/Test-WasapiRender.ps1`). В блоке `finally` он **всегда** выключает устройство и удаляет сессию. Отказывается работать, если хэш установленного `.sys` не совпадает с `-ExpectedSysHash`. `-BceIo` принимается только вместе с `-Mmio` (кольцо обнуляется перед START_IO, иначе T2 сыграл бы его остатки) и `-OwnerApprovedBceIo` (разрешение владельца). `-RawChannels` включает 6 сырых каналов.
+The agent creates the session, enables the device, writes the kernel log (DbgView) into `docs/logs/capture_*`, checks WASAPI rendering (`tools/Test-WasapiRender.ps1`). In its `finally` block it **always** disables the device and deletes the session. It refuses to work if the hash of the installed `.sys` does not match `-ExpectedSysHash`. `-BceIo` is accepted only together with `-Mmio` (the ring is zeroed before START_IO, otherwise the T2 would play its leftovers) and `-OwnerApprovedBceIo` (the owner's permission). `-RawChannels` turns on the 6 raw channels. `-Listen` keeps the session open for the owner to play music; `-SpeakerCheck` plays a tone per speaker group.
 
-Дополнительно: `tools/Capture-T2AudioLog.ps1` (захват лога), `tools/Test-WasapiTone.ps1` (тестовый тон), `tools/Set-DefaultAudioDevice.ps1` (endpoint по умолчанию), `tools/PostInstall-Validate.ps1`.
+Also: `tools/Capture-T2AudioLog.ps1` (log capture), `tools/Test-WasapiTone.ps1` (test tone), `tools/Set-DefaultAudioDevice.ps1` (default endpoint), `tools/PostInstall-Validate.ps1`.
 
-### 10.4 Откат
+### 10.4 Rollback
 
-* `tools/Rollback-T2AudioDriver.ps1` — удаление пакета T2AudioPort (работает и из Safe Mode).
-* `tools/Restore-AppleAudioDriver.ps1` — скачивает оригинальный `AppleAudio` из Boot Camp (Brigadier) и ставит обратно.
-* После любого падения: `-Mode Recover`, затем проверить, что устройство снова на `AppleAudio` и в состоянии Started.
+* `tools/T2Audio-Setup.ps1 -Action Uninstall`: removes T2AudioPort and returns the device to AppleAudio.
+* `tools/Rollback-T2AudioDriver.ps1`: removes the T2AudioPort package (works from Safe Mode too).
+* `tools/Restore-AppleAudioDriver.ps1`: downloads the original `AppleAudio` from Boot Camp (Brigadier) and reinstalls it.
+* After any crash: `-Mode Recover` (or the installer's `Status`), then check that the device is back on `AppleAudio` and Started.
 
 ---
 
-## 11. Диагностика: что должно быть в логе
+## 11. Diagnostics: what the log should show
 
-Все сообщения начинаются с `T2Audio:`. Ожидаемая последовательность по стадиям (значения — с MacBookPro16,1):
+All messages start with `T2Audio:`. The expected sequence by stage (values from MacBookPro16,1):
 
-| Стадия | Строка | Норма |
+| Stage | Line | Normal |
 |---|---|---|
-| все | `diagnostic session active stage=N mmioCopy=X bceIo=Y` | соответствует аргументам агента |
-| ≥ 2 | `Resource[0] mapped at … (write-combining\|uncached)` | любой из двух вариантов |
-| ≥ 2 | `GPR read: version=… signature=0x19870423 bufferOffset=…` | signature совпадает |
-| ≥ 2 | `Device[i]: Name='Speaker' …`, `Speaker buffer[0]: Address=… Size=0x61800` | размер `0x61800` |
+| all | `diagnostic session active stage=N mmioCopy=X bceIo=Y` or `persistent mode active` | matches the agent arguments / installer |
+| all | `mode parameters: … SpeakerDsp=… DspGainDb=… DspAutoGain=…` | the expected parameter values |
+| persistent | `crash guard armed` | |
+| ≥ 2 | `Resource[0] mapped at … (write-combining\|uncached)` | either variant |
+| ≥ 2 | `GPR read: version=… signature=0x19870423 bufferOffset=…` | signature matches |
+| ≥ 2 | `Device[i]: Name='Speaker' …`, `Speaker buffer[0]: Address=… Size=0x61800` | size `0x61800` |
 | ≥ 2 | `MapResources SUCCESS: buffer=… size=0x61800` | |
 | ≥ 3 | `BCE probe: 5 device(s)`, `device 0x39 uid="Speaker"` | |
-| ≥ 3 | `speaker stream 0x3A pft: rate=48000 id=0x6C70636D flags=0x4 bpp=24 fpp=1 bpf=24 ch=6 bits=24` | **обязательно перед стадией 5** |
+| ≥ 3 | `BCE probe: headphone jack device 0x… : PLUGGED/unplugged` | matches reality |
+| ≥ 3 | `speaker stream 0x3A pft: rate=48000 id=0x6C70636D flags=0x4 bpp=24 fpp=1 bpf=24 ch=6 bits=24` | **required before stage 5** |
 | ≥ 3 | `speaker sample shift=8 latency=A+B frames safety=C frames` | **shift=8** |
 | ≥ 3 | `BCE probe done; speaker id 0x39 stream 0x3A format=1` | `format=1` |
 | ≥ 4 | `audio path ENABLED for speaker 0x39 (bceIo=…)` | |
-| ≥ 4 + BceIo | `START_IO sent to device 0x39`, затем `VHCI UPDATE_TIMESTAMP #1 dev=0x39 …` | без BSOD |
-| поток | `AllocateAudioBuffer: system MDL=… size=11520 …`, `SetState 3 …` | |
-| остановка | `PnP minor 0x02 - releasing hardware` | 0x02 = REMOVE, 0x04 = STOP |
+| ≥ 4 + BceIo | `START_IO sent to device 0x39`, then `VHCI UPDATE_TIMESTAMP #1 dev=0x39 …` | no BSOD |
+| stream | `AllocateAudioBuffer: system MDL=… size=11520 …`, `SetState 3 …` | |
+| stream | `T2 clock: re-aimed …` | once at the start of each stream, then rarely (~every 18 min) |
+| leaving RUN | `run summary: reAims=… maxCopyGapUs=… gaps>10ms=… gaps>lead=… skips=… maxCopyUs=… dspLimited=… wooferLimited=… autoGainDb10=…` | `gaps>lead=0`, `skips=0` |
+| stop | `PnP minor 0x02 - releasing hardware` | 0x02 = REMOVE, 0x04 = STOP |
 
-Типичные проблемы:
+Typical problems:
 
-| Симптом | Где смотреть |
+| Symptom | Where to look |
 |---|---|
-| `MapResources FAIL_F: no memory resource exposes the GPR signature` | порядок/размер ресурсов, вывод `Resource[i] GPR probe` |
-| `'pft ' unavailable` или `format unsupported; MMIO copy disabled` | ответ T2 на `GET_PROPERTY`; копирование в BAR0 будет пропускаться |
-| `BCE send timed out; transport poisoned` | AppleUSBVHCI не ответил за 2 с. Все дальнейшие команды до перезагрузки драйвера → `STATUS_IO_TIMEOUT` |
-| Code 10 сразу после установки | нормально без `TestSession` (§8) |
-| Минидамп `0x7E` в `ks!DispatchDeviceIoControl` | известная проблема `START_IO` (§12) |
+| `MapResources FAIL_F: no memory resource exposes the GPR signature` | resource order/size, the `Resource[i] GPR probe` output |
+| `'pft ' unavailable` or `format unsupported; MMIO copy disabled` | the T2's reply to `GET_PROPERTY`; copying into BAR0 is skipped |
+| `BCE send timed out; transport poisoned` | AppleUSBVHCI did not reply within 6 s. Every further command until the driver restarts → `STATUS_IO_TIMEOUT` |
+| Code 10 right after installation | normal without a `TestSession` or persistent mode (§8) |
+| The driver no longer starts in persistent mode | two crash-guard strikes: `T2Audio-Setup.ps1 -Action Status`, then `ResetGuard` or `Uninstall` |
+| Crackle; `gaps>lead` > 0 or `skips` > 0 in `run summary` | DPC latency: the copy did not run for longer than the lead (~20.8 ms) |
+| `maxCopyUs` well above 100 | DSP too slow for the DPC: lower `SpeakerDsp` and report |
 
 ---
 
-## 12. Известные проблемы
+## 12. Known issues
 
-1. **BSOD `0x7E` при `START_IO` — причина найдена статически, исправление в коде, на железе не проверено.** AppleUSBVHCI доставляет сообщения bridgeOS (`UPDATE_TIMESTAMP` после `START_IO` и др.) как `IOCTL 0x222020` в первый `KSCATEGORY_AUDIO`-интерфейс Apple (`VEN_106B`), без `FileObject`. Раньше этот IOCTL уходил в PortCls/KS → `NULL+0x18`. Теперь его перехватывает `T2AudioDeviceControl` (`src/Driver.c`), как это делает AppleAudio. Подробности: [`analysis/START_IO_BSOD_ROOT_CAUSE.md`](analysis/START_IO_BSOD_ROOT_CAUSE.md), оставшийся реверс: [`REVERSE_PLAN.md`](REVERSE_PLAN.md).
-2. **Аппаратные часы пока не используются.** `UPDATE_TIMESTAMP` теперь принимается через `0x222020` и сохраняется в контексте, но позиция по-прежнему экстраполируется по QPC (модель часов — R6 в `REVERSE_PLAN.md`). На долгих прогонах возможен дрейф относительно часов T2: щелчки, переполнение/опустошение опережения.
-3. **Сон.** kaiT2en выключает remote access на этапе prepare (иначе bridgeOS перестаёт отвечать, пока VHCI засыпает), пишет sleep marker в GPR `+0x10`, а при пробуждении перерегистрирует буферы. Здесь этого нет.
-4. **Кольцо не отдаётся движку напрямую** (ограничение PortCls) — лишняя копия и зависимость от точности курсора.
-5. **Предположение о курсоре T2.** Принимается, что T2 начинает читать кольцо с 0 в момент `START_IO` и идёт с номинальной скоростью. На железе это не подтверждено.
+1. **Sleep/wake is not verified.** kaiT2en turns remote access off in prepare (otherwise bridgeOS stops answering while the VHCI sleeps), writes the sleep marker into GPR `+0x10`, and re-registers the buffers on wake. On Windows AppleUSBVHCI handles remote access; the driver stops I/O before leaving D0 and starts it again when the stream re-enters RUN (`src/Power.c`). Whether the ring and the T2 state survive sleep is unknown until the hardware test.
+2. **The ring is not handed to the engine directly** (a PortCls limitation): an extra copy and a dependency on the cursor accuracy. It costs ~3 ms of jitter at most; measured copy gaps are ~3 ms.
+3. **Assumption about the T2 cursor.** We assume that the T2 starts reading the ring at 0 at `START_IO` and runs at the nominal rate; the clock correction keeps the lead regardless. Consistent with every hardware run so far.
+4. **Software volume only.** The Windows slider scales the samples before the driver; at low volume the 24-bit resolution is partly lost. Hardware volume needs msg 28 (`controls`, R7 in `REVERSE_PLAN.md`).
+5. **One model.** The DSP tables, the speaker layout and the hardware id are for MacBookPro16,1 only.
+6. **Windows Update may restore AppleAudio** (Microsoft-signed); rerun the installer.
+
+Historical: BSOD `0x7E` on `START_IO` (fixed by intercepting `IOCTL 0x222020`, proven on hardware; [`analysis/START_IO_BSOD_ROOT_CAUSE.md`](analysis/START_IO_BSOD_ROOT_CAUSE.md)).
 
 ---
 
-## 13. Сравнение с kaiT2en
+## 13. Comparison with kaiT2en
 
-Справочная реализация — [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (GPL-2.0).
+Reference implementation: [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (GPL-2.0).
 
-| kaiT2en | Здесь |
+| kaiT2en | Here |
 |---|---|
-| GPR/`BufferStruct`, поиск по имени | ✅ |
-| `'pft '` → формат ALSA (`S24_LE`) | ✅ формат читается, сэмплы сдвигаются `>> 8` |
+| GPR/`BufferStruct`, lookup by name | ✅ |
+| `'pft '` → ALSA format (`S24_LE`) | ✅ the format is read, samples shifted `>> 8` |
 | latency, safety offset | ✅ → `GetHWLatency` |
-| обнуление кольца в prepare, якорь до `START_IO` | ✅ |
-| `pci_iomap_wc` для prefetchable BAR | ✅ WC + `sfence` |
-| `SET_REMOTE_ACCESS(ON=2)` до I/O, `OFF` в quiesce | ⚠️ на Windows это делает AppleUSBVHCI (`mode 1`), драйвер не шлёт |
-| `NOTIFICATION_ALIVE` перед командами | ❌ (§12.2) |
-| позиция из `UPDATE_TIMESTAMP` | ❌ (§12.2) |
-| кольцо bridgeOS = буфер ALSA | ❌ ограничение PortCls |
-| suspend/resume, sleep marker | ❌ (§12.3) |
-| jack (`'jack'` + property listener), входы | ❌ |
+| ring zeroing in prepare, anchor before `START_IO` | ✅ |
+| `pci_iomap_wc` for a prefetchable BAR | ✅ WC + `sfence` |
+| `SET_REMOTE_ACCESS(ON=2)` before I/O, `OFF` in quiesce | ⚠️ on Windows AppleUSBVHCI does it (`mode 1`); the driver does not send it |
+| position from `UPDATE_TIMESTAMP` | ✅ lead correction (+ optional rate tracking) |
+| DSP graph (lsp/bankstown in PipeWire) | ✅ in the driver, integer (`src/T2AudioDsp.h`); compressors and limiters approximated |
+| `NOTIFICATION_ALIVE` before commands | ❌ (not needed so far) |
+| bridgeOS ring = ALSA buffer | ❌ PortCls limitation |
+| suspend/resume, sleep marker | ⚠️ I/O stop/start only, not verified (§12.1) |
+| jack (`'jack'` + property listener) | ⚠️ read at probe only |
+| headphone output, inputs (mics) | ❌ |
 
-Код kaiT2en не копировался. Перенесены протокольные факты и порядок операций (см. [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md)).
-
----
-
-## 14. Как вносить изменения
-
-1. **Арифметику и разбор — в чистые заголовки** (`BceProtocolLogic.h`, `T2AudioBufferLogic.h`), без API ядра. На каждое ветвление — тест в `tests/`. Используйте типы фиксированной ширины по смыслу: `unsigned long` = ULONG только на Windows (на Linux он 64-битный, поэтому для 32-битных сэмплов там используется `unsigned int`).
-2. **Новая команда BCE** — только на `PASSIVE_LEVEL`, через `T2AudioSendBceMessage`, с полной проверкой ответа (тег, тип, код, статус, эхо, длина). Разборщик добавляйте в `BceProtocolLogic.h` вместе с тестом.
-3. **Любой новый доступ к железу — за гейтом стадии** (§8). Запись в BAR0 — только под `HardwareLock` и при `HardwareReady`.
-4. **Не держите spin lock во время BCE-отправки** и не берите `HardwareLock` раньше `StreamLock`.
-5. Перед push: тесты локально. CI соберёт драйвер с WDK. Новый бинарь на железе — только через агента с `-ExpectedSysHash`, по стадиям.
-6. Каждое изменение статуса фиксируйте датированной записью в [`CURRENT_STATE.md`](CURRENT_STATE.md). Не пишите «исправлено», пока это не подтверждено на железе.
+kaiT2en code was not copied into the driver. Protocol facts and the order of operations were carried over; the DSP tables are generated from kaiT2en's GPL-3.0 graph (see [`THIRD_PARTY_LICENSES.md`](../THIRD_PARTY_LICENSES.md)).
 
 ---
 
-## 15. Глоссарий
+## 14. How to make changes
 
-| Термин | Значение |
+1. **Arithmetic and parsing go into pure headers** (`BceProtocolLogic.h`, `T2AudioBufferLogic.h`, `T2AudioSpeakerLogic.h`, `T2AudioDsp.h`), without kernel APIs. Every branch gets a test in `tests/`. Use fixed-width types by meaning: `unsigned long` = ULONG only on Windows (on Linux it is 64-bit, so 32-bit samples use `unsigned int`).
+2. **A new BCE command** only at `PASSIVE_LEVEL`, through `T2AudioSendBceMessage`, with a full reply check (tag, type, code, status, echo, length). Add the parser to `BceProtocolLogic.h` together with a test.
+3. **Any new hardware access goes behind a stage gate** (§8). BAR0 writes only under `HardwareLock` and while `HardwareReady`.
+4. **Never hold a spin lock during a BCE send**, and never take `HardwareLock` before `StreamLock`.
+5. Before pushing: tests locally. CI builds the driver with the WDK. A new binary goes onto hardware only through the agent with `-ExpectedSysHash`, stage by stage (or through the installer once its build is verified).
+6. Record every status change as a dated entry in [`CURRENT_STATE.md`](CURRENT_STATE.md). Do not write "fixed" until it is confirmed on hardware.
+7. Documentation is written in English.
+
+---
+
+## 15. Glossary
+
+| Term | Meaning |
 |---|---|
-| **T2 / bridgeOS** | сопроцессор Apple и его ОС; управляет аудиотрактом и DSP динамиков |
-| **BCE** | Buffer Copy Engine — канал сообщений хост ↔ T2; в Windows доступен через `AppleUSBVHCI.sys` |
-| **BAR0 / «Bar1»** | окно памяти с кольцами и `BufferStruct`; в коде поле исторически называется `Bar1*` |
-| **GPR** | регистры в config BAR по `+0xC000`: версия, сигнатура, смещение `BufferStruct` |
-| **`BufferStruct`** | таблица устройств/потоков/буферов в BAR0, которую заполняет bridgeOS |
-| **WaveRT** | модель аудиодрайвера Windows: движок пишет в циклический буфер и опрашивает позицию |
-| **Потреблённый курсор** | `LastCopiedFrame`: кадры до него уже скопированы в кольцо T2; сообщается движку как позиция |
-| **Lead** | опережение записи в кольце T2 относительно позиции чтения T2: 1000 кадров ≈ 21 мс, держится по `UPDATE_TIMESTAMP` |
-| **S24_LE** | 24-битный сэмпл в младших трёх байтах 32-битного контейнера |
-| **Стадия (DiagStage)** | уровень разрешённого доступа к железу в тестовой сессии, 1–5 |
-| **Poisoned transport** | транспорт BCE после таймаута: не принимает новых команд до перезагрузки драйвера |
+| **T2 / bridgeOS** | Apple's coprocessor and its OS; drives the audio path |
+| **BCE** | Buffer Copy Engine: the host ↔ T2 message channel; on Windows reached through `AppleUSBVHCI.sys` |
+| **BAR0 / "Bar1"** | memory window with the rings and `BufferStruct`; in code the field is historically called `Bar1*` |
+| **GPR** | registers in the config BAR at `+0xC000`: version, signature, `BufferStruct` offset |
+| **`BufferStruct`** | table of devices/streams/buffers in BAR0, filled in by bridgeOS |
+| **WaveRT** | Windows audio driver model: the engine writes into a cyclic buffer and polls the position |
+| **Consumed cursor** | `LastCopiedFrame`: frames before it have been copied into the T2 ring; reported to the engine as the position |
+| **Lead** | how far the writes in the T2 ring are ahead of the T2 read position: 1000 frames ≈ 21 ms, kept by `UPDATE_TIMESTAMP` |
+| **S24_LE** | a 24-bit sample in the low three bytes of a 32-bit container |
+| **Stage (DiagStage)** | level of hardware access allowed in a test session, 1–5 |
+| **Persistent mode** | `Parameters\EnableProduction=1`: start on every boot under the crash guard |
+| **Crash guard** | registry flag + strike counter that stops autostart after two sessions that did not end cleanly |
+| **Poisoned transport** | the BCE transport after a timeout: it accepts no new commands until the driver restarts |

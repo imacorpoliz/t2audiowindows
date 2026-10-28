@@ -1,17 +1,17 @@
-# Наушники (разъём 3,5 мм): план
+# Headphones (3.5 mm jack): plan
 
-## Как это устроено (KAIT2EN `modules/t2bce_audio`)
+## How it works (KAIT2EN `modules/t2bce_audio`)
 
-* Наушники — **отдельное BCE-устройство** с UID `"Codec Output"` (у динамиков — `"Speaker"`), со своим выходным потоком, своим кольцом в BufferStruct (`audio.c`: таблица `{"Speaker", 0}`, `{"Codec Output", 2}`) и своими START_IO/STOP_IO.
-* Состояние разъёма — свойство устройства `scope 'outp'`, `selector 'jack'` (u32, 1 = вставлены), читается `GET_PROPERTY`.
-* Изменения KAIT2EN получает подпиской `PROPERTY_LISTENER` (msg 11) на `'outp'/'jack'`; bridgeOS присылает `PROPERTY_CHANGED` (msg 13), после чего свойство читается заново.
+* Headphones are a **separate BCE device** with UID `"Codec Output"` (the speakers are `"Speaker"`), with their own output stream, their own ring in BufferStruct (`audio.c`: table `{"Speaker", 0}`, `{"Codec Output", 2}`) and their own START_IO/STOP_IO.
+* The jack state is a device property, `scope 'outp'`, `selector 'jack'` (u32, 1 = plugged in), read with `GET_PROPERTY`.
+* KAIT2EN learns about changes by subscribing with `PROPERTY_LISTENER` (msg 11) to `'outp'/'jack'`; bridgeOS sends `PROPERTY_CHANGED` (msg 13), and the property is read again.
 
-## Шаги
+## Steps
 
-1. **Сделано (2026-10-28, не проверено на железе):** при BCE-пробе драйвер находит `"Codec Output"` и пишет в лог
-   `BCE probe: headphone jack device 0x… : PLUGGED/unplugged`. Это подтвердит UID, id устройства и чтение свойства.
-2. **Отключать динамики при вставленных наушниках.** Подписка `PROPERTY_LISTENER`, обработка `PROPERTY_CHANGED` в обработчике `0x222020` (`T2AudioHandleVhciMessage`), при «вставлены» — тишина в кольцо динамиков. Логика без нового аудиотракта.
-3. **Вторая аудиоточка «Наушники».** Второй WaveRT-фильтр в PortCls, кольцо `"Codec Output"` из BufferStruct (`T2AudioFindSpeakerBuffer` обобщить), его `'pft '`-формат, START_IO/STOP_IO для его id, свои часы (`UPDATE_TIMESTAMP` по `dev`), без DSP динамиков. Плюс `KSPROPERTY_JACK_DESCRIPTION`, чтобы Windows показывала «подключено/отключено».
-4. Микрофоны — аналогично, входной поток (`set_input_stream_address_ranges` у KAIT2EN).
+1. **Done (2026-10-28, not tested on hardware):** during the BCE probe the driver finds `"Codec Output"` and logs
+   `BCE probe: headphone jack device 0x… : PLUGGED/unplugged`. This will confirm the UID, the device id and the property read.
+2. **Mute the speakers while headphones are plugged in.** Subscribe with `PROPERTY_LISTENER`, handle `PROPERTY_CHANGED` in the `0x222020` handler (`T2AudioHandleVhciMessage`), and write silence into the speaker ring while plugged in. Logic only, no new audio path.
+3. **A second audio endpoint, "Headphones".** A second WaveRT filter in PortCls, the `"Codec Output"` ring from BufferStruct (generalise `T2AudioFindSpeakerBuffer`), its `'pft '` format, START_IO/STOP_IO for its id, its own clock (`UPDATE_TIMESTAMP` by `dev`), without the speaker DSP. Plus `KSPROPERTY_JACK_DESCRIPTION`, so that Windows shows "plugged in / unplugged".
+4. Microphones work the same way, as an input stream (`set_input_stream_address_ranges` in KAIT2EN).
 
-Шаги 2–4 — только после того, как шаг 1 покажет реальные данные с железа.
+Steps 2–4 only after step 1 has shown real data from the hardware.

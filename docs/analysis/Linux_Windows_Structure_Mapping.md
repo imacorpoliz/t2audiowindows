@@ -1,7 +1,9 @@
-# Таблица соответствия структур Linux KAIT2EN ↔ AppleAudio.sys
+# Structure mapping: Linux KAIT2EN ↔ AppleAudio.sys
 
-**Дата**: 2026-10-04  
-**Цель**: Сопоставление аппаратных структур T2 между Linux-драйвером и Windows AppleAudio.sys
+**Date**: 2026-10-04  
+**Goal**: map the T2 hardware structures between the Linux driver and Windows AppleAudio.sys
+
+> **Status note (2026-10-28):** an early document. Its "critical difference" in §3 was a misreading (the BufferStruct offset is in GPR[2] on both systems; T2AudioPort uses that and finds the ring on hardware). The PCM write path it could not find is AppleAudio's copy loop (`RE_appleaudio_protocol.md` §3). The recommended hybrid approach is essentially what T2AudioPort became, except that the WaveRT buffer is in system memory and copied into the BAR (a BAR cannot be mapped into user mode by PortCls).
 
 ---
 
@@ -18,28 +20,28 @@ t2audio->reg_mem_cfg = pci_iomap(dev, 4, 0);           // BAR4 mapped (config re
 t2audio->reg_mem_gpr = (u32 __iomem *) ((u8 __iomem *) t2audio->reg_mem_cfg + 0xC000);
 ```
 
-**BAR0**: Buffer memory region (DMA buffers, metadata)  
-**BAR4**: Configuration registers  
-**BAR4+0xC000**: GPR (General Purpose Registers) - pointer to BufferStruct
+**BAR0**: buffer memory region (DMA buffers, metadata)  
+**BAR4**: configuration registers  
+**BAR4+0xC000**: GPR (General Purpose Registers), pointer to BufferStruct
 
 ### Windows (AppleAudio.sys)
 
 ```c
-// Функция 0x16FF0 (реконструкция)
-// Итерация по CM_RESOURCE_LIST, фильтр по type == 3 (CmResourceTypeMemory)
-// Первый memory-ресурс:
+// Function 0x16FF0 (reconstruction)
+// Iterates over the CM_RESOURCE_LIST, filtering type == 3 (CmResourceTypeMemory)
+// First memory resource:
 MmMapIoSpaceEx(phys1, size1, 0x404);  // -> [rbx+0x68]  // Cached|WriteCombined
-// Второй memory-ресурс:
+// Second memory resource:
 MmMapIoSpaceEx(phys2, size2, 0x204);  // -> [rbx+0x70]  // NonCached|WriteCombined
 
-// Функция 0x45F0: запись в глобальный объект 0x14690
+// Function 0x45F0: written into the global object 0x14690
 [global+0x28] = [rbx+0x68]              // BAR0 mapped
 [global+0x30] = [rbx+0x70] + 0xC000     // BAR4+0xC000 mapped
 ```
 
-**Соответствие**:
+**Mapping**:
 
-| Linux                  | Windows                        | Назначение                          |
+| Linux                  | Windows                        | Purpose                             |
 |------------------------|--------------------------------|-------------------------------------|
 | `reg_mem_bs` (BAR0)    | `[global+0x28]` ([rbx+0x68])   | Buffer memory (DMA buffers)         |
 | `reg_mem_gpr` (BAR4+0xC000) | `[global+0x30]` ([rbx+0x70]+0xC000) | GPR region (BufferStruct pointer) |
@@ -52,9 +54,9 @@ MmMapIoSpaceEx(phys2, size2, 0x204);  // -> [rbx+0x70]  // NonCached|WriteCombin
 
 ```c
 // audio.c:581-592
-ver = ioread32(&a->reg_mem_gpr[0]);          // GPR[0] = version (должно быть >= 3)
+ver = ioread32(&a->reg_mem_gpr[0]);          // GPR[0] = version (must be >= 3)
 sig = ioread32(&a->reg_mem_gpr[1]);          // GPR[1] = signature (0x19870423)
-bs_base = ioread32(&a->reg_mem_gpr[2]);      // GPR[2] = offset BufferStruct относительно BAR0
+bs_base = ioread32(&a->reg_mem_gpr[2]);      // GPR[2] = BufferStruct offset relative to BAR0
 a->bs = (struct t2audio_buffer_struct *) ((u8 *) a->reg_mem_bs + bs_base);
 ```
 
@@ -71,36 +73,36 @@ Offset  Size  Field
 ### Windows (AppleAudio.sys)
 
 ```c
-// Функция 0x4718-0x4750
+// Function 0x4718-0x4750
 rax = [rcx+0x30];                          // rcx = global @ 0x14690
                                            // rax = BAR4+0xC000 (GPR region)
 if ([rax+4] != 0x19870423) return ERROR;   // magic check
-if ([rax+0] < 2) return ERROR;             // version check (>= 2, не >= 3!)
-ebx = [rax+8];                             // offset буфера
+if ([rax+0] < 2) return ERROR;             // version check (>= 2, not >= 3!)
+ebx = [rax+8];                             // buffer offset
 rbx = [rcx+0x28] + ebx;                    // rbx = BAR0 + offset
 ```
 
-**Соответствие GPR**:
+**GPR mapping**:
 
 | Offset | Linux field     | Windows check (RVA 0x4728-0x4744) | Match |
 |--------|-----------------|-----------------------------------|-------|
-| +0x00  | version         | `[rax]` >= 2                      | ✓ (разные минимальные версии) |
+| +0x00  | version         | `[rax]` >= 2                      | ✓ (different minimum versions) |
 | +0x04  | signature       | `[rax+4]` == 0x19870423           | ✓     |
 | +0x08  | bs_base         | `[rax+8]` = buffer offset         | ✓     |
 
-**Различие**: Linux требует version >= 3, Windows >= 2.
+**Difference**: Linux requires version >= 3, Windows >= 2.
 
 ---
 
-## 3. BufferStruct (на BAR0 по смещению из GPR[2])
+## 3. BufferStruct (in BAR0 at the offset from GPR[2])
 
 ### Linux (KAIT2EN)
 
 ```c
 // audio.h:27-51
 struct t2audio_buffer_struct_buffer {
-    size_t address;        // +0x00: offset относительно BAR0
-    size_t size;           // +0x08: размер буфера
+    size_t address;        // +0x00: offset relative to BAR0
+    size_t size;           // +0x08: buffer size
     size_t pad[4];         // +0x10: padding
 };  // sizeof = 0x30 (48 bytes)
 
@@ -131,37 +133,37 @@ struct t2audio_buffer_struct {
 ### Windows (AppleAudio.sys)
 
 ```c
-// Функция 0x4744-0x4750 (реконструкция из дизассемблирования)
+// Function 0x4744-0x4750 (reconstructed from the disassembly)
 ebx = [rax+8];                          // rax = GPR region
-                                        // ebx = offset BufferStruct
+                                        // ebx = BufferStruct offset
 rbx = [rcx+0x28] + ebx;                 // rbx = BAR0 + offset = BufferStruct base
 
-// Структура BufferStruct (частично восстановленная):
-[rbx+0x00]  ?     version (проверка: >= 2 на 0x473B)
-[rbx+0x04]  u32   signature = 0x19870423 (проверка на 0x4728)
-[rbx+0x08]  ?     offset (используется на 0x4744)
-[rbx+0x0C]  u8    count (используется на 0x474D)
-[rbx+0x10+] ?     массив структур размером 0xBDEC (0x475B: imul rax, r12, 0xBDEC)
+// BufferStruct (partly reconstructed):
+[rbx+0x00]  ?     version (check: >= 2 at 0x473B)
+[rbx+0x04]  u32   signature = 0x19870423 (check at 0x4728)
+[rbx+0x08]  ?     offset (used at 0x4744)
+[rbx+0x0C]  u8    count (used at 0x474D)
+[rbx+0x10+] ?     array of 0xBDEC-byte structures (0x475B: imul rax, r12, 0xBDEC)
 ```
 
-**Соответствие BufferStruct**:
+**BufferStruct mapping**:
 
 | Offset | Linux field       | Windows usage (RVA 0x4728-0x4750) | Match |
 |--------|-------------------|-----------------------------------|-------|
-| +0x00  | version           | Проверка `[rbx] >= 2` (0x473B)    | ✓     |
-| +0x04  | signature         | Проверка `[rbx+4] == 0x19870423`  | ✓     |
-| +0x08  | flags (Linux)     | `[rbx+8]` используется как offset | ⚠ РАЗНИЦА |
+| +0x00  | version           | check `[rbx] >= 2` (0x473B)       | ✓     |
+| +0x04  | signature         | check `[rbx+4] == 0x19870423`     | ✓     |
+| +0x08  | flags (Linux)     | `[rbx+8]` used as an offset       | ⚠ DIFFERENCE |
 | +0x0C  | num_devices       | `[rbx+0xC]` = count (0x474D)      | ✓     |
-| +0x10+ | devices[]         | Массив структур stride 0xBDEC     | ✓     |
+| +0x10+ | devices[]         | array of structures, stride 0xBDEC | ✓    |
 
-**КРИТИЧЕСКОЕ РАЗЛИЧИЕ**: 
-- **Linux**: offset BufferStruct хранится в **GPR[2]** (BAR4+0xC000+8)
-- **Windows**: читает offset из **BufferStruct[0x08]** (field `flags` в Linux-структуре)
+**CRITICAL DIFFERENCE** (later shown to be a misreading: the checks at 0x4728–0x4744 are on the GPR block, `rax`, not on BufferStruct): 
+- **Linux**: the BufferStruct offset is in **GPR[2]** (BAR4+0xC000+8)
+- **Windows**: reads the offset from **BufferStruct[0x08]** (the `flags` field of the Linux structure)
 
-**Возможные объяснения**:
-1. Windows использует **другую версию протокола** (version 2 vs 3)
-2. Field +0x08 имеет **двойное назначение** (flags + offset)
-3. Код функции 0x4744 читает **не BufferStruct напрямую**, а другую структуру на BAR4+0xC000
+**Possible explanations** (at the time):
+1. Windows uses **another protocol version** (version 2 vs 3)
+2. Field +0x08 has a **dual purpose** (flags + offset)
+3. The code at 0x4744 reads **not BufferStruct directly** but another structure at BAR4+0xC000 (this is the right one)
 
 ---
 
@@ -185,8 +187,8 @@ struct t2audio_buffer_struct_device {
 ### Windows (AppleAudio.sys)
 
 ```c
-// Функция 0x4757-0x4762
-lea rdx, [rbx+0x10]                     // rdx = base структуры (rbx = BufferStruct)
+// Function 0x4757-0x4762
+lea rdx, [rbx+0x10]                     // rdx = base of the structure (rbx = BufferStruct)
 imul rax, r12, 0xBDEC                   // rax = index * 0xBDEC
 add rdx, rax                            // rdx = devices[index]
 mov r8d, 0x80                           // size = 0x80 (128 bytes)
@@ -194,9 +196,9 @@ lea rcx, [r14+0x21]                     // rcx = dest
 call 0x4CC0                             // memcpy(dest, devices[i]+?, 128)
 ```
 
-**Stride 0xBDEC**: ✓ СОВПАДАЕТ с Linux
+**Stride 0xBDEC**: ✓ MATCHES Linux
 
-**Windows копирует 128 байт** → вероятно копируется поле `name[128]` (+0x00 device entry)
+**Windows copies 128 bytes** → probably the `name[128]` field (+0x00 of the device entry). (Later: it is `_strnicmp` of the name, see `Function_46F8_Analysis.md`.)
 
 ---
 
@@ -214,15 +216,15 @@ for (i = 0; i < strm->buffer_cnt; i++) {
 }
 
 // pcm.c:224-226 (t2audio_pcm_hw_params)
-// ALSA напрямую использует mapped-память T2:
+// ALSA uses the T2's mapped memory directly:
 substream->runtime->dma_area = astream->buffers[0].ptr;      // CPU pointer
 substream->runtime->dma_addr = astream->buffers[0].dma_addr; // DMA address
 substream->runtime->dma_bytes = astream->buffers[0].size;
 ```
 
-**Механизм**: ALSA **прямо пишет в mapped BAR0 память** (zero-copy).
+**Mechanism**: ALSA **writes directly into the mapped BAR0 memory** (zero-copy).
 
-**Путь данных Linux**:
+**Linux data path**:
 ```
 User space PCM write
     ↓
@@ -230,113 +232,115 @@ ALSA kernel copy_to_user
     ↓
 substream->runtime->dma_area (= mapped BAR0 + offset)
     ↓
-T2 hardware читает из своей памяти (shared memory, не DMA transfer)
+T2 hardware reads from its own memory (shared memory, not a DMA transfer)
 ```
 
 ### Windows (AppleAudio.sys)
 
-**НЕ НАЙДЕНО**: механизм записи PCM-сэмплов в mapped-буфер.
+**NOT FOUND** (at the time): the mechanism writing PCM samples into the mapped buffer.
 
-**Найденные операции с mapped-памятью**:
-1. **Функция 0x16FF0**: инициализация mapped-адресов (startup)
-2. **Функция 0x4700**: **чтение метаданных** из BufferStruct (не запись PCM)
-3. **Функция 0x45F0**: сохранение mapped-адресов в глобальный объект
-4. **347 обращений** к `[global+0x28]` и `[global+0x30]` в коде
+**Operations on mapped memory found**:
+1. **Function 0x16FF0**: initialising the mapped addresses (startup)
+2. **Function 0x4700**: **reading metadata** from BufferStruct (not PCM writing)
+3. **Function 0x45F0**: storing the mapped addresses in the global object
+4. **347 accesses** to `[global+0x28]` and `[global+0x30]` in the code
 
-**Функция 0x4700-0x4750 выполняет**:
+**Function 0x4700-0x4750 does**:
 ```
-1. Читает GPR[2] (offset BufferStruct)
-2. Проверяет magic/version BufferStruct
-3. Итерирует по devices[] (stride 0xBDEC)
-4. Копирует device name (128 bytes) в локальный буфер
+1. Reads GPR[2] (BufferStruct offset)
+2. Checks the BufferStruct magic/version
+3. Iterates over devices[] (stride 0xBDEC)
+4. Copies the device name (128 bytes) into a local buffer
 ```
 
-**Это НЕ PCM data path** — это чтение метаданных устройства.
+**This is NOT the PCM data path**; it reads device metadata.
 
 ---
 
 ## 6. Missing Piece: Windows PCM Write Path
 
-### Что должно существовать (по аналогии с Linux):
+### What should exist (by analogy with Linux):
 
 ```c
-// Гипотетический Windows-код (НЕ НАЙДЕН в AppleAudio.sys)
+// Hypothetical Windows code (NOT FOUND in AppleAudio.sys at the time)
 void WritePCMSamples(DEVICE_CONTEXT* ctx, void* samples, size_t size) {
     void* mapped_buffer = ctx->global->bar0_mapped;  // [global+0x28]
     size_t offset = GetCurrentBufferOffset(ctx);
     
-    // Прямая запись в mapped memory:
+    // Direct write into mapped memory:
     memcpy((u8*)mapped_buffer + offset, samples, size);
-    // или через write-combining stores для производительности
+    // or through write-combining stores for performance
 }
 ```
 
-### Почему не найдено:
+### Why it was not found:
 
-**Гипотеза 1**: Использует **PortCls framework**
-- KS pin callback (WaveSpeaker) предоставляет буфер через `IMiniportWaveRTStream::GetBuffer()`
-- PortCls копирует данные напрямую через mapped pointer
-- Копирование происходит в **portcls.sys**, не в AppleAudio.sys
+**Hypothesis 1**: it uses the **PortCls framework**
+- A KS pin callback (WaveSpeaker) provides the buffer through `IMiniportWaveRTStream::GetBuffer()`
+- PortCls copies the data directly through the mapped pointer
+- The copy happens in **portcls.sys**, not in AppleAudio.sys
 
-**Гипотеза 2**: Использует **WaveRT shared memory mode**
-- Mapped BAR0 регион экспортируется как WaveRT buffer
-- User-mode приложение пишет напрямую через memory mapping
-- Никакой kernel-side копии не требуется
+**Hypothesis 2**: it uses **WaveRT shared memory mode**
+- The mapped BAR0 region is exported as the WaveRT buffer
+- The user-mode application writes directly through a memory mapping
+- No kernel-side copy is needed
 
-**Гипотеза 3**: Dispatch через **vtable callback** (не найдено xref)
-- Функция 0x16FF0 вызывается через interface pointer (context->vtable[N])
-- PCM write также через vtable, но на другой интерфейс
-- Статический анализ не находит indirect calls
+**Hypothesis 3**: dispatch through a **vtable callback** (no xref found)
+- Function 0x16FF0 is called through an interface pointer (context->vtable[N])
+- The PCM write too, but on another interface
+- Static analysis does not find indirect calls
+
+(Answer, found later: none of these; AppleAudio has its own copy loop `0x14000A715`–`0x14000B2C0` that converts, filters and writes the samples into the ring.)
 
 ---
 
-## 7. Сравнительная таблица: полная реконструкция
+## 7. Comparison table: full reconstruction
 
-| Компонент | Linux (KAIT2EN) | Windows (AppleAudio.sys) | Status |
+| Component | Linux (KAIT2EN) | Windows (AppleAudio.sys) | Status |
 |-----------|-----------------|--------------------------|--------|
 | **BAR0 mapping** | `pci_iomap(dev, 0)` | `MmMapIoSpaceEx(phys1, size1, 0x404)` | ✓ FOUND |
 | **BAR4 mapping** | `pci_iomap(dev, 4)` | `MmMapIoSpaceEx(phys2, size2, 0x204)` | ✓ FOUND |
 | **GPR access** | `reg_mem_cfg + 0xC000` | `[global+0x30]` (= BAR4+0xC000) | ✓ FOUND |
-| **GPR[0] version** | `ioread32(&gpr[0])` >= 3 | `[rax]` >= 2 | ✓ FOUND (разные версии) |
+| **GPR[0] version** | `ioread32(&gpr[0])` >= 3 | `[rax]` >= 2 | ✓ FOUND (different versions) |
 | **GPR[1] signature** | `ioread32(&gpr[1])` == 0x19870423 | `[rax+4]` == 0x19870423 | ✓ FOUND |
-| **GPR[2] bs_offset** | `ioread32(&gpr[2])` | `[rax+8]` (?) | ⚠ UNCERTAIN |
-| **BufferStruct base** | `BAR0 + GPR[2]` | `BAR0 + [GPR+8]` | ⚠ UNCERTAIN |
+| **GPR[2] bs_offset** | `ioread32(&gpr[2])` | `[rax+8]` (?) | ⚠ UNCERTAIN (later ✓) |
+| **BufferStruct base** | `BAR0 + GPR[2]` | `BAR0 + [GPR+8]` | ⚠ UNCERTAIN (later ✓) |
 | **BufferStruct.signature** | `bs->signature` == 0x19870423 | `[rbx+4]` == 0x19870423 | ✓ FOUND |
 | **BufferStruct.num_devices** | `bs->num_devices` | `[rbx+0xC]` | ✓ FOUND |
 | **Device entry stride** | 0xBDEC | 0xBDEC | ✓ FOUND |
 | **Device name copy** | `strcpy(dev->name)` | `memcpy(dest, src, 0x80)` | ✓ FOUND |
-| **Stream buffer setup** | `strm->buffers[i].ptr = BAR0 + offset` | ? | ✗ NOT FOUND |
+| **Stream buffer setup** | `strm->buffers[i].ptr = BAR0 + offset` | ? | ✗ NOT FOUND (later: `0x9D74`) |
 | **ALSA DMA area** | `runtime->dma_area = buffers[0].ptr` | ? | ✗ NOT FOUND |
-| **PCM write** | ALSA → dma_area (zero-copy) | ? | ✗ NOT FOUND |
+| **PCM write** | ALSA → dma_area (zero-copy) | ? | ✗ NOT FOUND (later: copy loop) |
 
 ---
 
-## 8. Недостающий механизм в Windows
+## 8. The missing mechanism on Windows
 
-### Что НЕ НАЙДЕНО:
+### What was NOT FOUND:
 
-1. **Функция, которая читает stream buffer offsets** из `BufferStruct.devices[i].output_streams[j].buffers[k]`
-2. **Функция, которая копирует PCM-сэмплы** в `BAR0 + buffer_offset`
-3. **WaveRT buffer registration**: вызов `portcls!PcRegisterWaveRTBuffer` или аналог
-4. **KS pin SetFormat callback**: настройка stream buffer адреса
-5. **Direct write** через mapped pointer в IRQ/DPC handler
+1. **The function reading the stream buffer offsets** from `BufferStruct.devices[i].output_streams[j].buffers[k]`
+2. **The function copying PCM samples** into `BAR0 + buffer_offset`
+3. **WaveRT buffer registration**: a call to `portcls!PcRegisterWaveRTBuffer` or similar
+4. **KS pin SetFormat callback**: setting the stream buffer address
+5. **Direct write** through the mapped pointer in an IRQ/DPC handler
 
-### Где искать дальше:
+### Where to look next:
 
-1. **Consumers глобального объекта 0x14690**: 347 обращений к полям +0x28/+0x30
-   - Разобрать функции, читающие `[global+0x28]` (BAR0 base)
-   - Найти функции с арифметикой: `BAR0 + offset` + запись данных
+1. **Consumers of the global object 0x14690**: 347 accesses to fields +0x28/+0x30
+   - Analyse the functions reading `[global+0x28]` (the BAR0 base)
+   - Find functions with `BAR0 + offset` arithmetic + data writes
 
-2. **PortCls callbacks**: проверить vtable-dispatch функций
+2. **PortCls callbacks**: check the vtable dispatch functions
    - `IMiniportWaveRTStream::AllocateAudioBuffer`
    - `IMiniportWaveRTStream::GetHWLatency`
    - `IMiniportWaveCyclic::NewStream`
 
-3. **Функции с параметрами audio format** (sample rate, channels, bit depth)
-   - Найти код, вычисляющий buffer size = `bytes_per_sample * channels * frame_count`
-   - Проследить куда передаётся вычисленный size
+3. **Functions with audio format parameters** (sample rate, channels, bit depth)
+   - Find the code computing buffer size = `bytes_per_sample * channels * frame_count`
+   - Follow where the computed size goes
 
-4. **DMA/MMIO write loops**: паттерны типа
+4. **DMA/MMIO write loops**: patterns like
    ```asm
    mov [rdi], eax
    add rdi, 4
@@ -344,115 +348,116 @@ void WritePCMSamples(DEVICE_CONTEXT* ctx, void* samples, size_t size) {
    ```
 
 5. **Runtime debugging**:
-   - Breakpoint на `[global+0x28]` read access
-   - Trace callstack функций, использующих BAR0 pointer
-   - Monitor memory writes в BAR0 region во время audio playback
+   - A breakpoint on read access of `[global+0x28]`
+   - Trace the call stacks of functions using the BAR0 pointer
+   - Monitor memory writes into the BAR0 region during audio playback
 
 ---
 
-## 9. Практический вывод: Windows implementation strategy
+## 9. Practical conclusion: Windows implementation strategy
 
-### Вариант A: Reverse engineer существующий интерфейс Apple
-
-**Pros**:
-- Переиспользование существующих WDF/PortCls компонентов
-- Совместимость с существующими user-mode компонентами (если есть)
-
-**Cons**:
-- **Блокер**: PCM write path не найден статическим анализом
-- Требуется runtime debugging (WinDbg, kernel breakpoints)
-- Может зависеть от закрытых WDF/PortCls внутренних API
-- Сложность обратной инженерии vtable dispatch и PortCls callbacks
-
-**Оценка трудоёмкости**: 
-- 40-80 часов runtime debugging
-- 20-40 часов реимплементации после понимания протокола
-- Риск: может оказаться, что критичная логика в firmware T2 (недоступна)
-
-### Вариант B: Портировать Linux-логику на Windows
+### Option A: reverse engineer Apple's existing interface
 
 **Pros**:
-- **Полный исходный код** Linux-драйвера доступен
-- **Проверенный протокол**: работает на реальном hardware
-- Прямой контроль над всей цепочкой (BAR mapping → PCM write)
-- Можно адаптировать только audio-часть (не нужен весь T2BCE stack)
+- Reuses the existing WDF/PortCls components
+- Compatible with existing user-mode components (if any)
 
 **Cons**:
-- Необходимо переписать ALSA-часть на WaveRT/WaveCyclic
-- Портирование Linux DMA API → Windows (IoAllocateMdl, MmMapLockedPages)
-- Портирование workqueue/spinlock → Windows (KDPC, KeAcquireSpinLock)
-- Тестирование на реальном hardware (риск повреждения устройства)
+- **Blocker**: the PCM write path was not found by static analysis
+- Needs runtime debugging (WinDbg, kernel breakpoints)
+- May depend on closed WDF/PortCls internal APIs
+- Hard reverse engineering of vtable dispatch and PortCls callbacks
 
-**Оценка трудоёмкости**:
-- 20-40 часов портирования core audio logic (pcm.c → Windows)
-- 10-20 часов адаптации WaveRT interface
-- 10-20 часов отладки на реальном hardware
-- Риск: меньше, т.к. логика известна
+**Effort estimate**: 
+- 40-80 hours of runtime debugging
+- 20-40 hours of reimplementation after understanding the protocol
+- Risk: the critical logic may turn out to be in the T2 firmware (inaccessible)
 
-### Вариант C: Гибридный подход (рекомендуется)
+### Option B: port the Linux logic to Windows
 
-**Стратегия**:
-1. **Взять из Linux** (проверенное):
-   - BufferStruct layout и парсинг (audio.c:574-642)
+**Pros**:
+- **Full source code** of the Linux driver is available
+- **Proven protocol**: works on real hardware
+- Direct control of the whole chain (BAR mapping → PCM write)
+- Only the audio part needs adapting (not the whole T2BCE stack)
+
+**Cons**:
+- The ALSA part has to be rewritten for WaveRT/WaveCyclic
+- Porting the Linux DMA API → Windows (IoAllocateMdl, MmMapLockedPages)
+- Porting workqueue/spinlock → Windows (KDPC, KeAcquireSpinLock)
+- Testing on real hardware (risk of damaging the device)
+
+**Effort estimate**:
+- 20-40 hours to port the core audio logic (pcm.c → Windows)
+- 10-20 hours to adapt the WaveRT interface
+- 10-20 hours of debugging on real hardware
+- Risk: lower, since the logic is known
+
+### Option C: hybrid approach (recommended)
+
+**Strategy**:
+1. **Take from Linux** (proven):
+   - BufferStruct layout and parsing (audio.c:574-642)
    - Stream buffer setup (audio.c:710-741)
    - PCM timing logic (pcm.c:150-160, timestamp handling)
 
-2. **Взять из AppleAudio.sys** (уже работает):
-   - BAR mapping через MmMapIoSpaceEx (функция 0x16FF0)
+2. **Take from AppleAudio.sys** (already works):
+   - BAR mapping with MmMapIoSpaceEx (function 0x16FF0)
    - Global object structure (0x14690)
-   - Device initialization sequence (function call order)
+   - Device initialisation sequence (function call order)
 
-3. **Написать заново** (минимально):
+3. **Write anew** (minimum):
    - WaveRT buffer registration:
      ```c
      NTSTATUS SetupWaveRTBuffer(DEVICE_CTX* ctx) {
-         // Используем mapped BAR0 pointer из AppleAudio.sys
+         // Use the mapped BAR0 pointer as in AppleAudio.sys
          void* bar0 = ctx->global->bar0_mapped;
-         size_t offset = GetStreamBufferOffset(ctx);  // из BufferStruct
+         size_t offset = GetStreamBufferOffset(ctx);  // from BufferStruct
          
-         // Экспортируем в WaveRT как user-accessible memory
+         // Export it to WaveRT as user-accessible memory
          MmMapIoSpace(bar0_phys + offset, size, MmNonCached);
      }
      ```
+     (Did not work in practice: PortCls cannot map BAR pages into user mode, `0x8007001F`; the driver uses a system-memory buffer and copies.)
 
-   - PCM write callback (из Linux logic):
+   - PCM write callback (from the Linux logic):
      ```c
      void WritePCMData(STREAM_CTX* stream, void* samples, size_t frames) {
          void* dma_area = stream->buffer_ptr;  // mapped BAR0 + offset
          size_t bytes = frames * stream->bytes_per_frame;
          
-         // Direct write (как в Linux pcm.c:224)
+         // Direct write (as in Linux pcm.c:224)
          memcpy(dma_area, samples, bytes);
          wmb();  // write barrier
      }
      ```
 
-**Оценка трудоёмкости**:
-- 10 часов: изучение существующего AppleAudio.sys device init
-- 15 часов: портирование BufferStruct parsing из Linux
-- 20 часов: реализация WaveRT interface поверх mapped memory
-- 15 часов: тестирование и debugging
-- **ИТОГО: ~60 часов** (realistic estimate для опытного Windows kernel developer)
+**Effort estimate**:
+- 10 hours: studying the existing AppleAudio.sys device init
+- 15 hours: porting the BufferStruct parsing from Linux
+- 20 hours: implementing the WaveRT interface over mapped memory
+- 15 hours: testing and debugging
+- **TOTAL: ~60 hours** (a realistic estimate for an experienced Windows kernel developer)
 
 ---
 
-## 10. Конкретные рекомендации
+## 10. Concrete recommendations
 
 ### Immediate next steps (runtime analysis):
 
-1. **WinDbg session на live system**:
+1. **A WinDbg session on a live system**:
    ```
    kd> bp AppleAudio+0x16FF0  ".echo MmMapIoSpaceEx init; g"
    kd> ba r8 AppleAudio!global_object+0x28  "!analyze -v; kv"
    ```
-   Цель: поймать функции, читающие BAR0 pointer после инициализации
+   Goal: catch the functions reading the BAR0 pointer after initialisation
 
-2. **Memory monitoring во время playback**:
+2. **Memory monitoring during playback**:
    ```
    kd> !address <BAR0_address>
    kd> ba w4 <BAR0_address>+<offset>  "kv; g"
    ```
-   Цель: найти функцию, пишущую PCM-данные
+   Goal: find the function writing PCM data
 
 3. **PortCls trace**:
    ```
@@ -461,49 +466,49 @@ void WritePCMSamples(DEVICE_CONTEXT* ctx, void* samples, size_t size) {
    kd> bp portcls!PcNewMiniport
    kd> bp portcls!PcRegisterSubdevice
    ```
-   Цель: перехватить PortCls callbacks и vtable setup
+   Goal: intercept the PortCls callbacks and the vtable setup
 
-### If runtime analysis blocked (no test hardware):
+### If runtime analysis is blocked (no test hardware):
 
-**Рекомендация**: Портировать Linux-логику.
+**Recommendation**: port the Linux logic.
 
 **Minimal viable implementation**:
-1. Скопировать `t2audio_buffer_struct` определения из audio.h
-2. Портировать `t2audio_init_bs()` (audio.c:574-642) на Windows
-3. Портировать `t2audio_init_bs_stream()` (audio.c:710-741)
-4. Написать WaveRT miniport с direct memory access:
+1. Copy the `t2audio_buffer_struct` definitions from audio.h
+2. Port `t2audio_init_bs()` (audio.c:574-642) to Windows
+3. Port `t2audio_init_bs_stream()` (audio.c:710-741)
+4. Write a WaveRT miniport with direct memory access:
    ```c
    runtime->dma_area = mapped_bar0 + stream_offset;  // Linux pcm.c:224
    ```
-5. Минимум протокола: только playback, только Speaker device
+5. Protocol minimum: playback only, Speaker device only
 
-**Expected result**: Proof-of-concept драйвер, воспроизводящий аудио через T2 без полного протокола.
+**Expected result**: a proof-of-concept driver playing audio through the T2 without the full protocol.
 
-**Risk mitigation**: Начать с read-only операций (enumerate devices, read BufferStruct), не трогать запись в BAR0 до понимания протокола.
+**Risk mitigation**: start with read-only operations (enumerate devices, read BufferStruct); do not write into BAR0 before the protocol is understood.
 
 ---
 
 ## 11. Final verdict
 
-| Критерий | Apple interface RE | Linux port | Hybrid |
+| Criterion | Apple interface RE | Linux port | Hybrid |
 |----------|-------------------|------------|--------|
-| Трудоёмкость | 100-160 ч | 60-80 ч | **40-60 ч** |
-| Риск (hardware) | Средний | Высокий | Средний |
-| Риск (software) | Высокий | Низкий | **Низкий** |
-| Полнота функционала | 100% (если найдено) | 90% (audio only) | **80%** (достаточно) |
-| Maintainability | Низкая (black box) | Средняя | **Высокая** |
+| Effort | 100-160 h | 60-80 h | **40-60 h** |
+| Risk (hardware) | Medium | High | Medium |
+| Risk (software) | High | Low | **Low** |
+| Feature completeness | 100% (if found) | 90% (audio only) | **80%** (enough) |
+| Maintainability | Low (black box) | Medium | **High** |
 
-**Рекомендация**: **Вариант C (Гибридный)**
+**Recommendation**: **Option C (hybrid)**
 
-**Причины**:
-1. Linux-код даёт **гарантированно работающую логику** работы с BufferStruct
-2. AppleAudio.sys даёт **проверенную инициализацию** BAR mapping на Windows
-3. Комбинация минимизирует **reverse engineering effort** и **implementation risk**
-4. Можно начать с **safe read-only operations** (enumerate, parse metadata)
-5. PCM write — простая операция `memcpy()` после setup, не требует сложного RE
+**Reasons**:
+1. The Linux code gives **guaranteed-working logic** for BufferStruct
+2. AppleAudio.sys gives a **proven initialisation** of the BAR mapping on Windows
+3. The combination minimises **reverse engineering effort** and **implementation risk**
+4. It can start with **safe read-only operations** (enumerate, parse metadata)
+5. The PCM write is a simple `memcpy()` after setup and needs no complex RE
 
-**Next action**: 
-1. Портировать `t2audio_buffer_struct` definitions → Windows headers
-2. Написать BufferStruct parser на базе Linux audio.c:574-642
-3. Создать minimal WaveRT miniport с mapped memory (без PortCls abstraction слоя)
-4. Тестировать на виртуальной машине с mock hardware (если нет реального MacBook)
+**Next action** (at the time): 
+1. Port the `t2audio_buffer_struct` definitions → Windows headers
+2. Write a BufferStruct parser based on Linux audio.c:574-642
+3. Create a minimal WaveRT miniport with mapped memory (without the PortCls abstraction layer)
+4. Test on a virtual machine with mock hardware (if no real MacBook is available)

@@ -5,6 +5,27 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): all documentation translated to English; roadmap to full functionality
+
+- At the owner's request every document in the repository is now in English: the root files (`README.md`, `GEMINI.md`, `GEMINI_PROMPT.md`), `docs/*.md`, `docs/analysis/`, `docs/logs/`, `docs/archive/`.
+  - Owner quotes stay verbatim in Russian, followed by an English translation, because they are evidence.
+  - The installer `tools/T2Audio-Setup.ps1` keeps its Russian UI (code, not documentation); `GEMINI.md` and `docs/INSTALL.md` give the English meaning of the strings to check.
+- While translating, outdated statements were corrected in place and marked:
+  - `DRIVER_GUIDE.md` §1 status, §4.1 files, §9 tests, §11 log table, §12 known issues, §13 kaiT2en comparison;
+  - the BSOD root cause is now marked proven on hardware;
+  - early analysis reports carry a status note saying which of their conclusions were later superseded.
+- New: [`docs/ROADMAP.md`](ROADMAP.md), everything left until the driver is fully functional:
+  1. verify what is built;
+  2. sleep/resume and robustness;
+  3. volume;
+  4. headphones;
+  5. microphones (host-allocated input buffers + msg 18, the 3-mic DSP from kaiT2en `mic.json`);
+  6. signing and licence;
+  7. sound quality;
+  8. other models.
+- `GEMINI.md` §7 updated: F1/F2 done in the driver, G4 implemented as the persistent mode. New rule: documentation in English.
+- No code changes in this entry.
+
 ### 2026-10-28 (Claude): lookahead limiter on every DSP level; optional autogain `DspAutoGain` (source only, not hardware-tested)
 
 The owner asked whether all KAIT2EN post-processing is ported. Not quite: the graph's ControlFreak limiters (lsp, 0.5 ms lookahead) had been replaced by an instant-attack peak limiter, and the `Norm` autogain was left out. Both are now covered:
@@ -42,7 +63,7 @@ The owner asked whether all KAIT2EN post-processing is ported. Not quite: the gr
 
 Based on `docs/logs/EXCERPT_20261028_192200.md` (1.0.11.0, `SpeakerDsp=3`, `DspGainDb=6`, other trims 0):
 
-- **Confirmed on hardware:** level 3 (KAIT2EN chain + virtual bass + 4-band compressor) on ~15 minutes of real music, owner verdict "все хорошо". Loudness and density no longer lacking, no pumping, no distortion. Both limiters idle (`dspLimited=0`, `wooferLimited=0`). Copy timing clean (max gap 2.8–3.1 ms, no gaps over the lead, no skips). One re-aim per stream. Idle D3/D0 transitions are reported clean; the excerpt shows no log lines for them.
+- **Confirmed on hardware:** level 3 (KAIT2EN chain + virtual bass + 4-band compressor) on ~15 minutes of real music, owner verdict "все хорошо" ("all good"). Loudness and density no longer lacking, no pumping, no distortion. Both limiters idle (`dspLimited=0`, `wooferLimited=0`). Copy timing clean (max gap 2.8–3.1 ms, no gaps over the lead, no skips). One re-aim per stream. Idle D3/D0 transitions are reported clean; the excerpt shows no log lines for them.
 - **Default changed:** `Parameters\SpeakerDsp` now defaults to **3**. The plain path stays available with `SpeakerDsp=0`. All other defaults are unchanged (`OutputAttenuation=1`, `DspGainDb=6`, trims 0, `ClockRateTracking=0`).
 - **DSP cost:** the excerpt quotes ~303 µs per 96-frame tick from a host test on the Mac, against ~70 µs here. A test built without optimisation would explain it, but the driver's own cost was never measured. `run summary` now has `maxCopyUs=`: the longest render+copy (DSP included) at DISPATCH_LEVEL under the hardware lock. Windows' guideline for a DPC is roughly ≤ 100 µs; much more would call for optimising the DSP. Timing is fine either way (no gaps).
 - **Still untested on hardware:**
@@ -56,7 +77,7 @@ Based on `docs/logs/EXCERPT_20261028_192200.md` (1.0.11.0, `SpeakerDsp=3`, `DspG
 - **Test Setup:** Build 1.0.11.0 (SYS SHA256: `ECC35ACE239D2A192A3205495BB4A6B7A9F5C791964A64023A84F2C7C3724FC5`). Variant b: `SpeakerDsp=3` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass + 4-band Multiband Compressor `dspComp`), `DspGainDb=6`, `TweeterTrimDb=0`, `WooferLimitDb=0`, `OutputAttenuation=1` (-6 dB default).
 - **Acoustic Milestone (Owner Report):**
   - Owner auditioned music in Windows for ~15 minutes under `SpeakerDsp=3`:
-    *«все хорошо»* (Everything is good!).
+    *«все хорошо»* ("all good").
   - **Level 3 verified:** The 4-band multiband compressor resolves the "a bit quiet" feedback from Level 2, providing density, proper dynamic punch, and balanced frequency reproduction across music tracks without noticeable distortion or pumping.
 - **Limiter & Headroom Performance (PASS):** `dspLimited = 0`, `wooferLimited = 0` throughout full audition. +6 dB make-up gain with compressor preserves healthy dynamic peaks under standard Windows listening levels.
 - **Copy & Clock Stability (PASS):** `maxCopyGapUs = 2779 - 3073` (2.7 - 3.0 ms), `gaps>10ms = 0`, `gaps>lead = 0`, `skips = 0`. Exactly 1 re-aim at stream start. Clean power transitions (D3 -> D0).
@@ -92,7 +113,7 @@ Based on `docs/logs/EXCERPT_20261028_184300.md` and the owner: "good sound, a bi
 - **Test Setup:** Build 1.0.10.0 (SYS SHA256: `7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB`). `SpeakerDsp=2` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass harmonics synthesis), `DspGainDb=6`, `OutputAttenuation=1` (-6 dB default).
 - **Acoustic Milestone (Owner Report):**
   - Owner auditioned music in Windows with `SpeakerDsp=2`:
-    *«хороший звук, только тихий немного, басс появился, но как будто еще не совсем так как на макос»*.
+    *«хороший звук, только тихий немного, басс появился, но как будто еще не совсем так как на макос»* ("good sound, just a bit quiet; the bass appeared, but somehow not quite like on macOS yet").
   - **Bass has officially appeared on Windows!** Virtual bass synthesized harmonics (200–450 Hz) from low frequencies (<150 Hz), making bass immediately audible where un-EQ'd drivers were previously perceived as completely flat/treble-only.
   - Sound quality confirmed "good" — no harsh distortion, clicks, or popping.
   - "A bit quiet" perfectly validates Claude's loudness analysis (level 2 with +6 dB makeup is ~5.6 dB softer than un-EQ'd plain audio); `SpeakerDsp=3` (4-band compressor) and higher `DspGainDb` (up to 12 dB) will provide increased loudness.
@@ -126,7 +147,7 @@ Based on `docs/logs/EXCERPT_20261028_181400.md`:
 - **Stage 1 (PASS):** Pre-check logged expected defaults: `mode parameters: OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=0 DspGainDb=6`.
 - **Stereo Speaker Check (Step 3b):**
   - Left & Right channels tested separately with 100 Hz, 1000 Hz, and sweep 40 Hz → 16 kHz; tweeters at 8 kHz.
-  - Owner observation: *"было все кроме басса, стороны разделялись, твитеры звучали"*.
+  - Owner observation: *"было все кроме басса, стороны разделялись, твитеры звучали"* ("everything was there except the bass; the sides were separate, the tweeters played").
   - Left/right stereo separation works properly.
   - 1000 Hz and 8000 Hz played cleanly without crackle or clicks.
   - 100 Hz was inaudible in plain un-EQ'd stereo (`SpeakerDsp=0`).
@@ -134,7 +155,7 @@ Based on `docs/logs/EXCERPT_20261028_181400.md`:
   - `TweeterMode=0` set in registry (tweeters channels 2 & 5 completely muted to 0).
   - 1000 Hz tone played for 4 seconds at volume 0.2, amplitude 0.3.
   - Signal sent exclusively to channels 0, 1, 3, 4 (woofer pairs).
-  - Owner confirmed: *"звук был да"* (sound was heard!).
+  - Owner confirmed: *"звук был да"* ("yes, there was sound").
   - **Deduction:** The woofers (channels 0, 1, 3, 4) are **100% physically functional, powered, and active**. The absence of low-frequency 100 Hz hum in plain mode is caused by the steep natural acoustic drop-off of un-EQ'd laptop cones at -30 dBFS combined with human equal-loudness curves. Hearing bass requires the ported KAIT2EN DSP (`SpeakerDsp=1..4`), specifically Bankstown virtual bass harmonics and woofer biquad EQ.
 - **DPC & Clock Timing (PASS):** `maxCopyGapUs = 2558` (2.55 ms), `gaps>lead = 0`, `skips = 0`, exactly 1 re-aim at stream start. Flawless copy performance.
 - **Recovery (PASS):** Device safely re-bound to official `AppleAudio.sys` (`oem16.inf`, `CM_PROB_NONE`, Status OK). Volatile test session removed, registry parameters cleaned.
@@ -200,7 +221,7 @@ Based on `docs/logs/EXCERPT_20261028_151122.md` (1.0.9.0) and the owner's words 
 - **Acoustic Findings & Missing Woofers Mystery:**
   - Owner listened to music, video, and a low-frequency tone generator.
   - Overall volume is distinctly louder than default Apple driver (OutputAttenuation=1 / -6 dB).
-  - Sound is very flat, lacking bass ("нч нет вовсе").
+  - Sound is very flat, lacking bass ("нч нет вовсе", "no low end at all").
   - On low-frequency tone generator, the speaker produced **a single mechanical click, but zero bass tone**.
   - Hypothesis: Channel mapping {0,1 woofers, 2 tweeter, 3,4 woofers, 5 tweeter} was an unverified guess from Linux kaiT2en. If woofers are actually channels 2 & 5, our 3 kHz Butterworth highpass filter has been silencing them (-120 dB at 100 Hz), while tweeters on 0/1/3/4 clicked on bass excursion limit. Next step: run Step §6.2 (-RawChannels -ToneChannel  -ToneFrequency 1000) across all 6 channels.
 - **Post-Session Recovery (PASS):** Device safely recovered to AppleAudio.sys (oem16.inf, Status: OK).
@@ -222,7 +243,7 @@ Based on `docs/logs/EXCERPT_20261028_151122.md` (1.0.9.0) and the owner's words 
 
 ### 2026-10-28 (after Stage E): log analysis; start-of-stream gap fixed; listening mode; copy-timing counters (source only, not hardware-tested)
 
-Analysis of `docs/logs/EXCERPT_20261028_143928.md` and the owner's report ("звука в тесте не было"; live playback: flat, sometimes crackles, not loud):
+Analysis of `docs/logs/EXCERPT_20261028_143928.md` and the owner's report ("звука в тесте не было", "there was no sound in the test"; live playback: flat, sometimes crackles, not loud):
 
 - **The automated tone was inaudible by design error (Claude):** endpoint volume 0.03 × tone amplitude 0.05 × `OutputAttenuation=3` (−18 dB) ≈ −80 dB. The kernel log of that run is nevertheless normal (START_IO, RUN, timestamps, copy, STOP_IO). The sound the owner heard came from the later live-playback session with `OutputAttenuation=1`.
 - **Clock drift is NOT the likely crackle cause (correction to the entry below):** the T2 timestamps of the run give a drift of about **+10 ppm** (lap intervals 346.656–346.671 ms vs 346.667 ms nominal). At 10 ppm the lead leaves the ±500-frame window only after ~18 minutes, so drift re-aims are rare. `ClockRateTracking` still removes them, but it does not explain "sometimes".
@@ -242,10 +263,10 @@ Analysis of `docs/logs/EXCERPT_20261028_143928.md` and the owner's report ("зв
 - **Stage E Automated Tone (PASS):** 440 Hz tone played for 3 seconds at 0.03 volume; 144,000 frames rendered in 201 iterations; endpoint automatically re-muted.
 - **Stage E Live Playback (PASS):** Driver enabled with `OutputAttenuation=1` (-6 dB) and `DiagStage=5` (MMIO+BCE); default Windows audio endpoint played audio directly from user applications.
 - **Physical Acoustic Observations (Owner):**
-  - **Звук есть (Sound present):** Core audio engine, DMA buffer mirroring, and co-processor stream confirmed operational.
-  - **Плоский (Flat):** Expected due to absence of Apple's CoreAudio DSP/EQ and speaker compensation curves (Task F1).
-  - **Иногда хрепит (Occasional crackles):** *(Corrected in the entry above: measured drift is ~10 ppm, so this is more likely the start-of-stream re-aim gap or DPC latency.)* Exactly matches the predicted clock-drift behavior from `tests/T2AudioPipelineTest.c` when `ClockRateTracking=0`. Periodic re-aiming across crystal offset causes micro-discontinuities (Task E3).
-  - **Не особо громкий (Low volume):** Result of conservative OutputAttenuation=1 (-6 dB) safety cut and unconfigured hardware smart-amp gain registers (Task R7).
+  - **«Звук есть» (sound present):** Core audio engine, DMA buffer mirroring, and co-processor stream confirmed operational.
+  - **«Плоский» (flat):** Expected due to absence of Apple's CoreAudio DSP/EQ and speaker compensation curves (Task F1).
+  - **«Иногда хрепит» (occasional crackles):** *(Corrected in the entry above: measured drift is ~10 ppm, so this is more likely the start-of-stream re-aim gap or DPC latency.)* Exactly matches the predicted clock-drift behavior from `tests/T2AudioPipelineTest.c` when `ClockRateTracking=0`. Periodic re-aiming across crystal offset causes micro-discontinuities (Task E3).
+  - **«Не особо громкий» (not very loud):** Result of conservative OutputAttenuation=1 (-6 dB) safety cut and unconfigured hardware smart-amp gain registers (Task R7).
 - **Post-Test Recovery (PASS):** Package cleanly uninstalled, device disabled and re-bound to official `AppleAudio.sys` (`oem16.inf`, Status: OK). Sound scheme restored to `.Default`.
 
 ### 2026-10-28 (night): session summary, layout tooling (source only, not hardware-tested)
@@ -343,7 +364,7 @@ Analysis of `docs/logs/EXCERPT_20261028_143928.md` and the owner's report ("зв
 - **R3 (UPDATE_TIMESTAMP response, `docs/analysis/RE_update_timestamp.md`):**
   - `AppleUSBVHCI.sys` (`0x140001DB9`–`0x140001DE8`) **itself automatically creates and transmits** `UPDATE_TIMESTAMP_RESPONSE (34)` back to BridgeOS immediately after calling `0x140002274`.
   - `AppleAudio.sys` (`0x1400012BF`) only records the timestamp and completes the IRP with `STATUS_SUCCESS`.
-  - Audio driver **must not** send a response to `UPDATE_TIMESTAMP`. Current `T2AudioPort` implementation is consistent with `AppleAudio.sys` behavior (вероятно; не проверено на железе).
+  - Audio driver **must not** send a response to `UPDATE_TIMESTAMP`. Current `T2AudioPort` implementation is consistent with `AppleAudio.sys` behavior (probably; not verified on hardware).
 
 ### 2026-10-28 (later): power management, kernel-only 0x222020, owner-gated START_IO, stale timestamps (not hardware-tested)
 

@@ -235,7 +235,7 @@ NTSTATUS SendT2Message(
 
 **Usage confirmed**: 347 code locations access `[global+0x28]` and `[global+0x30]` for T2 hardware access
 
-**Detailed analysis**: See [FINAL_REANALYSIS_REPORT.md](FINAL_REANALYSIS_REPORT.md) Section III and [Linux_Windows_Structure_Mapping.md](Linux_Windows_Structure_Mapping.md)
+**Detailed analysis**: See [FINAL_REANALYSIS_REPORT.md](../archive/planning/FINAL_REANALYSIS_REPORT.md) Section III and [Linux_Windows_Structure_Mapping.md](Linux_Windows_Structure_Mapping.md)
 
 ---
 
@@ -540,37 +540,37 @@ Six physical speakers (working in stereo mode)
 
 ### Answer to Task Questions
 
-**1. Найден ли путь к PCM-буферу?**
-ЧАСТИЧНО. Найден механизм доступа к T2 hardware:
-- ✓ MmMapIoSpaceEx вызовы в функции 0x16FF0 (RVA 0x17204, 0x1721C)
-- ✓ Mapped BAR1 (buffer memory) и BAR2+0xC000 (GPR registers)
-- ✓ Глобальный объект 0x14690 хранит mapped-адреса (+0x28, +0x30)
-- ✓ 347 code locations используют mapped-память
-- ✓ Функция 0x4700 читает BufferStruct metadata (signature 0x19870423)
-- ✗ Механизм записи PCM-сэмплов в буфер НЕ НАЙДЕН (вероятно в одном из 347 consumers)
+**1. Was the path to the PCM buffer found?**
+PARTLY. The T2 hardware access mechanism was found:
+- ✓ MmMapIoSpaceEx calls in function 0x16FF0 (RVA 0x17204, 0x1721C)
+- ✓ Mapped BAR1 (buffer memory) and BAR2+0xC000 (GPR registers)
+- ✓ The global object 0x14690 holds the mapped addresses (+0x28, +0x30)
+- ✓ 347 code locations use the mapped memory
+- ✓ Function 0x4700 reads the BufferStruct metadata (signature 0x19870423)
+- ✗ The mechanism that writes PCM samples into the buffer was NOT FOUND (probably in one of the 347 consumers; later found: the copy loop `0x14000A715`–`0x14000B2C0`, see `RE_appleaudio_protocol.md` §3)
 
-Путь сообщений через IOCTL 0x222018 полностью подтверждён.
+The message path through IOCTL 0x222018 is fully confirmed.
 
-**2. Доступен ли он из user mode?**
-НЕТ напрямую. AppleAudio.sys работает в kernel mode, MmMapIoSpaceEx создаёт kernel-only mapping. 
-User-mode доступ возможен только через:
-- Kernel-mode драйвер с собственным IOCTL-интерфейсом, ИЛИ
-- WaveRT shared memory mode (если AppleAudio использует этот механизм для экспорта буфера)
+**2. Is it reachable from user mode?**
+NOT directly. AppleAudio.sys runs in kernel mode; MmMapIoSpaceEx creates a kernel-only mapping. 
+User-mode access is possible only through:
+- A kernel-mode driver with its own IOCTL interface, OR
+- WaveRT shared memory mode (if AppleAudio used it to export the buffer)
 
-**3. Что ещё неизвестно?**
-- Механизм записи PCM: функция, копирующая сэмплы в BAR1 + buffer_offset
-- Связь WaveSpeaker → BufferStruct: как PortCls callbacks связаны с T2 stream buffers
-- BufferStruct stream buffer parsing: функция, читающая devices[].output_streams[].buffers[] offsets
-- Возможность обхода стерeo-ограничения: нужен ли полностью новый kernel driver
-- Безопасность экспериментов: START_IO без корректного buffer setup может вызвать hardware fault
+**3. What else is unknown?**
+- The PCM write mechanism: the function copying samples into BAR1 + buffer_offset
+- The WaveSpeaker → BufferStruct link: how the PortCls callbacks are tied to the T2 stream buffers
+- BufferStruct stream buffer parsing: the function reading the devices[].output_streams[].buffers[] offsets
+- Whether the stereo limitation can be bypassed: does it need an entirely new kernel driver (it did: T2AudioPort)
+- Experiment safety: START_IO without a correct buffer setup could cause a hardware fault
 
-**4. Сопоставление с Linux KAIT2EN?**
-✓ ВЫПОЛНЕНО. Подробная таблица соответствия структур в [Linux_Windows_Structure_Mapping.md](Linux_Windows_Structure_Mapping.md):
-- BAR layout совпадает (BAR0/BAR4 Linux ↔ первый/второй memory resource Windows)
-- GPR structure совпадает (version, signature 0x19870423, BufferStruct offset)
-- BufferStruct device stride 0xBDEC совпадает точно
-- Linux использует zero-copy ALSA → mapped BAR0 для PCM write
-- Windows механизм PCM write не найден, но hardware access идентичен
+**4. Mapping to Linux KAIT2EN?**
+✓ DONE. A detailed structure mapping table is in [Linux_Windows_Structure_Mapping.md](Linux_Windows_Structure_Mapping.md):
+- The BAR layout matches (BAR0/BAR4 on Linux ↔ the first/second memory resource on Windows)
+- The GPR structure matches (version, signature 0x19870423, BufferStruct offset)
+- The BufferStruct device stride 0xBDEC matches exactly
+- Linux uses zero-copy ALSA → mapped BAR0 for PCM writes
+- The Windows PCM write mechanism was not found, but the hardware access is identical
 
 ### Last Proven Point in Chain
 

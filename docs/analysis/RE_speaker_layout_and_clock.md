@@ -1,121 +1,121 @@
-# RE: часы T2 (R6) и раскладка динамиков (R7)
+# RE: the T2 clock (R6) and the speaker layout (R7)
 
-Статический анализ, 2026-10-28. Бинарники те же, что в [`RE_appleaudio_protocol.md`](RE_appleaudio_protocol.md) (VA при ImageBase `0x140000000`), плюс DSP-профиль kaiT2en `dsp/profiles/16_1/graph.json` из приватного `imacorpoliz/mbp` (`upstream-kait2en`). Метки: **доказано**, **вероятно**, **гипотеза**.
+Static analysis, 2026-10-28. The binaries are the same as in [`RE_appleaudio_protocol.md`](RE_appleaudio_protocol.md) (VAs with ImageBase `0x140000000`), plus the kaiT2en DSP profile `dsp/profiles/16_1/graph.json` from the private `imacorpoliz/mbp` (`upstream-kait2en`). Labels: **proven**, **probable**, **hypothesis**.
 
-## 1. Откуда берётся время в `UPDATE_TIMESTAMP` — **доказано**
+## 1. Where the time in `UPDATE_TIMESTAMP` comes from — **proven**
 
-AppleUSBVHCI.sys, `0x140002FAC`–`0x140002FCC` и `0x140003138`:
+AppleUSBVHCI.sys, `0x140002FAC`–`0x140002FCC` and `0x140003138`:
 
 ```
 KeQueryPerformanceCounter(&freq)
-rax = qpc * 10000000 / freq        ; 100-нс единицы
-rdx = rax * 100                    ; наносекунды
+rax = qpc * 10000000 / freq        ; 100 ns units
+rdx = rax * 100                    ; nanoseconds
 0x140003138: write32(BAR+0xC008, low32(ns)); write32(BAR+0xC000, high32(ns))
 ```
 
-VHCI публикует для T2 время хоста (QPC в наносекундах) в регистры BCE `+0xC000`/`+0xC008`. Это аналог `timestamp.c` из apple-bce на Linux. bridgeOS переводит своё аппаратное время в эту шкалу (в kaiT2en: `mach_bridge_remote_time()`), поэтому `hostTime` в `UPDATE_TIMESTAMP` — **наносекунды QPC хоста**.
+The VHCI publishes the host time (QPC in nanoseconds) for the T2 in the BCE registers `+0xC000`/`+0xC008`. This is the counterpart of `timestamp.c` in apple-bce on Linux. bridgeOS converts its hardware time into that scale (in kaiT2en: `mach_bridge_remote_time()`), so the `hostTime` in `UPDATE_TIMESTAMP` is **host QPC nanoseconds**.
 
-Важная деталь: `imul rax, rax, 0x989680` — 64-битное произведение `qpc * 10^7`. При частоте QPC 10 МГц оно переполняется после примерно 2^63 / 10^14 ≈ 92 000 с, то есть **~25,6 часа аптайма**. После этого `hostTime` уже не в нашей шкале (**гипотеза**: так ведёт себя и AppleAudio на Windows, на железе не проверено). Поэтому драйвер не доверяет `hostTime` вслепую (см. §3).
+An important detail: `imul rax, rax, 0x989680` is a 64-bit product `qpc * 10^7`. At a 10 MHz QPC it overflows after about 2^63 / 10^14 ≈ 92 000 s, i.e. **~25.6 hours of uptime**. After that `hostTime` is no longer in our scale (**hypothesis** at the time; AppleAudio on Windows presumably behaves the same; confirmed on hardware in §8). That is why the driver does not trust `hostTime` blindly (see §3).
 
-Сообщение VHCI доставляет без изменений: `0x140002274` копирует его в рабочий элемент и время не пересчитывает.
+The VHCI delivers the message unchanged: `0x140002274` copies it into a work item and does not recompute the time.
 
-## 2. Модель часов AppleAudio (R6) — **доказано**
+## 2. AppleAudio's clock model (R6) — **proven**
 
-Сохранение (`0x14000435C`, вызывается из обработчика `0x222020` для `UPDATE_TIMESTAMP`): ищется устройство по `device_id` (массив `[ctx+0x48]`, шаг `0xE970`), затем:
+Storing (`0x14000435C`, called from the `0x222020` handler for `UPDATE_TIMESTAMP`): the device is looked up by `device_id` (array `[ctx+0x48]`, stride `0xE970`), then:
 
 ```
-inc   dword [dev+0xE954]          ; счётчик меток
-mov   rax, [msg+0x15]             ; первый u64 полезной нагрузки = hostTime
+inc   dword [dev+0xE954]          ; timestamp counter
+mov   rax, [msg+0x15]             ; first u64 of the payload = hostTime
 mov   [dev+0xE958], rax
 ```
 
-`updateSeed` и `sampleTime` AppleAudio **не читает**. Счётчик обнуляется при START_IO/STOP_IO (`0x1400023C8`, `0x140004A3E`).
+AppleAudio **does not read** `updateSeed` and `sampleTime`. The counter is reset on START_IO/STOP_IO (`0x1400023C8`, `0x140004A3E`).
 
-Позиция записи (`0x140009A24`; вызывается из цикла копирования `0x14000B3A7` под `KfRaiseIrql(DISPATCH)`; зеркальный вариант для записи звука — `0x140009BD0`):
+The write position (`0x140009A24`; called from the copy loop `0x14000B3A7` under `KfRaiseIrql(DISPATCH)`; the mirror variant for recording is `0x140009BD0`):
 
 ```
-src     = [s+0xE8] / bytesPerClientFrame + [s+0xD0]     ; кадры клиента + смещение d0
-если [dev+0xE954] != [s+0x2A8]:                          ; пришла новая метка
-    elapsed = (QPC_ms(now) - hostTime/1e6) * (rate/1000) ; кадров после метки
+src     = [s+0xE8] / bytesPerClientFrame + [s+0xD0]     ; client frames + offset d0
+if [dev+0xE954] != [s+0x2A8]:                            ; a new timestamp arrived
+    elapsed = (QPC_ms(now) - hostTime/1e6) * (rate/1000) ; frames since the timestamp
     hw      = elapsed + count * ringBytes / ringFrameBytes ; count * ringFrames
     lead    = src - hw
-    если lead вне [500, 1500]:  d0 += 1000 - lead          ; переприцеливание
+    if lead outside [500, 1500]:  d0 += 1000 - lead        ; re-aim
     [s+0x2A8] = count
-return (src * ringFrameBytes) % ringBytes                 ; смещение записи в кольце
+return (src * ringFrameBytes) % ringBytes                 ; write offset in the ring
 ```
 
-* `[s+0xA0]` — размер кольца в байтах, `[s+0xA8]` — его адрес (BAR), `[dev+0x1A4]` — частота.
-* Метка приходит **раз за круг кольца** (`count * ringFrames`); kaiT2en описывает то же через `sampleTime`, который растёт на фиксированный `timestampPeriod`.
-* **Запись держится на 1000 кадров (~21 мс) впереди позиции чтения T2; при уходе за ±500 позиция записи скачком переприцеливается на 1000.** Клиентский курсор при этом идёт по QPC, как и у нас.
+* `[s+0xA0]` is the ring size in bytes, `[s+0xA8]` its address (BAR), `[dev+0x1A4]` the rate.
+* A timestamp arrives **once per ring revolution** (`count * ringFrames`); kaiT2en describes the same with `sampleTime`, which grows by a fixed `timestampPeriod`.
+* **Writes are kept 1000 frames (~21 ms) ahead of the T2 read position; when the lead leaves ±500, the write position jumps back to 1000.** The client cursor runs on QPC, as in our driver.
 
-## 3. Что сделано в драйвере по R6
+## 3. What the driver does for R6
 
-* `T2AudioHandleVhciMessage` (`src/BceTransport.c`): для динамика сохраняется якорь `ClockAnchorFrames` / `ClockAnchorQpc` под `ClockLock`. Это `sampleTime` (как в kaiT2en), сдвинутый на задержку доставки `now_ns − hostTime`, если она в пределах 0…50 мс; иначе метка считается текущей. Каждая новая метка увеличивает `ClockGeneration`.
-* Копирование (`T2AudioStreamFollowT2ClockLocked`, `src/WaveRTStream.c`): исходный кадр N пишется в кадр кольца `N + DestOffset`. На каждую новую метку позиция чтения T2 экстраполируется по QPC, и если опережение вышло из окна 1000 ± 500 (`T2AudioClockCorrection`, `src/T2AudioSpeakerLogic.h`), `DestOffset` переприцеливается. Слоты, пропущенные прыжком вперёд, обнуляются.
-* До первой метки драйвер считает, что после START_IO T2 читает с нулевого слота, и опережение равно 1000 (раньше было 720 без коррекции).
+* `T2AudioHandleVhciMessage` (`src/BceTransport.c`): for the speaker, the anchor `ClockAnchorFrames` / `ClockAnchorQpc` is stored under `ClockLock`. It is `sampleTime` (as in kaiT2en) shifted by the delivery delay `now_ns − hostTime` if that is within 0…50 ms; otherwise the timestamp is taken as current. Each new timestamp increments `ClockGeneration`. A wrapped `hostTime` is unwrapped (`T2AudioClockUnwrapHostTime`).
+* Copying (`T2AudioStreamFollowT2ClockLocked`, `src/WaveRTStream.c`): source frame N is written to ring frame `N + DestOffset`. On every new timestamp the T2 read position is extrapolated by QPC, and if the lead left the 1000 ± 500 window (`T2AudioClockCorrection`, `src/T2AudioSpeakerLogic.h`), `DestOffset` is re-aimed. Slots skipped by a forward jump are zeroed.
+* Until the first timestamp the driver assumes that after START_IO the T2 reads from slot 0, with a lead of 1000 (it used to be 720 without correction).
 
-Без этого QPC и кварц T2 расходятся. При расхождении 50 ppm опережение в 720 кадров исчезло бы примерно через 5 минут, и T2 стал бы читать прошлый круг (эхо через 347 мс).
+Without this QPC and the T2 crystal drift apart. At a 50 ppm difference a 720-frame lead would vanish after about 5 minutes, and the T2 would read the previous revolution (an echo 347 ms late).
 
-## 4. Раскладка динамиков MacBookPro16,1 (R7) — **вероятно** (по DSP kaiT2en)
+## 4. Speaker layout of the MacBookPro16,1 (R7) — **probable** (from the kaiT2en DSP)
 
-`graph.json`: на выходе 6 каналов `AUX0..AUX5` в порядке кольца (`playback.props.audio.position`). Трассировка графа от выходов к входам и АЧХ цепочек `bq_raw` при 48 кГц:
+`graph.json`: the output has 6 channels `AUX0..AUX5` in ring order (`playback.props.audio.position`). Tracing the graph from the outputs to the inputs, and the response of the `bq_raw` chains at 48 kHz:
 
-| Канал кольца | Источник | Роль | 100 Гц | 500 Гц | 1 кГц | 5 кГц | 10 кГц |
+| Ring channel | Source | Role | 100 Hz | 500 Hz | 1 kHz | 5 kHz | 10 kHz |
 |---|---|---|---|---|---|---|---|
-| 0 | левый (`XTC_l`) | вуфер L, пара A | +1 | −22 | −24 | −84 | −121 |
-| 1 | левый | вуфер L, пара B | +1 | −22 | −24 | −84 | −121 |
-| 2 | левый | **твитер L** | −200 | −92 | −46 | −14 | −14 |
-| 3 | правый (`XTC_r`) | вуфер R, пара A | +1 | −22 | −24 | −84 | −121 |
-| 4 | правый | вуфер R, пара B | +1 | −22 | −24 | −84 | −121 |
-| 5 | правый | **твитер R** | −200 | −92 | −46 | −14 | −14 |
+| 0 | left (`XTC_l`) | woofer L, pair A | +1 | −22 | −24 | −84 | −121 |
+| 1 | left | woofer L, pair B | +1 | −22 | −24 | −84 | −121 |
+| 2 | left | **tweeter L** | −200 | −92 | −46 | −14 | −14 |
+| 3 | right (`XTC_r`) | woofer R, pair A | +1 | −22 | −24 | −84 | −121 |
+| 4 | right | woofer R, pair B | +1 | −22 | −24 | −84 | −121 |
+| 5 | right | **tweeter R** | −200 | −92 | −46 | −14 | −14 |
 
-(дБ, только биквады; плюс компрессоры, лимитеры, XTC и виртуальный бас.) Отрицательной полярности у пар вуферов нет (у всех `b0 > 0`).
+(dB, biquads only; on top of that, compressors, limiters, XTC and the virtual bass.) The woofer pairs have no negative polarity (every `b0 > 0`).
 
-Совпадает с AppleAudio: его цикл копирования (`0x14000A715`–`0x14000B2C0`) прогоняет каждый канал через свой набор фильтров, который выбирается по модели (`0x140014688`). Номера каналов в Windows-драйвере статически не подтверждены, поэтому метка **вероятно**.
+Consistent with AppleAudio: its copy loop (`0x14000A715`–`0x14000B2C0`) runs each channel through its own filter set, selected by model (`0x140014688`). The channel numbers in the Windows driver are not statically confirmed, hence **probable**. (Listening on hardware is consistent with this layout: bass from the woofer channels, top from 2/5.)
 
-Выводы:
+Conclusions:
 
-1. **Твитеры нельзя кормить полным диапазоном**: у Apple на 500 Гц там −90 дБ.
-2. Windows не размножает стерео на 5.1. В прежней 5.1-конечной точке (`FL FR FC LFE SL SR` → каналы 0…5) стерео играло бы только на **двух левых вуферах**, а `FC`/`LFE` попадали бы на левый твитер и правый вуфер.
+1. **The tweeters must never get the full range**: Apple has −90 dB at 500 Hz there.
+2. Windows does not upmix stereo to 5.1. With the former 5.1 endpoint (`FL FR FC LFE SL SR` → channels 0…5) stereo would play only on the **two left woofers**, and `FC`/`LFE` would go to the left tweeter and a right woofer.
 
-## 5. Что сделано в драйвере по R7
+## 5. What the driver does for R7
 
-* Конечная точка — **стерео** (48 кГц, 32 бит, `KSAUDIO_SPEAKER_STEREO`). Путь копирования (`T2AudioRenderStereoToSpeakers`):
-  * L → каналы 0, 1 как есть, и в 2 через фильтр;
-  * R → каналы 3, 4 как есть, и в 5 через фильтр.
-* Фильтр твитеров: Баттерворт 4-го порядка, ФВЧ на 3 кГц (два биквада RBJ, целые Q30, без FPU на DISPATCH). Измерено тестом: 250 Гц −87 дБ, 1 кГц −39 дБ, 3 кГц −3 дБ, 10 кГц 0 дБ. Это мягче, чем у Apple, так что **первые пробы — на малой громкости**.
-* `Parameters\TweeterMode = 0` глушит твитеры (только вуферы).
-* `TestSession\RawSpeakerChannels = 1` (агент: `-RawChannels`) открывает 6 сырых каналов для подачи на каждый динамик отдельно. **Твитеры тогда без защиты.**
-* Эквализация, компрессоры и XTC Apple не воспроизводятся: звук будет «сырой», но со всех шести динамиков.
+* The endpoint is **stereo** (48 kHz, 32 bit, `KSAUDIO_SPEAKER_STEREO`). The plain copy path (`T2AudioRenderStereoToSpeakers`):
+  * L → channels 0, 1 as is, and into 2 through a filter;
+  * R → channels 3, 4 as is, and into 5 through a filter.
+* Tweeter filter: 4th-order Butterworth HPF at 3 kHz (two RBJ biquads, integer Q30, no FPU at DISPATCH). Measured by a test: 250 Hz −87 dB, 1 kHz −39 dB, 3 kHz −3 dB, 10 kHz 0 dB. Gentler than Apple's, so **the first probes were at low volume**.
+* `Parameters\TweeterMode = 0` silences the tweeters (woofers only).
+* `TestSession\RawSpeakerChannels = 1` (agent: `-RawChannels`) opens the 6 raw channels to feed each speaker separately. **The tweeters are then unprotected.**
+* Apple's equalisation, compressors and XTC: since then reproduced by the in-driver DSP (`SpeakerDsp ≥ 1`, `DRIVER_GUIDE.md` §8.3).
 
-## 6. Открыто
+## 6. Open
 
-* Подтвердить порядок каналов на железе (тихий тон по одному каналу через `-RawChannels`, только с разрешения владельца).
-* Растёт ли `sampleTime` от нуля после START_IO (проверка: первые `UPDATE_TIMESTAMP` в логе `VHCI UPDATE_TIMESTAMP #n … sample=`).
-* Частота `UPDATE_TIMESTAMP` (ожидается раз в 16640 кадров ≈ 347 мс).
+* Confirm the channel order on hardware (a quiet tone per channel through `-RawChannels`, only with the owner's permission).
+* Whether `sampleTime` grows from zero after START_IO (check: the first `UPDATE_TIMESTAMP` lines in the log, `VHCI UPDATE_TIMESTAMP #n … sample=`). (Answered in §8: the first one is 16 640.)
+* The `UPDATE_TIMESTAMP` rate (expected once per 16 640 frames ≈ 347 ms). (Confirmed in §8.)
 
-## 7. Сверка со свежим kaiT2en (2026-10-21/22)
+## 7. Comparison with the latest kaiT2en (2026-10-21/22)
 
-Upstream `kaiT2en/KaiT2en-Fedora`, коммиты `bbf3878`, `beed204`, `6128f86` в `modules/t2bce_audio`. Автор восстанавливал поведение `BASPDevice` (BridgeAudioSP на macOS):
+Upstream `kaiT2en/KaiT2en-Fedora`, commits `bbf3878`, `beed204`, `6128f86` in `modules/t2bce_audio`. The author reconstructed the behaviour of `BASPDevice` (BridgeAudioSP on macOS):
 
-| Наблюдение kaiT2en | Для нас |
+| kaiT2en observation | For us |
 |---|---|
-| `UPDATE_TIMESTAMP` — «zero timestamp» раз за круг кольца; позиция = `sampleTime` + время от `hostTime` по номинальной частоте, но не дальше следующей метки | совпадает с моделью AppleAudio (§2); то же делаем мы |
-| Начало кольца = круг первой метки: `sample_base = sampleTime − sampleTime mod ring` | подтверждает, что `sampleTime mod ring` — слот чтения |
-| `hostTime` обычно отстаёт от времени приёма на 1–3 мс; после пробуждения может быть сильно сдвинут, тогда берётся время приёма | у нас окно 0…50 мс (у них один круг кольца, ≈347 мс); вне окна — время приёма |
-| Первая метка приходит через ~30 мс после того, как устройство начало читать; до неё позиция считается от момента до START_IO | у нас так же: до первой метки T2 считается начавшим с нулевого слота при START_IO |
-| После паузы дольше круга во время START_IO может прийти метка **прошлого** запуска; метки с `hostTime` раньше START_IO отбрасываются | **перенесено**: `ClockAnchorNs` < `RunStartNs` потока → метка игнорируется |
-| `seed = 1` и `sampleTime = 0` — сброс шкалы; `sampleTime` назад — сбой шкалы | нам отдельная обработка не нужна: коррекция работает по модулю кольца и сама переприцелится |
-| Если писатель не продвинулся между двумя метками, кольцо обнуляется (иначе T2 крутит старые сэмплы) | не перенесено: у нас копирование идёт по QPC, и движок пишет тишину сам. Вернуться к этому, если на железе будут слышны «залипания» |
-| `'saft'` читается для обоих направлений | мы читаем выходной `'saft'` |
+| `UPDATE_TIMESTAMP` is a "zero timestamp" once per ring revolution; position = `sampleTime` + the time since `hostTime` at the nominal rate, but not past the next timestamp | matches AppleAudio's model (§2); we do the same |
+| Ring start = the revolution of the first timestamp: `sample_base = sampleTime − sampleTime mod ring` | confirms that `sampleTime mod ring` is the read slot |
+| `hostTime` usually lags the reception time by 1–3 ms; after wake it can be far off, and then the reception time is used | our window is 0…50 ms (theirs is one ring revolution, ≈347 ms); outside it, the reception time |
+| The first timestamp arrives ~30 ms after the device starts reading; before it the position is counted from a moment before START_IO | same for us: until the first timestamp the T2 is assumed to have started from slot 0 at START_IO |
+| After a pause longer than a revolution, a timestamp of the **previous** run may arrive during START_IO; timestamps with `hostTime` before START_IO are discarded | **ported**: `ClockAnchorNs` < the stream's `RunStartNs` → the timestamp is ignored |
+| `seed = 1` and `sampleTime = 0` reset the scale; `sampleTime` going backwards is a scale glitch | no special handling needed: the correction works modulo the ring and re-aims by itself |
+| If the writer did not advance between two timestamps, the ring is zeroed (otherwise the T2 loops old samples) | not ported: our copy runs on QPC, and the engine writes silence itself. Revisit if "stuck" sound is heard on hardware |
+| `'saft'` is read for both directions | we read the output `'saft'` |
 
-Раскладка выходов в `dsp/profiles/16_1/graph.json` с тех пор не изменилась.
+The output layout in `dsp/profiles/16_1/graph.json` has not changed since.
 
-## 8. Проверка на железе (Stage D, 2026-10-28, `docs/logs/EXCERPT_20261028_041655.md`)
+## 8. Hardware check (Stage D, 2026-10-28, `docs/logs/EXCERPT_20261028_041655.md`)
 
-| Предсказание | Результат |
+| Prediction | Result |
 |---|---|
-| Одна метка за круг кольца | **подтверждено**: `sample` растёт ровно на 16 640, интервал 346,66 мс (±7 мкс) |
-| `sampleTime mod ring` — слот чтения, первая метка вскоре после START_IO | первая метка `sample=16640` через ~40 мс после отправки START_IO (≡ слот 0) |
-| `hostTime` после ~25,6 ч аптайма испорчен переполнением `qpc*1e7` в VHCI | **подтверждено**: `t2 = 2^64 − 4,245·10^13` (отрицательное). Это соответствует аптайму ≈ 1,8447·10^14 − 4,245·10^13 нс ≈ 39,4 ч. Драйвер берёт время приёма |
-| Коррекция опережения | не проверено: поток не вошёл в RUN из-за отклонённого ответа START_IO (исправлено, см. `CURRENT_STATE.md`) |
+| One timestamp per ring revolution | **confirmed**: `sample` grows by exactly 16 640, interval 346.66 ms (±7 µs) |
+| `sampleTime mod ring` is the read slot, the first timestamp shortly after START_IO | first timestamp `sample=16640` ~40 ms after START_IO was sent (≡ slot 0) |
+| `hostTime` is corrupted after ~25.6 h of uptime by the `qpc*1e7` overflow in the VHCI | **confirmed**: `t2 = 2^64 − 4.245·10^13` (negative). This matches an uptime of ≈ 1.8447·10^14 − 4.245·10^13 ns ≈ 39.4 h. The driver uses the reception time (later: unwraps it) |
+| Lead correction | not verified in this run: the stream did not enter RUN because the START_IO reply was rejected (fixed; verified in the next runs, see `CURRENT_STATE.md`) |

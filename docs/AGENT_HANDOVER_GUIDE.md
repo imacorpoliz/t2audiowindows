@@ -1,143 +1,142 @@
-# T2AudioPort: Руководство для разработчиков и агентов (AGENT_HANDOVER_GUIDE.md)
+# T2AudioPort: guide for developers and agents (AGENT_HANDOVER_GUIDE.md)
 
-> **Статус документа:** Актуален на 28 октября 2026 г.  
-> **Целевая аудитория:** AI-агенты, реверс-инженеры и разработчики ядерных драйверов Windows.  
-> **Целевое оборудование:** MacBook Pro 16,1 (2019), MacBook Pro 15,1 / 15,2 / 16,2 / 16,4, iMac Pro, Mac mini 2018 (все устройства Apple с сопроцессором T2 на шине PCI `VEN_106B&DEV_1803`).
-
----
-
-## 1. Введение и контекст проекта
-
-Данный репозиторий содержит полную кодовую базу, результаты реверс-инжиниринга и документацию для работы со звуком на компьютерах Apple с чипом T2 под управлением Windows 10/11 x64.
-
-### Компоненты системы
-1. **`T2AudioPort\`**: Открытый ядерный аудиодрайвер WDM / WaveRT (`T2AudioMiniport.sys`), взаимодействующий с чипом T2 и мостом `AppleUSBVHCI.sys`.
-2. **`SpeakerDSP-APO\`**: Пользовательская DSP-система (VST2 плагин `bankstown.dll` и конфигуратор `generate_config.py` для Equalizer APO), реализующая кроссоверы, эквализацию и задержки для 6 физических динамиков MacBook Pro 16,1.
-3. **`MBP-Audio-driver\`**: Официальный драйвер Apple Bootcamp (`AppleAudio.sys`), установленный в качестве эталона на физической машине.
-4. **`kait2en\`**: Полная рабочая реализация драйвера для Linux (`t2bce_audio`), используемая как архитектурный эталон взаимодействия с T2 BCE Mailbox и BAR0.
+> **Document status:** written in early October 2026, corrected on 28 October 2026. Parts of it describe the state before the hardware stages; on any conflict [`DRIVER_GUIDE.md`](DRIVER_GUIDE.md) and [`CURRENT_STATE.md`](CURRENT_STATE.md) win.  
+> **Audience:** AI agents, reverse engineers and Windows kernel driver developers.  
+> **Target hardware:** MacBook Pro 16,1 (2019), verified. Other T2 Macs (MacBook Pro 15,1 / 15,2 / 16,2 / 16,4, iMac Pro, Mac mini 2018) share the PCI function `VEN_106B&DEV_1803` but are **not supported yet**: their speaker layout and DSP profile differ (see `ROADMAP.md`).
 
 ---
 
-## 2. Аппаратная архитектура и протокол взаимодействия
+## 1. Introduction and project context
 
-### 2.1 Топология шины PCI и карта регистров T2
-Аудиоконтроллер Apple T2 представлен на шине PCI идентификатором:
+The workspace (the private `imacorpoliz/mbp`, of which this repository is the `T2AudioPort\` part) contains the code, the reverse-engineering results and the documentation for sound on Apple T2 computers running Windows 10/11 x64.
+
+### System components
+1. **`T2AudioPort\`**: the open WDM / WaveRT kernel audio driver (`T2AudioMiniport.sys`) that talks to the T2 chip and the `AppleUSBVHCI.sys` bridge.
+2. **`SpeakerDSP-APO\`**: a user-mode DSP system (the VST2 plugin `bankstown.dll` and the `generate_config.py` configurator for Equalizer APO) implementing crossovers, equalisation and delays for the 6 physical speakers of the MacBook Pro 16,1. Superseded by the in-driver DSP (`src/T2AudioDsp.h`); do not use both.
+3. **`MBP-Audio-driver\`**: Apple's official Boot Camp driver (`AppleAudio.sys`), installed on the physical machine as the reference.
+4. **`kait2en\`**: the full working Linux driver (`t2bce_audio`), used as the architectural reference for talking to the T2 BCE mailbox and BAR0.
+
+---
+
+## 2. Hardware architecture and protocol
+
+### 2.1 PCI topology and the T2 register map
+The Apple T2 audio controller appears on the PCI bus as:
 ```text
-PCI\VEN_106B&DEV_1803&SUBSYS_00000000&REV_01
+PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01   (test MacBookPro16,1)
 ```
 
-Контроллер имеет следующие области памяти (BAR):
-- **BAR0 / BAR1 (Shared Memory / `BufferStruct`)**:
-  - Область разделяемой памяти между хостом (Intel CPU) и сопроцессором Apple T2 (ARM BridgeOS).
-  - Базовое смещение структуры `BufferStruct` определяется значением регистра `GPR[2]` (обычно смещение `0x1000` или `0x2000`).
-  - Сигнатура заголовка: `0x19870423` (`T2AUDIO_SIG`).
-  - Содержит таблицу дескрипторов устройств `T2AUDIO_DEVICE_METADATA` с фиксированным шагом `0xBDEC` байт.
-  - Устройство динамиков идентифицируется по имени `"Speaker"`.
-  - Поток вывода (`OutputStreams[0]`) динамиков имеет размер аппаратного кольца **399 360 байт (`0x61800` = 16 640 кадров $\times$ 24 байта)**.
-- **BAR4 (или BAR2) + `0xC000` (General Purpose Registers / GPR)**:
-  - `GPR[0]` (+0x00): Версия протокола GPR (должна быть $\ge 2$).
-  - `GPR[1]` (+0x04): Сигнатура GPR (строго `0x19870423`).
-  - `GPR[2]` (+0x08): Смещение базового адреса `BufferStruct` внутри BAR0.
+The controller has these memory regions (BARs):
+- **BAR0 (shared memory / `BufferStruct`)**:
+  - Memory shared between the host (Intel CPU) and the Apple T2 coprocessor (ARM bridgeOS).
+  - The offset of `BufferStruct` is given by register `GPR[2]`.
+  - Header signature: `0x19870423` (`T2AUDIO_SIG`).
+  - Holds the device descriptor table `T2AUDIO_DEVICE_METADATA` with a fixed stride of `0xBDEC` bytes.
+  - The speaker device is identified by the name `"Speaker"`.
+  - The speakers' output stream (`OutputStreams[0]`) has a hardware ring of **399 360 bytes (`0x61800` = 16 640 frames × 24 bytes)**.
+- **BAR4 (or BAR2) + `0xC000` (General Purpose Registers / GPR)**:
+  - `GPR[0]` (+0x00): GPR protocol version (must be ≥ 2).
+  - `GPR[1]` (+0x04): GPR signature (exactly `0x19870423`).
+  - `GPR[2]` (+0x08): offset of `BufferStruct` inside BAR0.
 
-### 2.2 Транспорт сообщений BCE (Bridge Controller Entity)
-Взаимодействие с прошивкой чипа T2 в Windows происходит через драйвер `AppleUSBVHCI.sys` (`\Device\AppleUSBVHCI`):
-- **IOCTL-код**: Исключительно **`0x222018`** (`CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0806, METHOD_BUFFERED, FILE_ANY_ACCESS)`).
-- **Формат пакета BCE**:
+### 2.2 BCE message transport
+On Windows the T2 firmware is reached through the `AppleUSBVHCI.sys` driver (`\Device\AppleUSBVHCI`):
+- **IOCTL code**: **`0x222018`** for requests (`CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0806, METHOD_BUFFERED, FILE_ANY_ACCESS)`). bridgeOS → host messages arrive as **`0x222020`** sent by AppleUSBVHCI to the audio driver, which must intercept them (the BSOD 0x7E fix).
+- **BCE packet format**:
   ```c
   #pragma pack(push, 1)
   typedef struct _T2AUDIO_MSG_HEADER {
-      CHAR Tag[4];        // Уникальный тег: "Audt" или инкрементный "S001"
+      ULONG Tag;          // request counter 1..127 (as in AppleAudio)
       UCHAR Type;         // 1 = COMMAND, 2 = RESPONSE, 3 = NOTIFICATION
-      ULONG64 DeviceId;   // Идентификатор подустройства T2 (0 для общих команд)
-  } T2AUDIO_MSG_HEADER;   // Размер: 13 байт
+      ULONG64 DeviceId;   // T2 sub-device id (0 for global commands)
+  } T2AUDIO_MSG_HEADER;   // size: 13 bytes
 
   typedef struct _T2AUDIO_MSG_BASE {
-      ULONG Message;      // Код команды / опкод
-      ULONG Status;       // Статус протокола (0 = SUCCESS)
-  } T2AUDIO_MSG_BASE;     // Размер: 8 байт
+      ULONG Message;      // command code / opcode
+      ULONG Status;       // protocol status (0 = SUCCESS)
+  } T2AUDIO_MSG_BASE;     // size: 8 bytes
   #pragma pack(pop)
   ```
 
 ---
 
-## 3. Матрица исправленных критических дефектов
+## 3. Matrix of fixed critical defects
 
-Следующая таблица содержит все дефекты, найденные и устранённые в ходе аудита и реверс-инжиниринга:
+All defects found and fixed during the audit and the reverse engineering:
 
-| № | Дефект | Исходный файл | Симптом / Последствие | Причина и Решение |
+| # | Defect | Source file | Symptom / consequence | Cause and fix |
 |---|---|---|---|---|
-| **1** | Ошибка кодов ответов `START_IO` / `STOP_IO` | [`Phase4.c`](../src/Phase4.c) | `STATUS_DEVICE_PROTOCOL_ERROR` при включении звука | Драйвер ждал ответ `0` и `2`. REA доказало, что T2 возвращает `1` (`START_IO_RESPONSE`) и `3` (`STOP_IO_RESPONSE`). Введены правильные макросы в [`BceProtocolLogic.h`](../src/BceProtocolLogic.h). |
-| **2** | BSOD `0x7E` в `ks!DispatchDeviceIoControl` | [`BceTransport.c`](../src/BceTransport.c) | Мгновенный синий экран при попытке отправки команды BCE | Ручное присвоение `irpStack->FileObject = FileObject`. В `AppleAudio.sys` (`FUN_140004a4c`) `FileObject` строго `NULL`. Назначение `FileObject` отправляло IRP в стек `ksthunk`. Ручное присвоение удалено. **Поправка:** сборка с `FileObject = NULL` тоже падала (2026-10-08 01:35) — BSOD не устранён, см. `docs/CURRENT_STATE.md`. |
-| **3** | Отказ Windows Audio Engine в создании потока | [`WaveRTMiniport.c`](../src/WaveRTMiniport.c) | Ошибка `0x80070057` / отказ WASAPI открывать пин 0 | Драйвер требовал `WAVE_FORMAT_PCM`. Для потоков >2 каналов Windows Audio Engine строго требует `WAVEFORMATEXTENSIBLE` (`0xFFFE`). Добавлена полная поддержка `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` (6ch, 48kHz, 32-bit, mask 5.1). |
-| **4** | Статическое копирование в смещение 0 (Тишина / щелчки) | [`WaveRTStream.c`](../src/WaveRTStream.c) | Звук пропадал через 10 мс; щелчок раз в 347 мс | Драйвер копировал 11.5 КБ в смещение 0 буфера 399 КБ. T2 циклически считывал 336 мс тишины. Разработан алгоритм `T2AudioCalculateCopyChunk`, циклически заполняющий BAR1 перед курсором T2 с опережением 15 мс. |
-| **5** | Отказ запуска при обычной загрузке (Code 10) | [`Driver.c`](../src/Driver.c) | `STATUS_UNSUCCESSFUL` без стороннего скрипта | Запуск блокировался отсутствием волатильного ключа `TestSession`. **Поправка:** этого изменения в коде нет; гейт `TestSession` сохранён намеренно (см. `docs/DRIVER_GUIDE.md`, §8). |
-| **6** | Гонка состояний (Race Condition) в таймере DPC | [`WaveRTStream.c`](../src/WaveRTStream.c) | Искажение курсора воспроизведения, рассинхронизация | Таймерный DPC (2 мс) и `SetState` несинхронно читали `AnchorQpc` и `AnchorFrames`. Добавлен спинлок `KSPIN_LOCK StreamLock`. |
-| **7** | Зацикливание шума при остановке потока | [`WaveRTStream.c`](../src/WaveRTStream.c) | Жужжание/гул после нажатия Pause/Stop | Буфер BAR1 не обнулялся при остановке. Добавлено обнуление буфера динамиков в BAR1 при переходе в `KSSTATE_STOP`. |
-| **8** | Опасный вызов `KeFlushQueuedDpcs()` на повышенном IRQL | [`WaveRTStream.c`](../src/WaveRTStream.c) | `BugCheck 0x4A` при остановке таймера | **Поправка:** такой проверки в коде нет; `KeFlushQueuedDpcs()` вызывается только из PASSIVE-колбэков (`SetState`, `FreeAudioBuffer`, teardown), что и обеспечивает корректность. |
+| **1** | Wrong `START_IO` / `STOP_IO` reply codes | [`Phase4.c`](../src/Phase4.c) | `STATUS_DEVICE_PROTOCOL_ERROR` when enabling sound | The driver expected replies `0` and `2`. REA proved that the T2 returns `1` (`START_IO_RESPONSE`) and `3` (`STOP_IO_RESPONSE`). Correct macros added in [`BceProtocolLogic.h`](../src/BceProtocolLogic.h). Verified on hardware (Stage D). |
+| **2** | BSOD `0x7E` in `ks!DispatchDeviceIoControl` | [`BceTransport.c`](../src/BceTransport.c), [`Driver.c`](../src/Driver.c) | Immediate blue screen on `START_IO` | First attempt: removed the manual `irpStack->FileObject = FileObject` (in `AppleAudio.sys`, `FUN_140004a4c`, `FileObject` is `NULL`). That did **not** fix it (crash on 2026-10-08 01:35). Real cause: AppleUSBVHCI delivers bridgeOS messages as `IOCTL 0x222020` without a `FileObject` to the first Apple audio interface, and PortCls/KS dereferenced NULL. Fix: intercept `0x222020` in `T2AudioDeviceControl`. **Proven on hardware** (Stage D). See `analysis/START_IO_BSOD_ROOT_CAUSE.md`. |
+| **3** | Windows Audio Engine refused to create the stream | [`WaveRTMiniport.c`](../src/WaveRTMiniport.c) | Error `0x80070057` / WASAPI refused to open pin 0 | The driver required `WAVE_FORMAT_PCM`. For streams of more than 2 channels the Windows Audio Engine requires `WAVEFORMATEXTENSIBLE` (`0xFFFE`). Full `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` support added. (The endpoint is now stereo; 6 channels only in raw test mode.) |
+| **4** | Static copy to offset 0 (silence / clicks) | [`WaveRTStream.c`](../src/WaveRTStream.c) | Sound vanished after 10 ms; a click every 347 ms | The driver copied 11.5 KB to offset 0 of the 399 KB buffer, and the T2 cyclically read 336 ms of silence. Fixed by `T2AudioCalculateCopyChunk`, which fills the ring cyclically ahead of the T2 cursor (lead 1000 frames, kept by the T2 clock). |
+| **5** | Start refused on an ordinary boot (Code 10) | [`Driver.c`](../src/Driver.c) | `STATUS_UNSUCCESSFUL` without a helper script | The start is gated by the volatile `TestSession` key, deliberately (`DRIVER_GUIDE.md` §8). Since 2026-10-28 the installer's persistent mode (`Parameters\EnableProduction`, with the crash guard) starts the driver on every boot. |
+| **6** | Race in the DPC timer | [`WaveRTStream.c`](../src/WaveRTStream.c) | Corrupted play cursor, desynchronisation | The 2 ms timer DPC and `SetState` read `AnchorQpc` and `AnchorFrames` without synchronisation. Added the `KSPIN_LOCK StreamLock`. |
+| **7** | Looping noise after the stream stopped | [`WaveRTStream.c`](../src/WaveRTStream.c) | Buzz/hum after Pause/Stop | The ring was not zeroed on stop. The speaker ring is now zeroed on the transition to `KSSTATE_STOP`. |
+| **8** | Dangerous `KeFlushQueuedDpcs()` at raised IRQL | [`WaveRTStream.c`](../src/WaveRTStream.c) | `BugCheck 0x4A` when stopping the timer | **Correction:** there is no such check in the code; `KeFlushQueuedDpcs()` is called only from PASSIVE callbacks (`SetState`, `FreeAudioBuffer`, teardown), which is what makes it correct. |
 
 ---
 
-## 4. Архитектура кольцевого DMA зеркалирования
+## 4. Cyclic DMA ring mirroring
 
-### 4.1 Проблема PortCls и системного буфера
-Windows PortCls (`PortWaveRT`) отображает буфер в память пользовательского процесса с помощью `MmMapLockedPagesSpecifyCache(..., UserMode, ...)`. Из-за специфики подсистемы MMIO Windows, прямое отображение физических страниц BAR1 в пользовательское пространство отклоняется с ошибкой `0x8007001F`.
+### 4.1 The PortCls and system buffer problem
+Windows PortCls (`PortWaveRT`) maps the buffer into the user process with `MmMapLockedPagesSpecifyCache(..., UserMode, ...)`. Mapping the physical pages of BAR0 into user space that way is rejected with `0x8007001F`.
 
-### 4.2 Реализованное решение
-1. **Системный циклический буфер (`SystemBufferVa`)**:
-   Драйвер выделяет страницы обычной оперативной памяти через `PortStream->AllocatePagesForMdl` под размер запроса клиента (обычно 10–20 мс = 11 520 или 23 040 байт).
-2. **Аппаратное кольцо T2 (`context->Bar1Mapped + context->SpeakerBufferOffset`)**:
-   Имеет размер $S_{\text{hw}} = 399\,360$ байт.
-3. **Алгоритм `T2AudioCalculateCopyChunk`**:
-   DPC-таймер (2 мс) и `GetPosition` вычисляют по QPC текущий кадр клиента $F_{\text{play}}$ и копируют все кадры от $F_{\text{last}}$ до него линейными порциями (чанками). Кадр $F$ попадает в кадр кольца $F + \text{DestOffset}$: опережение ~1000 кадров (21 мс) над позицией чтения T2, которое переприцеливается по `UPDATE_TIMESTAMP` (окно ±500):
-   $$\text{SrcOffset} = (F \times B_{\text{client}}) \pmod{S_{\text{client}}},\quad B_{\text{client}} = 8\ \text{(стерео)}$$
+### 4.2 The implemented solution
+1. **System cyclic buffer (`SystemBufferVa`)**:
+   The driver allocates ordinary RAM pages through `PortStream->AllocatePagesForMdl` of the client's requested size (usually 10–20 ms = 11 520 or 23 040 bytes).
+2. **T2 hardware ring (`context->Bar1Mapped + context->SpeakerBufferOffset`)**:
+   Size $S_{\text{hw}} = 399\,360$ bytes.
+3. **The `T2AudioCalculateCopyChunk` algorithm**:
+   The DPC timer (2 ms) and `GetPosition` compute the current client frame $F_{\text{play}}$ from QPC and copy all frames from $F_{\text{last}}$ up to it in linear chunks. Frame $F$ lands in ring frame $F + \text{DestOffset}$: a lead of ~1000 frames (21 ms) over the T2 read position, re-aimed from `UPDATE_TIMESTAMP` (window ±500):
+   $$\text{SrcOffset} = (F \times B_{\text{client}}) \pmod{S_{\text{client}}},\quad B_{\text{client}} = 8\ \text{(stereo)}$$
    $$\text{DstOffset} = ((F + \text{DestOffset}) \times 24) \pmod{S_{\text{hw}}}$$
-   Стерео раскладывается на 6 динамиков: L → 0, 1 и через ФВЧ в 2; R → 3, 4 и через ФВЧ в 5 (см. `docs/analysis/RE_speaker_layout_and_clock.md`).
-   Обеспечивается гладкое циклическое сшивание на границах обоих буферов.
+   Stereo is spread over the 6 speakers: by the DSP (`SpeakerDsp ≥ 1`, default 3) or, in the plain path, L → 0, 1 and through a HPF into 2; R → 3, 4 and through a HPF into 5 (see `docs/analysis/RE_speaker_layout_and_clock.md`).
+   Wrap-around at the boundaries of both buffers is seamless.
 
 ---
 
-## 5. Инструкции по сборке, тестированию и отладке
+## 5. Build, test and debugging instructions
 
-### 5.1 Сборка драйвера ядра (`T2AudioMiniport.sys`)
-Сборка осуществляется через стандартный инструментарий Visual Studio 2026 / MSBuild и Windows Driver Kit:
+### 5.1 Building the kernel driver (`T2AudioMiniport.sys`)
+Built with the standard Visual Studio / MSBuild toolchain and the Windows Driver Kit (paths below are the owner's build machine; adjust):
 ```powershell
 & "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe" `
-    "C:\Users\othysa\Desktop\mbp\T2AudioPort\src\T2AudioMiniport.vcxproj" `
+    "<repo>\src\T2AudioMiniport.vcxproj" `
     /p:Configuration=Release /p:Platform=x64 /t:Rebuild
 ```
-Бинарник драйвера компилируется в:
-`C:\Users\othysa\Desktop\mbp\T2AudioPort\src\bin\Release\T2AudioMiniport.sys`
+The driver binary is produced at:
+`<repo>\src\bin\Release\T2AudioMiniport.sys`
 
-### 5.2 Сборка и запуск модульных тестов
-Модульные тесты не зависят от ядра и компилируются обычным компилятором MSVC `cl.exe`:
+### 5.2 Building and running the unit tests
+The unit tests do not depend on the kernel and are built with the ordinary MSVC compiler `cl.exe`:
 ```cmd
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
-cd /d "C:\Users\othysa\Desktop\mbp\T2AudioPort"
+cd /d "<repo>"
 
-cl /nologo /W4 /Fe:tests\BceProtocolLogicTest.exe tests\BceProtocolLogicTest.c
-tests\BceProtocolLogicTest.exe
-
-cl /nologo /W4 /Fe:tests\T2AudioBufferLogicTest.exe tests\T2AudioBufferLogicTest.c
-tests\T2AudioBufferLogicTest.exe
+for %t in (BceProtocolLogicTest T2AudioBufferLogicTest T2AudioSpeakerLogicTest T2AudioPipelineTest T2AudioDspTest T2AudioCrashGuardTest) do (
+  cl /nologo /W4 /Fe:tests\%t.exe tests\%t.c && tests\%t.exe
+)
 ```
-Оба теста должны завершаться с выводом `ALL PASSED (0 failures)`.
+Every test must end with `ALL PASSED`.
 
-### 5.3 Безопасное тестирование на реальном оборудовании
-1. **Тестовая подпись**: В Windows должна быть включена тестовая подпись (`bcdedit /set testsigning on`).
-2. **Экстренный откат**: Проверенный скрипт [`tools/Restore-AppleAudioDriver.ps1`](../tools/Restore-AppleAudioDriver.ps1). В случае необходимости он мгновенно восстанавливает оригинальный `AppleAudio.sys`.
-3. **Мониторинг отладочных сообщений**: Запустите утилиту DebugView (`C:\Users\othysa\Desktop\mbp\DebugView\Dbgview.exe`) с включенной опцией *Capture Kernel* для просмотра префиксов `T2Audio:`.
+### 5.3 Safe testing on real hardware
+1. **Test signing**: test signing must be on in Windows (`bcdedit /set testsigning on`).
+2. **Emergency rollback**: `tools/T2Audio-Setup.ps1 -Action Uninstall`, or the proven [`tools/Restore-AppleAudioDriver.ps1`](../tools/Restore-AppleAudioDriver.ps1), which restores the original `AppleAudio.sys`.
+3. **Debug output**: run DebugView (`..\DebugView\Dbgview.exe` in the `mbp` layout) with *Capture Kernel* on, and filter on the `T2Audio:` prefix.
 
 ---
 
-## 6. Связь с файлами и навигация
+## 6. Links and navigation
 
-- **Анализ протокола AppleAudio**: [`docs/analysis/AppleAudio_Reverse_Engineering_Report.md`](analysis/AppleAudio_Reverse_Engineering_Report.md)
-- **Индекс всех отчетов**: [`docs/INDEX.md`](INDEX.md)
-- **Матрица статуса проекта**: [`CURRENT_STATE.md`](CURRENT_STATE.md)
-- **Исходный код драйвера**:
-  - Транспорт BCE: [`T2AudioPort/src/BceTransport.c`](../src/BceTransport.c)
-  - Команды Start/Stop: [`T2AudioPort/src/Phase4.c`](../src/Phase4.c)
-  - Поток WaveRT и таймер DMA: [`T2AudioPort/src/WaveRTStream.c`](../src/WaveRTStream.c)
-  - Минипорт и валидация форматов: [`T2AudioPort/src/WaveRTMiniport.c`](../src/WaveRTMiniport.c)
-  - Инициализация PnP и диспетчеризация: [`T2AudioPort/src/Driver.c`](../src/Driver.c)
-  - Выделение BAR и поиск спикера: [`T2AudioPort/src/Device.c`](../src/Device.c)
+- **AppleAudio protocol analysis**: [`docs/analysis/AppleAudio_Reverse_Engineering_Report.md`](analysis/AppleAudio_Reverse_Engineering_Report.md)
+- **Index of all reports**: [`docs/INDEX.md`](INDEX.md)
+- **Project status**: [`CURRENT_STATE.md`](CURRENT_STATE.md); plan: [`ROADMAP.md`](ROADMAP.md)
+- **Driver source**:
+  - BCE transport: [`src/BceTransport.c`](../src/BceTransport.c)
+  - Start/Stop commands: [`src/Phase4.c`](../src/Phase4.c)
+  - WaveRT stream and DMA timer: [`src/WaveRTStream.c`](../src/WaveRTStream.c)
+  - Speaker DSP: [`src/T2AudioDsp.h`](../src/T2AudioDsp.h)
+  - Miniport and format validation: [`src/WaveRTMiniport.c`](../src/WaveRTMiniport.c)
+  - PnP initialisation and dispatch: [`src/Driver.c`](../src/Driver.c)
+  - BAR mapping and speaker lookup: [`src/Device.c`](../src/Device.c)

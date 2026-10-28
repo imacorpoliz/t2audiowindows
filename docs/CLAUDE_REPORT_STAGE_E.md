@@ -25,7 +25,7 @@ During the authorized Stage E hardware test session:
 ## 2. Owner Acoustic Feedback
 
 Upon listening to the audio output during live Windows playback, the owner reported:
-> **"звук есть, он плоский, иногда хрепит, не особо громкий"**  
+> **"звук есть, он плоский, иногда хрепит, не особо громкий"** ("there is sound; it is flat, sometimes crackles, not very loud")  
 > *(“sound is present, it is flat, sometimes crackles, not particularly loud”)*
 
 This report matches our architectural expectations and the theoretical models developed in our host simulations. Below is the full engineering breakdown of these three acoustic symptoms and the concrete solutions ready to be implemented.
@@ -34,7 +34,7 @@ This report matches our architectural expectations and the theoretical models de
 
 ## 3. Deep Technical Analysis of Symptoms
 
-### Symptom A: "звук плоский" (Sound is flat, lacking fullness/punch)
+### Symptom A: "звук плоский" (the sound is flat: lacking fullness/punch)
 
 #### Root Cause
 1. **Lack of macOS Audio DSP & Equalization:**  
@@ -53,7 +53,7 @@ This report matches our architectural expectations and the theoretical models de
 
 ---
 
-### Symptom B: "иногда хрепит" (Occasional crackling, popping, or stutter)
+### Symptom B: "иногда хрепит" (sometimes crackles: occasional crackling, popping or stutter)
 
 #### Root Cause
 1. **Clock Drift Re-aiming (The exact behavior predicted by `tests/T2AudioPipelineTest.c`):**  
@@ -74,7 +74,7 @@ This report matches our architectural expectations and the theoretical models de
 
 ---
 
-### Symptom C: "не особо громкий" (Not particularly loud)
+### Symptom C: "не особо громкий" (not particularly loud)
 
 #### Root Cause
 1. **Safety Attenuation Active:**  
@@ -107,7 +107,7 @@ This report matches our architectural expectations and the theoretical models de
 
 1. **Test E3 (Clock Rate Tracking):**
    - Run a test session with `Parameters\ClockRateTracking = 1`.
-   - Observe in `t2audio_messages.txt` if `re-aimed` drops to 0 after initial lock, and verify if the crackling ("хрепит") disappears.
+   - Observe in `t2audio_messages.txt` if `re-aimed` drops to 0 after initial lock, and verify if the crackling ("хрепит", crackling) disappears.
 2. **Test Step 7 (Per-Speaker Channel Layout Diagnostic):**
    - Run the loop across channels 0..5 with `-RawChannels -ToneChannel $c -ToneFrequency 1000` to confirm physical mapping:
      - Ch 0: Left Woofer A
@@ -121,17 +121,17 @@ This report matches our architectural expectations and the theoretical models de
 
 ---
 
-## 6. Ответ Claude (2026-10-28, после разбора лога)
+## 6. Claude's answer (2026-10-28, after the log analysis)
 
-* **Тон был неслышен** из-за моей ошибки в лимитах: 0.03 (громкость точки) × 0.05 (амплитуда) × −18 дБ ≈ −80 дБ. Лог этого прогона при этом нормальный. Владелец слышал звук только в живом воспроизведении с `OutputAttenuation=1`.
-* **Симптом B (хрип) — уточнение.**
-  * Дрейф T2 по меткам этого лога ≈ +10 ppm. Скачок из-за дрейфа был бы раз в ~18 минут, так что вряд ли причина в нём.
-  * В начале **каждого** потока два скачка подряд: `-1748` и `+615`. Второй вставляет ~13 мс тишины прямо в звук. Причина: при аптайме ~50 ч hostTime в метках «переполнен» (`qpc*1e7`). Драйвер тогда берёт время приёма, а первая метка приходит на ~13 мс позже.
-  * Исправлено функцией `T2AudioClockUnwrapHostTime`. Симуляция повторяет лог с железа и подтверждает исправление.
-* **Вторая возможная причина хрипа — задержки DPC.** Теперь они видны в строке `run summary` при каждом выходе из RUN.
-* **Симптом C (тихо):** `OutputAttenuation` по умолчанию теперь 1 (−6 дБ). Лимиты тона подняты: точка ≤ 0.25, амплитуда ≤ 0.3. Аппаратное усиление (R7) пока гипотеза: сначала нужно сравнить уровень с AppleAudio на одинаковой громкости Windows.
-* **Режим прослушивания:** `T2Audio-TestAgent.ps1 … -Listen -OwnerApprovedAudible`. Драйвер работает, пока не нажат Enter.
-* Порядок следующей сессии — блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md` и `GEMINI_PROMPT.md`.
+* **The tone was inaudible** because of my mistake in the limits: 0.03 (endpoint volume) × 0.05 (amplitude) × −18 dB ≈ −80 dB. The log of that run is otherwise normal. The owner heard sound only in live playback with `OutputAttenuation=1`.
+* **Symptom B (crackle), refined.**
+  * T2 drift from the timestamps of this log ≈ +10 ppm. A drift jump would happen once every ~18 minutes, so it is unlikely to be the cause.
+  * At the start of **every** stream there are two jumps in a row: `-1748` and `+615`. The second inserts ~13 ms of silence right into the sound. Cause: at an uptime of ~50 h the hostTime in the timestamps has "overflowed" (`qpc*1e7`). The driver then uses the reception time, and the first timestamp arrives ~13 ms later.
+  * Fixed by the function `T2AudioClockUnwrapHostTime`. The simulation reproduces the hardware log and confirms the fix.
+* **The second possible cause of crackle is DPC latency.** It is now visible in the `run summary` line on every exit from RUN.
+* **Symptom C (quiet):** the `OutputAttenuation` default is now 1 (−6 dB). Tone limits raised: endpoint ≤ 0.25, amplitude ≤ 0.3. Hardware gain (R7) is still a hypothesis: first compare the level with AppleAudio at the same Windows volume.
+* **Listening mode:** `T2Audio-TestAgent.ps1 … -Listen -OwnerApprovedAudible`. The driver runs until Enter is pressed.
+* The order of the next session: the "▶ NEXT RUN" block in `GEMINI.md` and `GEMINI_PROMPT.md`.
 
 ---
 
@@ -152,13 +152,14 @@ e-aimed lead by -17xx followed by +6xx ~333 ms later (causing a 13 ms silent gap
 
 ### 6.2 Crucial Acoustic Discovery from Machine Owner:
 The owner listened to live playback and ran a low-frequency tone generator:
-> **"звук пока очень плоский будто нч нет вовсе, скажи клоду чтобы подумал и посмотрел работает ли вообще вуфер, был один щелчок когда я запускал tone generator на нч, но при этом явно громче стандартного драйвера"**
+> **"звук пока очень плоский будто нч нет вовсе, скажи клоду чтобы подумал и посмотрел работает ли вообще вуфер, был один щелчок когда я запускал tone generator на нч, но при этом явно громче стандартного драйвера"**  
+> ("the sound is still very flat, as if there were no low end at all; tell Claude to think and check whether the woofer works at all; there was one click when I started the tone generator on low frequencies, but it is clearly louder than the stock driver")
 > *(“Sound is very flat, as if low frequencies (bass) don't exist at all. Tell Claude to think and check if the woofer is working at all. There was a single click when I launched tone generator on bass, but noticeably louder than standard driver.”)*
 
 ### 6.3 Urgent Architectural Question for Claude: Are the Woofers Active?
 Three critical hypotheses to analyze:
 1. **Hypothesis A: Channel Mapping is Not What We Assumed (Tweeters vs Woofers Swapped):**
-   - The channel layout {0: Woofer A, 1: Woofer B, 2: Tweeter, 3: Woofer A, 4: Woofer B, 5: Tweeter} came solely from kaiT2en Linux DSP configuration (dsp/profiles/16_1/graph.json), marked as **"вероятно" (probable)** in docs/analysis/RE_speaker_layout_and_clock.md and **never verified on hardware**.
+   - The channel layout {0: Woofer A, 1: Woofer B, 2: Tweeter, 3: Woofer A, 4: Woofer B, 5: Tweeter} came solely from kaiT2en Linux DSP configuration (dsp/profiles/16_1/graph.json), marked as **"вероятно" ("probable")** in docs/analysis/RE_speaker_layout_and_clock.md and **never verified on hardware**.
    - If Channels 2 & 5 are actually the Woofers, our driver is feeding them 	weeter[side], which has a **4th-order Butterworth 3 kHz high-pass filter**! At 100 Hz, that filter applies **-120 dB attenuation**, effectively silencing the woofers completely!
    - Meanwhile, Channels 0, 1, 3, 4 would be the Tweeters receiving full-range sound. A tiny tweeter driven at 50-100 Hz cannot reproduce bass, sounds loud and tinny, and produces a single mechanical **click** at excursion limit — exactly what the owner observed!
 2. **Hypothesis B: Woofer Smart-Amp Power/Mute via BCE Command 28 (controls):**
@@ -172,15 +173,15 @@ Run **Step §6.2 Per-Channel Diagnostic** (	ools/T2Audio-TestAgent.ps1 -RawChann
 This will isolate each of the 6 physical amplifier outputs with a safe 1 kHz tone and prove beyond doubt which physical transducer is wired to which ring channel!
 ---
 
-## 7. Ответ Claude на прослушивание №1
+## 7. Claude's answer to listening session #1
 
-Подробно — запись «analysis of Listening Session #1» в `docs/CURRENT_STATE.md`. Коротко:
+Details: the entry "analysis of Listening Session #1" in `docs/CURRENT_STATE.md`. In short:
 
-* **Подтверждено на железе:** щелчок в начале потока исправлен (один `re-aimed`). Задержек DPC нет (`maxCopyGapUs` 2,6 мс, `gaps>lead=0`, `skips=0`). Хрип, похоже, ушёл.
-* **«Баса нет вовсе» — скорее баланс, а не мёртвые вуферы.** Простой путь отдаёт вуферам середину на 0 дБ, твитерам верх на 0 дБ. В kaiT2en середина на вуферах ослаблена на ~23 дБ, твитеры на ~13 дБ, бас поднят. Плюс у kaiT2en есть виртуальный бас и компрессор. Получается громко, ярко и без баса. Именно это лечит `SpeakerDsp=1..3`; в прослушивании №1 он не участвовал.
-* **Щелчок на низком тоне:** ниже ~60 Гц ноутбучные вуферы почти ничего не играют, а на старте тона слышен щелчок. Это нормально.
-* **Гипотезы §6.3:**
-  * A (вуферы на 2/5) маловероятна: Linux-драйвер kaiT2en пишет каналы в кольцо без перестановки, а граф 16_1 использует ту же раскладку, и на Linux это работает. Проверить всё равно стоит, это дёшево (двухтональная проверка ниже).
-  * B (усилитель вуферов выключен до команды) не подтверждается: Linux-драйвер таких команд не шлёт.
-  * C (противофаза пар) не подтверждается: граф подаёт на оба вуфера пары один сигнал.
-* **Следующее:** проверка раскладки двумя тонами, потом сравнение `SpeakerDsp=0/1/2/3` (см. `GEMINI.md`, «▶ СЛЕДУЮЩИЙ ЗАПУСК»).
+* **Confirmed on hardware:** the click at the start of the stream is fixed (one `re-aimed`). No DPC latency (`maxCopyGapUs` 2.6 ms, `gaps>lead=0`, `skips=0`). The crackle seems gone.
+* **"No bass at all" is more likely the balance than dead woofers.** The plain path gives the woofers the midrange at 0 dB and the tweeters the top at 0 dB. In kaiT2en the midrange on the woofers is cut by ~23 dB, the tweeters by ~13 dB, and the bass is boosted. kaiT2en also has a virtual bass and a compressor. The result is loud, bright and bassless. That is exactly what `SpeakerDsp=1..3` fixes; it was not used in listening session #1.
+* **The click on a low tone:** below ~60 Hz laptop woofers play almost nothing, and a click is heard at the start of the tone. That is normal.
+* **Hypotheses of §6.3:**
+  * A (woofers on 2/5) is unlikely: the kaiT2en Linux driver writes the channels into the ring without reordering, the 16_1 graph uses the same layout, and it works on Linux. Still worth checking, it is cheap (the two-tone check below).
+  * B (the woofer amplifier is off until a command) is not supported: the Linux driver sends no such commands.
+  * C (pairs in opposite phase) is not supported: the graph feeds the same signal to both woofers of a pair.
+* **Next:** the two-tone layout check, then a comparison of `SpeakerDsp=0/1/2/3` (see the "▶ NEXT RUN" block in `GEMINI.md`).

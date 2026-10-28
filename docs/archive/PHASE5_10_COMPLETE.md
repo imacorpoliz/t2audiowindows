@@ -8,16 +8,16 @@
 
 ## Summary
 
-Завершены все критические фазы разработки:
+All critical development phases are complete:
 
-- **Phase 5:** Kernel BCE transport реализован (BceTransport.c)
-- **Phase 6:** GET_DEVICE_LIST device enumeration интегрирован
-- **Phase 7:** MMIO MDL активирован в AllocateAudioBuffer
-- **Phase 8:** QPC-based position tracking реализован
-- **Phase 9:** Hardware latency/FIFO настроен (512 frames = 12288 bytes)
-- **Phase 10:** INF обновлён с Hardware ID
+- **Phase 5:** kernel BCE transport implemented (BceTransport.c)
+- **Phase 6:** GET_DEVICE_LIST device enumeration integrated
+- **Phase 7:** MMIO MDL activated in AllocateAudioBuffer
+- **Phase 8:** QPC-based position tracking implemented
+- **Phase 9:** hardware latency/FIFO set (512 frames = 12288 bytes)
+- **Phase 10:** INF updated with the Hardware ID
 
-Драйвер теперь **функционально полон** и может быть установлен на Apple T2 Audio Device.
+The driver is now **functionally complete** and can be installed on the Apple T2 Audio Device. (Historical claim, not confirmed on hardware at the time: START_IO crashed with BSOD 0x7E until the `0x222020` interception, and the MDL-on-BAR path never worked; see `docs/CURRENT_STATE.md`.)
 
 ---
 
@@ -25,7 +25,7 @@
 
 ### Phase 5: BCE Transport (BceTransport.c)
 
-Kernel-mode wrapper для AppleUSBVHCI.sys:
+Kernel-mode wrapper for AppleUSBVHCI.sys:
 
 ```c
 NTSTATUS T2AudioOpenBceTransport(VOID);
@@ -38,9 +38,9 @@ NTSTATUS T2AudioSendBceMessage(
     _Out_opt_ PULONG ReplySize);
 ```
 
-- Использует `IoGetDeviceObjectPointer(L"\\Device\\AppleUSBVHCI", ...)`
-- Отправляет IOCTL 0x222018 через `IoBuildDeviceIoControlRequest`
-- Синхронное ожидание через `KeWaitForSingleObject`
+- Uses `IoGetDeviceObjectPointer(L"\\Device\\AppleUSBVHCI", ...)`
+- Sends IOCTL 0x222018 with `IoBuildDeviceIoControlRequest`
+- Waits synchronously with `KeWaitForSingleObject`
 
 ### Phase 6: Device Enumeration
 
@@ -55,11 +55,11 @@ NTSTATUS T2AudioFindSpeakerDeviceId(
     _Out_ PULONG64 DeviceId);
 ```
 
-- Отправляет `GET_DEVICE_LIST` (message 101) при старте драйвера
-- Парсит response (message 102) и извлекает массив device ID
-- Пока использует heuristic (первый device), TODO: matching по UID через GET_PROPERTY
+- Sends `GET_DEVICE_LIST` (message 101) at driver start
+- Parses the reply (message 102) and extracts the device ID array
+- Uses a heuristic for now (the first device), TODO: matching by UID through GET_PROPERTY
 
-Интеграция в `T2AudioStartDevice`:
+Integration into `T2AudioStartDevice`:
 ```c
 status = T2AudioOpenBceTransport();
 if (NT_SUCCESS(status)) {
@@ -69,7 +69,7 @@ if (NT_SUCCESS(status)) {
 
 ### Phase 7: MMIO Buffer Activation
 
-`AllocateAudioBuffer` теперь возвращает реальный MDL:
+`AllocateAudioBuffer` now returns a real MDL:
 
 ```c
 status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
@@ -79,16 +79,16 @@ status = T2AudioCreateSpeakerMdl(instance->DeviceContext,
 *CacheType = MmWriteCombined;
 ```
 
-- MDL создаётся из BAR1 physical address + speaker buffer offset
-- `MDL_IO_SPACE` flag установлен
-- PFN array рассчитывается вручную от `Bar1Physical.QuadPart`
-- Cache type: `MmWriteCombined` (соответствует AppleAudio.sys)
+- The MDL is built from the BAR1 physical address + the speaker buffer offset
+- The `MDL_IO_SPACE` flag is set
+- The PFN array is computed by hand from `Bar1Physical.QuadPart`
+- Cache type: `MmWriteCombined` (as in AppleAudio.sys)
 
-`FreeAudioBuffer` освобождает MDL через `T2AudioFreeSpeakerMdl`.
+`FreeAudioBuffer` frees the MDL with `T2AudioFreeSpeakerMdl`.
 
 ### Phase 8: Position Tracking
 
-`GetPosition` использует QPC interpolation:
+`GetPosition` uses QPC interpolation:
 
 ```c
 KeQueryPerformanceCounter(&qpcFreq);
@@ -105,13 +105,13 @@ Position->WriteOffset = (playOffset + 512 * instance->BytesPerFrame) %
                         instance->DeviceContext->SpeakerBufferSize;
 ```
 
-- Anchor устанавливается при переходе в `KSSTATE_RUN`
-- WriteOffset опережает PlayOffset на 512 frames (~10.6ms FIFO)
-- Если hardware position register существует, можно заменить на чтение из GPR
+- The anchor is set on the transition to `KSSTATE_RUN`
+- WriteOffset is 512 frames ahead of PlayOffset (~10.6 ms FIFO)
+- If a hardware position register exists, this can be replaced by a GPR read
 
 ### Phase 9: Hardware Latency
 
-`GetHWLatency` теперь возвращает realistic FIFO size:
+`GetHWLatency` now returns a realistic FIFO size:
 
 ```c
 Latency->FifoSize = 12288;  // 512 frames * 24 bytes/frame
@@ -119,11 +119,11 @@ Latency->ChipsetDelay = 0;
 Latency->CodecDelay = 0;
 ```
 
-Windows audio engine использует эту информацию для buffer size negotiation.
+The Windows audio engine uses this information to negotiate the buffer size.
 
 ### Phase 10: INF Hardware Match
 
-INF теперь содержит полную установочную секцию:
+The INF now has a full install section:
 
 ```ini
 [Standard.NTamd64]
@@ -142,19 +142,19 @@ ErrorControl=1
 ServiceBinary=%12%\T2AudioMiniport.sys
 ```
 
-⚠️ **ОПАСНОСТЬ:** установка заменит AppleAudio.sys на PCI\VEN_106B&DEV_1803.
+⚠️ **DANGER:** installing replaces AppleAudio.sys on PCI\VEN_106B&DEV_1803.
 
 ---
 
 ## START_IO/STOP_IO Integration
 
-`Phase4.c` теперь вызывает реальный BCE transport:
+`Phase4.c` now calls the real BCE transport:
 
 ```c
 NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
     if (Context->SpeakerDeviceId == 0) {
-        return STATUS_NOT_SUPPORTED;  // Блокируется, если device ID не найден
+        return STATUS_NOT_SUPPORTED;  // blocked if the device ID was not found
     }
     
     status = T2AudioBuildIoCommand(0, Context->SpeakerDeviceId,
@@ -167,7 +167,7 @@ NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 }
 ```
 
-`SetState(KSSTATE_RUN)` теперь реально вызывает START_IO; если команда fail, stream не запустится.
+`SetState(KSSTATE_RUN)` now really calls START_IO; if the command fails, the stream does not start.
 
 ---
 
@@ -175,7 +175,7 @@ NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 
 ```
 File:   T2AudioMiniport.sys
-Size:   16896 bytes (было 14848, +2048 bytes от BceTransport.c)
+Size:   16896 bytes (was 14848, +2048 bytes from BceTransport.c)
 Arch:   x64, WDM driver
 Entry:  GsDriverEntry
 Date:   2026-10-05 18:32:48
@@ -208,28 +208,28 @@ Warnings:
 
 ## Installation Guide (DANGER ZONE)
 
-⚠️ **ВНИМАНИЕ:** установка драйвера может вызвать BSOD, audio distortion, или повреждение hardware. Только для опытных разработчиков с kernel debugging.
+⚠️ **WARNING:** installing the driver can cause a BSOD, audio distortion or hardware damage. For experienced developers with kernel debugging only.
 
 ### Prerequisites
 
-1. **Kernel debugger настроен:**
+1. **Kernel debugger set up:**
    ```powershell
    bcdedit.exe /debug on
    bcdedit.exe /dbgsettings serial debugport:1 baudrate:115200
    ```
 
-2. **WinRE recovery USB готов** для rollback.
+2. **WinRE recovery USB ready** for rollback.
 
 3. **Backup AppleAudio.sys:**
    ```powershell
    Copy-Item "C:\Windows\System32\drivers\AppleAudio.sys" "C:\Users\othysa\Desktop\mbp\backup\AppleAudio.sys.bak"
    ```
 
-4. **Test signing включён** (уже активирован).
+4. **Test signing on** (already enabled).
 
 ### Installation Steps
 
-#### Option A: Install via Device Manager (рекомендуется для первого теста)
+#### Option A: Install via Device Manager (recommended for the first test)
 
 1. **Disable AppleAudio service:**
    ```powershell
@@ -243,38 +243,38 @@ Warnings:
    ```
 
 3. **Update device in Device Manager:**
-   - Открыть Device Manager (devmgmt.msc)
-   - Найти "Apple Audio Device" под "Sound, video and game controllers"
-   - Правый клик → Update driver → Browse → Let me pick from a list
-   - Выбрать "Apple T2 Audio Device (6-channel Native Driver)"
+   - Open Device Manager (devmgmt.msc)
+   - Find "Apple Audio Device" under "Sound, video and game controllers"
+   - Right click → Update driver → Browse → Let me pick from a list
+   - Choose "Apple T2 Audio Device (6-channel Native Driver)"
 
 4. **Reboot.**
 
-5. **Monitor kernel debugger output** во время загрузки:
-   - Искать `T2Audio: BCE transport opened`
-   - Искать `T2Audio: found N BCE devices`
-   - Искать `T2Audio: WaveRT subdevice registered`
+5. **Monitor the kernel debugger output** during boot:
+   - Look for `T2Audio: BCE transport opened`
+   - Look for `T2Audio: found N BCE devices`
+   - Look for `T2Audio: WaveRT subdevice registered`
 
 6. **Check Device Manager:**
-   - Device должен показывать "Apple T2 Audio Device (6-channel Native Driver)" без ошибок.
+   - The device must show "Apple T2 Audio Device (6-channel Native Driver)" without errors.
 
 7. **Check Sound settings:**
    ```powershell
    Start-Process mmsys.cpl
    ```
-   - Должен появиться новый endpoint "Speakers (Apple T2 Audio Device)".
-   - Проверить Properties → Advanced → 6 channel, 24 bit, 48000 Hz.
+   - A new endpoint "Speakers (Apple T2 Audio Device)" must appear.
+   - Check Properties → Advanced → 6 channel, 24 bit, 48000 Hz.
 
-8. **Test audio (ОСТОРОЖНО):**
-   - Установить volume на -30 dB.
-   - Воспроизвести 100ms тестовый тон.
-   - **НЕМЕДЛЕННО ОСТАНОВИТЬ** при distortion/clicking/smoke.
+8. **Test audio (CAREFULLY):**
+   - Set the volume to -30 dB.
+   - Play a 100 ms test tone.
+   - **STOP IMMEDIATELY** on distortion/clicking/smoke.
 
-#### Option B: Manual Driver Replacement (опасно, только если Option A fail)
+#### Option B: Manual Driver Replacement (dangerous, only if Option A fails)
 
-1. Reboot в WinRE (Shift+Restart → Troubleshoot → Command Prompt).
+1. Reboot into WinRE (Shift+Restart → Troubleshoot → Command Prompt).
 
-2. Заменить драйвер:
+2. Replace the driver:
    ```cmd
    ren C:\Windows\System32\drivers\AppleAudio.sys AppleAudio.sys.bak
    copy D:\T2AudioPort\Phase2\bin\Debug\T2AudioMiniport.sys C:\Windows\System32\drivers\AppleAudio.sys
@@ -288,7 +288,7 @@ Warnings:
 
 ### KdPrint Messages
 
-При успешном старте ожидаются следующие сообщения:
+On a successful start these messages are expected:
 
 ```
 T2Audio: PortCls DriverEntry success
@@ -305,39 +305,39 @@ T2Audio: START_IO sent to device 0x...
 ### Common Errors
 
 **`BCE transport unavailable: 0xC0000034` (STATUS_OBJECT_NAME_NOT_FOUND):**
-- AppleUSBVHCI.sys не загружен или device name неправильный.
-- Проверить: `Get-Service | Where-Object {$_.Name -like "*Apple*"}`
+- AppleUSBVHCI.sys is not loaded or the device name is wrong.
+- Check: `Get-Service | Where-Object {$_.Name -like "*Apple*"}`
 
 **`Speaker device ID lookup failed: 0xC0000001` (STATUS_UNSUCCESSFUL):**
-- GET_DEVICE_LIST вернул пустой список или некорректный response.
+- GET_DEVICE_LIST returned an empty list or a bad reply.
 - BCE protocol version mismatch.
 
 **`START_IO send failed: 0xC00000BB` (STATUS_NOT_SUPPORTED):**
-- IOCTL 0x222018 отклонён AppleUSBVHCI.
-- Возможно, T2 chip не в audio mode.
+- IOCTL 0x222018 rejected by AppleUSBVHCI.
+- Perhaps the T2 chip is not in audio mode.
 
-**BSOD `DRIVER_IRQL_NOT_LESS_OR_EQUAL` в MmMapIoSpaceEx:**
-- BAR1 physical address некорректный.
-- PFN calculation ошибка в `T2AudioCreateSpeakerMdl`.
+**BSOD `DRIVER_IRQL_NOT_LESS_OR_EQUAL` in MmMapIoSpaceEx:**
+- The BAR1 physical address is wrong.
+- A PFN calculation error in `T2AudioCreateSpeakerMdl`.
 
-**BSOD `MEMORY_MANAGEMENT` при audio playback:**
-- User-mode mapping через `MmMapLockedPagesSpecifyCache` failed.
-- Cache type mismatch (должен быть `MmWriteCombined`).
+**BSOD `MEMORY_MANAGEMENT` during audio playback:**
+- The user-mode mapping through `MmMapLockedPagesSpecifyCache` failed.
+- Cache type mismatch (must be `MmWriteCombined`).
 
 ---
 
 ## Rollback Procedure
 
-Если драйвер вызывает BSOD или audio не работает:
+If the driver causes a BSOD or audio does not work:
 
 ### Method 1: Device Manager
-1. Boot в Safe Mode (F8 при загрузке).
+1. Boot into Safe Mode (F8 at boot).
 2. Device Manager → Apple T2 Audio Device → Update driver → Browse → Let me pick.
-3. Выбрать "Apple Audio Device" (оригинальный AppleAudio.sys).
+3. Choose "Apple Audio Device" (the original AppleAudio.sys).
 4. Reboot.
 
 ### Method 2: WinRE
-1. Boot в WinRE (Shift+Restart).
+1. Boot into WinRE (Shift+Restart).
 2. Troubleshoot → Command Prompt.
 3. Restore backup:
    ```cmd
@@ -346,7 +346,7 @@ T2Audio: START_IO sent to device 0x...
 4. Reboot.
 
 ### Method 3: System Restore
-Если System Protection включён (сейчас отключён):
+If System Protection is on (it is off now):
 ```powershell
 rstrui.exe
 ```
@@ -356,28 +356,28 @@ rstrui.exe
 ## Known Limitations
 
 1. **Device ID detection heuristic:**
-   - Использует первый device из GET_DEVICE_LIST.
-   - TODO: implement proper matching через GET_PROPERTY(UID) и сравнение с BufferStruct->Devices[i].Name.
+   - Uses the first device from GET_DEVICE_LIST.
+   - TODO: implement proper matching through GET_PROPERTY(UID) and comparison with BufferStruct->Devices[i].Name.
 
 2. **No hardware position register:**
-   - Position tracking использует QPC interpolation.
-   - Если T2 chip обновляет hardware write pointer в GPR, можно заменить на direct read.
+   - Position tracking uses QPC interpolation.
+   - If the T2 chip updates a hardware write pointer in the GPR, this can be replaced by a direct read.
 
 3. **Fixed FIFO size:**
    - 512 frames hardcoded.
-   - TODO: query actual FIFO size через GET_PROPERTY(latency) или GPR metadata.
+   - TODO: query the actual FIFO size through GET_PROPERTY(latency) or the GPR metadata.
 
 4. **No jack detection:**
-   - Драйвер всегда сообщает "speakers plugged".
-   - TODO: implement GET_PROPERTY(jack_plugged) polling или property change notification.
+   - The driver always reports "speakers plugged".
+   - TODO: implement GET_PROPERTY(jack_plugged) polling or a property change notification.
 
 5. **No volume control:**
-   - Windows volume control работает только software.
-   - TODO: implement GET_PROPERTY/SET_PROPERTY для hardware volume (selector 'deav').
+   - Windows volume control works in software only.
+   - TODO: implement GET_PROPERTY/SET_PROPERTY for hardware volume (selector 'deav').
 
 6. **ExAllocatePoolWithTag deprecated:**
-   - WDK 28000 рекомендует `ExAllocatePool2`.
-   - Текущий код работает, но генерирует warning C4996.
+   - WDK 28000 recommends `ExAllocatePool2`.
+   - The current code works but produces warning C4996.
 
 ---
 
@@ -399,60 +399,60 @@ rstrui.exe
 
 ### High Priority
 1. **Hardware validation:**
-   - Test MDL mapping на реальном устройстве с kernel debugger.
+   - Test the MDL mapping on the real device with a kernel debugger.
    - Verify START_IO/STOP_IO commands activate T2 audio.
-   - Test audio playback с -30 dB tone.
+   - Test audio playback with a -30 dB tone.
 
 2. **Device ID matching:**
    - Implement GET_PROPERTY(UID) query.
-   - Match BCE device UID с BufferStruct device name.
+   - Match the BCE device UID with the BufferStruct device name.
 
 3. **Error handling:**
-   - Add retry logic для BCE transport errors.
-   - Graceful fallback если AppleUSBVHCI недоступен.
+   - Add retry logic for BCE transport errors.
+   - Graceful fallback if AppleUSBVHCI is unavailable.
 
 ### Medium Priority
 4. **Hardware position register:**
-   - Reverse engineer GPR layout для hardware write pointer.
-   - Replace QPC interpolation с direct MMIO read.
+   - Reverse engineer the GPR layout for a hardware write pointer.
+   - Replace the QPC interpolation with a direct MMIO read.
 
 5. **Jack detection:**
-   - Poll GET_PROPERTY(jack_plugged) каждые 100ms.
-   - Update endpoint state через `PcRegisterSubdevice` property change.
+   - Poll GET_PROPERTY(jack_plugged) every 100 ms.
+   - Update the endpoint state through a `PcRegisterSubdevice` property change.
 
 6. **Volume control:**
    - Implement SET_PROPERTY for hardware volume.
-   - Map Windows volume control к T2 volume property.
+   - Map the Windows volume control to the T2 volume property.
 
 ### Low Priority
 7. **Multi-rate support:**
    - Add 44.1kHz, 96kHz pin descriptors.
-   - Implement sample rate switching через SET_PROPERTY(phys_format).
+   - Implement sample rate switching through SET_PROPERTY(phys_format).
 
 8. **Input streams:**
    - Enumerate microphone devices from BufferStruct.
-   - Create capture pins с IMiniportWaveRTStream.
+   - Create capture pins with IMiniportWaveRTStream.
 
 9. **Power management:**
    - Implement D0/D3 transitions.
-   - Send STOP_IO при suspend, START_IO при resume.
+   - Send STOP_IO on suspend, START_IO on resume.
 
 ---
 
 ## Safety Checklist
 
-Перед установкой на production system:
+Before installing on a production system:
 
-- [ ] Kernel debugger подключён и протестирован
-- [ ] WinRE recovery USB создан и протестирован
-- [ ] AppleAudio.sys backup создан
-- [ ] System не содержит критических данных (test environment)
-- [ ] Volume установлен на -30 dB
-- [ ] Test tone готов (100ms, sine wave, 1kHz)
-- [ ] Понимание rollback procedure
-- [ ] Готовность к BSOD и potential hardware damage
+- [ ] Kernel debugger connected and tested
+- [ ] WinRE recovery USB created and tested
+- [ ] AppleAudio.sys backup created
+- [ ] The system holds no critical data (test environment)
+- [ ] Volume set to -30 dB
+- [ ] Test tone ready (100 ms, sine wave, 1 kHz)
+- [ ] Rollback procedure understood
+- [ ] Ready for a BSOD and potential hardware damage
 
-⚠️ **НЕ УСТАНАВЛИВАТЬ** на production MacBook без полного понимания рисков.
+⚠️ **DO NOT INSTALL** on a production MacBook without fully understanding the risks.
 
 ---
 
@@ -462,18 +462,18 @@ rstrui.exe
 - `Driver/BceTransport.c` (272 lines): Kernel BCE transport wrapper
 
 ### Modified Files
-- `Driver/Driver.c`: Added BCE transport initialization в StartDevice
-- `Driver/Phase4.c`: START_IO/STOP_IO теперь вызывают T2AudioSendBceMessage
-- `Driver/WaveRTStream.c`: AllocateAudioBuffer активирован, GetPosition использует QPC, GetHWLatency настроен
+- `Driver/Driver.c`: added BCE transport initialisation in StartDevice
+- `Driver/Phase4.c`: START_IO/STOP_IO now call T2AudioSendBceMessage
+- `Driver/WaveRTStream.c`: AllocateAudioBuffer activated, GetPosition uses QPC, GetHWLatency set
 - `Driver/T2AudioMiniport.h`: Added BCE transport prototypes
-- `Driver/T2AudioMiniport.inf`: Added Hardware ID и installation sections
+- `Driver/T2AudioMiniport.inf`: added the Hardware ID and install sections
 - `T2AudioMiniport.vcxproj`: Added BceTransport.c compilation
 
 ---
 
 ## Conclusion
 
-Драйвер теперь функционально полон и реализует все критические компоненты:
+The driver is now functionally complete and implements all critical components:
 
 ✅ Pure PortCls adapter architecture  
 ✅ BAR1/BAR2 MMIO mapping  
@@ -484,13 +484,13 @@ rstrui.exe
 ✅ MMIO MDL allocation  
 ✅ QPC position tracking  
 ✅ Hardware latency reporting  
-✅ INF с Hardware ID  
+✅ INF with the Hardware ID  
 
 **Estimated completeness:** 85-90% (core functionality ready, optional enhancements pending).
 
 **Risk level:** HIGH (untested on hardware, potential for BSOD/hardware damage).
 
-**Recommended next action:** Test installation на MacBook Pro 16,1 с kernel debugger и WinRE recovery standby.
+**Recommended next action:** test the installation on a MacBook Pro 16,1 with a kernel debugger and WinRE recovery on standby.
 
 ---
 

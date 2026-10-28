@@ -8,20 +8,20 @@
 
 ## Executive Summary
 
-**Task**: Установить точную причину отказа T2AudioMapResources с кодом `STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)`.
+**Task**: Find the exact cause of the T2AudioMapResources failure with `STATUS_DEVICE_CONFIGURATION_ERROR (0xC0000182)`.
 
 **Result**: ✅ **COMPLETED**
 
 ### Root Cause
-GPR registers at offset 0xC000 в BAR2 возвращают `0xFFFFFFFF` (все биты установлены), что указывает на:
-- Неправильный offset регистров GPR, или
-- T2 chip требует инициализации перед доступом к регистрам
+GPR registers at offset 0xC000 in BAR2 return `0xFFFFFFFF` (all bits set), which points to:
+- A wrong GPR register offset, or
+- The T2 chip needing initialisation before its registers can be accessed
 
 ### Key Findings
 
 | Aspect | Status | Detail |
 |--------|--------|--------|
-| Memory resources | ✅ Allocated | 3 дескриптора выделены Windows |
+| Memory resources | ✅ Allocated | 3 descriptors assigned by Windows |
 | BAR1 mapping | ✅ Success | Physical 0xC1000000, Length 0x400000 (4 MB) |
 | BAR2 mapping | ✅ Success | Physical 0xC1680000, Length 0x80000 (512 KB) |
 | GPR read | ❌ Failed | version=0xFFFFFFFF, signature=0xFFFFFFFF, bufferOffset=0xFFFFFFFF |
@@ -206,7 +206,7 @@ Test alternatives:
 
 ## Success Criteria: MET
 
-✅ **Task**: Установить точную причину отказа T2AudioMapResources  
+✅ **Task**: Find the exact cause of the T2AudioMapResources failure  
 ✅ **Delivered**: Failure point FAIL_K identified with evidence  
 ✅ **Resource state**: 3 memory resources confirmed, both BARs mapped  
 ✅ **Hardware addresses**: BAR1 and BAR2 physical addresses known  

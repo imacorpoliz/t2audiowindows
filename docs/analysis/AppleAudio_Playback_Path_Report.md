@@ -1,106 +1,108 @@
 # AppleAudio.sys Playback PCM Path Analysis
 
-## Исправленные ошибки предыдущих отчётов
+> **Status note (2026-10-28):** an early report. Its conclusion that AppleAudio is zero-copy is contradicted by the later analysis (`RE_appleaudio_protocol.md` §3: AppleAudio copies and processes the samples on the CPU before writing them into the ring). The open questions at the end are answered: one interleaved 6-channel output stream, S24_LE in a 32-bit container, 48 kHz (`DRIVER_GUIDE.md` §2.4).
 
-1. **BufferStruct.devices начинается с +0x10**
-   - Функция 0x46F8: `base = bs_base + index*0xBDEC` указывает на 16 байт раньше device
-   - Правильные смещения относительно этой базы:
-     - `+0x90` = `device.num_input_streams` (НЕ active_flag)
+## Errors in earlier reports, corrected
+
+1. **BufferStruct.devices starts at +0x10**
+   - Function 0x46F8: `base = bs_base + index*0xBDEC` points 16 bytes before the device
+   - Correct offsets relative to that base:
+     - `+0x90` = `device.num_input_streams` (NOT active_flag)
      - `+0x94` = `input_streams[0].num_buffers`
      - `+0x98` = `input_streams[0].buffers[0].address`
      - `+0xA0` = `input_streams[0].buffers[0].size`
 
-2. **Ветка 0x4838–0x4875 добавляет новое устройство**
-   - НЕ output branch, как ошибочно утверждалось
+2. **The branch 0x4838–0x4875 adds a new device**
+   - It is NOT the output branch, as was wrongly claimed
 
-3. **Функция 0x9D74 читает output буферы из BufferStruct**
-   - `0x5F0C = 0x10 + 0x5EF8 + 0x04`: заголовок BS + output_streams + buffers[0].address
-   - `0x5F14`: соответствующий buffers[0].size
-   - Совпадает с Linux `offsetof(device, output_streams) = 0x5EF8`
+3. **Function 0x9D74 reads the output buffers from BufferStruct**
+   - `0x5F0C = 0x10 + 0x5EF8 + 0x04`: BS header + output_streams + buffers[0].address
+   - `0x5F14`: the matching buffers[0].size
+   - Matches Linux `offsetof(device, output_streams) = 0x5EF8`
 
-## Подтверждённая цепочка вызовов для playback
+## Confirmed call chain for playback
 
-### 1. Функция 0x1C240 — AllocateOutputBuffer (vtable slot +0xB8)
+### 1. Function 0x1C240: AllocateOutputBuffer (vtable slot +0xB8)
 
-**Границы:** 0x1C240–0x1C4BA (из .pdata)
+**Bounds:** 0x1C240–0x1C4BA (from .pdata)
 
-**Параметры:**
+**Parameters:**
 - RCX (RSI) = stream object
 - RDX (EBX) = frame alignment/channels
 - R8D (EBP) = buffer size in bytes
-- R9 (R13) = output pointer для buffer handle
+- R9 (R13) = output pointer for the buffer handle
 
-**Ключевые инструкции:**
+**Key instructions:**
 
 ```
-0x1C414: call 0x9D74              ; Получить output buffer из BufferStruct
-         ; Параметры:
+0x1C414: call 0x9D74              ; get the output buffer from BufferStruct
+         ; Parameters:
          ; RCX = R15 (stream-8)
          ; RDX = [stream->a28]+0x21 (device name)
          ; R8  = GPR base + 0xC000
          ; [RSP+0x20] = &output_offset
          ; [RSP+0x28] = &output_size
 
-0x1C422: mov RBX, [RSP+0x38]      ; RBX = size из BufferStruct
+0x1C422: mov RBX, [RSP+0x38]      ; RBX = size from BufferStruct
 0x1C42C: mov [RSI+0x98], EBX      ; stream->buffer_size = size
 0x1C459: add RAX, [RSP+0x40]      ; RAX = GPR_base + offset
-0x1C45E: mov [RSI+0xA0], RAX      ; stream->buffer_ptr = виртуальный адрес
+0x1C45E: mov [RSI+0xA0], RAX      ; stream->buffer_ptr = virtual address
 ```
 
-**Подтверждение:** инструкции точно совпадают с указанными в задании.
+**Confirmation:** the instructions match the ones given in the task exactly.
 
-### 2. Функция 0x9D74 — GetOutputBufferFromBS
+### 2. Function 0x9D74: GetOutputBufferFromBS
 
-**Назначение:** извлечь физический offset и size из BufferStruct для output stream device.
+**Purpose:** extract the physical offset and size from BufferStruct for the output stream of a device.
 
-**Код:**
+**Code:**
 ```
-0x9D74:  поиск устройства по имени в BufferStruct.devices[]
-0x9DC8:  чтение [device_base + 0x5F0C] → output_streams[0].buffers[0].address
-0x9DD0:  чтение [device_base + 0x5F14] → output_streams[0].buffers[0].size
+0x9D74:  looks the device up by name in BufferStruct.devices[]
+0x9DC8:  reads [device_base + 0x5F0C] → output_streams[0].buffers[0].address
+0x9DD0:  reads [device_base + 0x5F14] → output_streams[0].buffers[0].size
 ```
 
-**Смещение 0x5F0C:** `0x10 (BS header) + 0x5EF8 (offsetof output_streams) + 0x04 (stream.buffers[0])`
+**Offset 0x5F0C:** `0x10 (BS header) + 0x5EF8 (offsetof output_streams) + 0x04 (stream.buffers[0])`
 
-**Подтверждение Linux:** `audio.h:42` определяет `output_streams` с тем же layout.
+**Linux confirmation:** `audio.h:42` defines `output_streams` with the same layout.
 
-### 3. Функция 0xB470 — Start/Stop stream handler (vtable slot +0x80)
+### 3. Function 0xB470: start/stop stream handler (vtable slot +0x80)
 
-**Границы:** 0xB470–0xB721
+**Bounds:** 0xB470–0xB721
 
-**Параметры:**
+**Parameters:**
 - RCX (RDI) = stream object
 - RDX (RBP) = command: 1=start, 2=pause, 3=stop
 
-**Критический участок при остановке (0xB5EC–0xB5FC):**
+**Critical part on stop (0xB5EC–0xB5FC):**
 ```
 0xB5EC: mov R8D, [RDI+0x98]       ; buffer_size
 0xB5F5: mov RCX, [RDI+0xA0]       ; buffer_ptr
 0xB5FC: call 0xCD80               ; memset(buffer, 0, size)
 ```
 
-**Вывод:** функция ОЧИЩАЕТ playback буфер при остановке. Подтверждает, что `[RSI+0xA0]` — реальный PCM buffer pointer.
+**Conclusion:** the function CLEARS the playback buffer on stop. This confirms that `[RSI+0xA0]` is the real PCM buffer pointer.
 
-### 4. Vtable структура stream object
+### 4. Vtable layout of the stream object
 
-**Базовый адрес vtable:** ~0xF048
+**Vtable base address:** ~0xF048
 
-**Ключевые слоты:**
+**Key slots:**
 - `+0x00` (slot 0): 0x068C0 — QueryInterface/AddRef
-- `+0x80` (slot 16): 0x0B470 — Start/Stop handler
+- `+0x80` (slot 16): 0x0B470 — start/stop handler
 - `+0xB8` (slot 23): 0x1C240 — AllocateOutputBuffer
 
-**Расположение указателя vtable:** `[stream+0x00]`
+**Location of the vtable pointer:** `[stream+0x00]`
 
-### 5. Функция 0x184B8 — Volume/Control handler
+### 5. Function 0x184B8: volume/control handler
 
-**НЕ ОТНОСИТСЯ к PCM playback data path.**
+**NOT PART of the PCM playback data path.**
 
-Эта функция вызывает vtable slot +0xA0 объекта **другого типа** (не stream), передавая параметры громкости (R9) через CFG dispatch. Это управление T2, а не запись PCM.
+This function calls vtable slot +0xA0 of an object of **another type** (not a stream), passing volume parameters (R9) through CFG dispatch. It is T2 control, not PCM writing.
 
-## Реальный playback PCM path
+## The actual playback PCM path
 
-### Откуда берётся PCM для playback?
+### Where does the playback PCM come from?
 
 **Linux driver (kait2en/modules/t2bce_audio/pcm.c):**
 
@@ -110,87 +112,87 @@
 wmb();
 ```
 
-Memory barrier **перед** вызовом `t2audio_cmd_start_io()`.
+A memory barrier **before** calling `t2audio_cmd_start_io()`.
 
-**Вывод:**
-1. **Userspace** (ALSA application) заполняет буфер через `mmap()` на shared memory
-2. Linux driver отправляет команду START_IO через BCE transport
-3. **T2 chip читает PCM напрямую** из shared memory через DMA
-4. BufferStruct содержит физические адреса этих буферов
-5. Windows AppleAudio получает эти адреса из BufferStruct и отображает их в user mode
+**Conclusion (Linux):**
+1. **Userspace** (the ALSA application) fills the buffer through `mmap()` of shared memory
+2. The Linux driver sends START_IO through the BCE transport
+3. **The T2 chip reads the PCM directly** from shared memory by DMA
+4. BufferStruct holds the physical addresses of these buffers
+5. The early hypothesis was that Windows AppleAudio gets these addresses from BufferStruct and maps them into user mode
 
-### Windows playback path
+### Windows playback path (early hypothesis, superseded)
 
-1. Windows WaveRT application записывает PCM в cyclic buffer через `mmap()`
-2. AppleAudio предоставляет буфер из `[stream+0xA0]`, полученный от T2
-3. T2 читает данные напрямую через DMA (аналогично Linux)
-4. AppleAudio управляет только жизненным циклом (START/STOP)
+1. The Windows WaveRT application writes PCM into the cyclic buffer through `mmap()`
+2. AppleAudio provides the buffer from `[stream+0xA0]`, obtained from the T2
+3. The T2 reads the data directly by DMA (as on Linux)
+4. AppleAudio only manages the life cycle (START/STOP)
 
-**Ключевой момент:** драйвер НЕ копирует PCM. Это zero-copy архитектура через shared memory.
+**Claimed key point:** the driver does NOT copy PCM, zero-copy through shared memory. **Superseded:** AppleAudio's copy loop (`0x14000A715`–`0x14000B2C0`) converts and filters the samples before writing them into the ring, and a BAR cannot be mapped into user mode by PortCls anyway (`DRIVER_GUIDE.md` §6.1).
 
-## Сопоставление с Linux структурами
+## Mapping to the Linux structures
 
-### Точные совпадения
+### Exact matches
 
-| Windows offset | Linux offsetof | Поле | Подтверждение |
+| Windows offset | Linux offsetof | Field | Confirmation |
 |---|---|---|---|
-| device+0x84 | 0x84 | input_streams | Функция 0x46F8 |
-| device+0x5EF8 | 0x5EF8 | output_streams | Функция 0x9D74 |
-| sizeof(device) | 0xBDEC | | Stride в 0x46F8 |
-| sizeof(buffer) | 0x30 | | Индекс *8 в 0x480A |
+| device+0x84 | 0x84 | input_streams | Function 0x46F8 |
+| device+0x5EF8 | 0x5EF8 | output_streams | Function 0x9D74 |
+| sizeof(device) | 0xBDEC | | Stride in 0x46F8 |
+| sizeof(buffer) | 0x30 | | Index *8 in 0x480A |
 
-### Несоответствие
+### Mismatch
 
 **stream.buffers offset:**
-- Linux: `+0x04` (после `u8 num_buffers` + padding)
-- Windows читает по `+0x98` внутри stream
+- Linux: `+0x04` (after `u8 num_buffers` + padding)
+- Windows reads at `+0x98` inside the stream
 
-**Объяснение:** Windows использует **stream-relative offset внутри device**, а не структуру `t2audio_buffer_struct_stream` напрямую. Смещение 0x98 = 0x84 (input_streams base) + 0x04 (buffers offset) + выравнивание + индексация.
+**Explanation:** Windows uses a **stream-relative offset inside the device**, not the `t2audio_buffer_struct_stream` structure directly. The offset 0x98 = 0x84 (input_streams base) + 0x04 (buffers offset) + alignment + indexing.
 
-## Формат, каналы, Speaker
+## Format, channels, Speaker
 
-**Код выделения буфера (0x1C240):**
-- Параметр R8D (EBP) — размер буфера в байтах
-- Параметр RDX (EBX) — frame alignment (вероятно channels * bytes_per_sample)
+**Buffer allocation code (0x1C240):**
+- Parameter R8D (EBP): buffer size in bytes
+- Parameter RDX (EBX): frame alignment (probably channels * bytes_per_sample)
 
-**Разделение каналов не обнаружено в коде драйвера.**
+**No channel splitting was found in the driver code.**
 
-Если T2 предоставляет один буфер для устройства Speaker, то все 6 каналов передаются **interleaved** в одном буфере. Разделение на независимые потоки потребовало бы:
-- Несколько output_streams[] для одного device
-- Или несколько devices с одинаковым именем
+If the T2 provides one buffer for the Speaker device, all 6 channels are passed **interleaved** in one buffer. Separate streams would require:
+- Several output_streams[] for one device
+- Or several devices with the same name
 
-**Проверка BufferStruct:**
+**BufferStruct check:**
 ```c
 // audio.h:41-42
 struct t2audio_buffer_struct_stream output_streams[5];
 ```
 
-T2 поддерживает до 5 output streams на device. Если Speaker использует один stream, каналы interleaved. Если несколько — возможно разделение.
+The T2 supports up to 5 output streams per device. If Speaker uses one stream, the channels are interleaved. If several, a split is possible.
 
-**Следующий конкретный пробел:** определить, сколько output_streams регистрирует T2 для device "Speaker", и формат PCM (16-bit/24-bit, 44.1/48kHz, interleaved/planar).
+**The next concrete gap (since closed):** how many output_streams the T2 registers for the "Speaker" device, and the PCM format (16-bit/24-bit, 44.1/48 kHz, interleaved/planar).
 
-## Команды для проверки (Linux)
+## Commands for checking (Linux)
 
 ```bash
-# Подключить MacBook и загрузить kait2en
+# Attach the MacBook and load kait2en
 modprobe t2bce_audio
 
-# Проверить BufferStruct
+# Check BufferStruct
 cat /sys/kernel/debug/t2audio/buffer_struct | hexdump -C
 
-# Найти "Speaker" device и посмотреть num_output_streams
-# offset +0x81 относительно начала device
+# Find the "Speaker" device and look at num_output_streams
+# offset +0x81 from the start of the device
 
-# Запустить playback
+# Start playback
 aplay -D hw:CARD=AppleT2,DEV=0 test.wav
 
-# Проверить реальные адреса буферов в dmesg
+# Check the real buffer addresses in dmesg
 dmesg | grep t2audio
 ```
 
-## Оставшиеся вопросы
+## Remaining questions (answered since)
 
-1. Сколько output_streams для "Speaker"? (1 interleaved или 6 раздельных?)
-2. Формат PCM: S16_LE, S24_3LE, S32_LE?
-3. Sample rate: 44100, 48000, 96000?
-4. Как Windows узнаёт формат? (запрос к T2 или hardcoded в драйвере?)
+1. How many output_streams for "Speaker"? (1 interleaved or 6 separate?) → **one stream `0x3A`, 6 interleaved channels.**
+2. PCM format: S16_LE, S24_3LE, S32_LE? → **S24_LE in a 4-byte container (`'pft '`: 24 bits, 24 bytes per frame).**
+3. Sample rate: 44100, 48000, 96000? → **48000.**
+4. How does Windows learn the format? (a query to the T2 or hard-coded in the driver?) → **a `GET_PROPERTY` query (`'pft '`; AppleAudio reads `'pfta'`).**

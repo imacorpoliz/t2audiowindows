@@ -1,61 +1,63 @@
-# КРИТИЧЕСКИЕ ОШИБКИ В ПРЕДЫДУЩЕМ АНАЛИЗЕ - ИСПРАВЛЕНИЯ
+# CRITICAL ERRORS IN THE PREVIOUS ANALYSIS: CORRECTIONS
 
-**Бинарник**: AppleAudio.sys 6.1.8100.4  
+> **Status note (2026-10-28):** historical. The open questions below were answered later: function `0x1FA0` (`FUN_140001fa4`) allocates the **input** (microphone) buffers and registers them in BufferStruct (`AppleAudio_Reverse_Engineering_Report.md` §5, `RE_appleaudio_protocol.md` §7); the speaker output uses the ring provided by the T2 in BAR0, mapped by `MmMapIoSpaceEx` elsewhere (`BUFFER_PATH_ANALYSIS.md`), and PCM is written by the copy loop `0x14000A715`–`0x14000B2C0`.
+
+**Binary**: AppleAudio.sys 6.1.8100.4  
 **SHA256**: cd8b81fabc9be6127a082da22c4cc046a4d46e0225eb6baf6d27e0dc9862a150 ✓ VERIFIED  
-**Размер**: 122752 bytes  
+**Size**: 122752 bytes  
 **PE Timestamp**: 0x5F73BACC
 
 ---
 
-## ПРОВЕРКА ОРИЕНТИРОВ ИЗ ЗАДАЧИ
+## CHECKING THE LANDMARKS GIVEN IN THE TASK
 
-### 1. MmMapIoSpaceEx IAT RVA = 0xE058 ✗ НЕВЕРНО
+### 1. MmMapIoSpaceEx IAT RVA = 0xE058 ✗ WRONG
 
-**Проверка**:
-- IAT слот 0xE058 указывает на RVA 0x1E860 (строка импорта в .rdata)
-- Поиск всех `call [rip+offset]` с целью 0xE058: **0 вхождений**
-- Строка "MmMapIoSpaceEx" найдена на RVA 0x1E862
+**Check**:
+- IAT slot 0xE058 points to RVA 0x1E860 (an import string in .rdata)
+- Search for every `call [rip+offset]` targeting 0xE058: **0 hits**
+- The string "MmMapIoSpaceEx" is at RVA 0x1E862
 
-**Вывод**: IAT@0xE058 НЕ используется для вызовов MmMapIoSpaceEx в этом бинарнике.
+**Conclusion**: IAT@0xE058 is NOT used for MmMapIoSpaceEx calls in this binary.
 
-### 2. Прямые вызовы на RVA 0x17204 и 0x1721C ✗ НЕВЕРНО
+### 2. Direct calls at RVA 0x17204 and 0x1721C ✗ WRONG
 
-**Проверка RVA 0x17204**:
+**Check of RVA 0x17204**:
 ```
 0x171F4: 00 C0 48 8B 5C 24 30 8B C6 48 8B 74 24 40 48 8B
-0x17204: 6C 24 38 48 83 C4 20 5F C3  ← функция epilogue (ret)
+0x17204: 6C 24 38 48 83 C4 20 5F C3  ← function epilogue (ret)
          mov rbp, [rsp+0x38]
          add rsp, 0x20
          pop rdi
          ret
 ```
 
-**Проверка RVA 0x1721C**:
+**Check of RVA 0x1721C**:
 ```
 0x1720C: C3 CC CC CC 48 89 0D 89 B6 FF FF 33 C0 C3 CC CC
-0x1721C: 48 89 5C 24 08  ← новая функция (prologue)
+0x1721C: 48 89 5C 24 08  ← a new function (prologue)
          mov [rsp+8], rbx
 ```
 
-**Вывод**: По указанным RVA находится код возврата/начала функции, **НЕ вызовы MmMapIoSpaceEx**.
+**Conclusion**: these RVAs hold a function return / function start, **NOT MmMapIoSpaceEx calls**.
 
-### 3. Паттерн "mov edx, [rdi+8]; mov r8d, 0x204" ✗ НЕ НАЙДЕН
+### 3. The pattern "mov edx, [rdi+8]; mov r8d, 0x204" ✗ NOT FOUND
 
-Поиск байтов `8B 57 08` (mov edx, [rdi+8]) + `41 B8 04 02 00 00` (mov r8d, 0x204): **0 вхождений**.
+Searching for the bytes `8B 57 08` (mov edx, [rdi+8]) + `41 B8 04 02 00 00` (mov r8d, 0x204): **0 hits**.
 
-### 4. Паттерн "mov r8d, 0x404" ✗ НЕ НАЙДЕН
+### 4. The pattern "mov r8d, 0x404" ✗ NOT FOUND
 
-Поиск байтов `41 B8 04 04 00 00`: **0 вхождений**.
+Searching for the bytes `41 B8 04 04 00 00`: **0 hits**.
 
-### 5. Паттерн "mov [rbx+0x68], rax" и "mov [rbx+0x70], rax" ✗ НЕ НАЙДЕНЫ
+### 5. The patterns "mov [rbx+0x68], rax" and "mov [rbx+0x70], rax" ✗ NOT FOUND
 
-Поиск байтов `48 89 43 68` и `48 89 43 70`: **0 вхождений**.
+Searching for the bytes `48 89 43 68` and `48 89 43 70`: **0 hits**.
 
 ---
 
-## ФАКТИЧЕСКИЕ РЕЗУЛЬТАТЫ АНАЛИЗА
+## ACTUAL RESULTS OF THE ANALYSIS
 
-### Единственный найденный вызов отображения памяти
+### The only memory-mapping call found
 
 **RVA 0x2051**: MmMapLockedPagesSpecifyCache
 ```
@@ -70,20 +72,20 @@
 0x2062: 0F 84 89 01 00 00       ← je error_handler
 ```
 
-**Параметры функции** (соглашение x64 fastcall):
-- rcx: MDL pointer (откуда берётся - требуется обратная трассировка)
-- rdx: 0 (xor edx, edx перед вызовом)
-- r8d: 0 (45 33 C0 = xor r8d, r8d на 0x2045)
-- r9d: 0 (45 33 C9 = xor r9d, r9d на 0x2043)
-- [rsp+0x20]: 0 (83 64 24 20 00 на 0x2047)
+**Function parameters** (x64 fastcall convention):
+- rcx: MDL pointer (its origin needs back-tracing)
+- rdx: 0 (xor edx, edx before the call)
+- r8d: 0 (45 33 C0 = xor r8d, r8d at 0x2045)
+- r9d: 0 (45 33 C9 = xor r9d, r9d at 0x2043)
+- [rsp+0x20]: 0 (83 64 24 20 00 at 0x2047)
 
-**Результат**:
-- rax = виртуальный адрес отображённых страниц
-- Сохраняется в [rsp+0x30]
+**Result**:
+- rax = virtual address of the mapped pages
+- Stored in [rsp+0x30]
 
-### Функция, содержащая вызов
+### The function containing the call
 
-**Начало**: RVA 0x1FA0 (по паттерну prologue)
+**Start**: RVA 0x1FA0 (by the prologue pattern)
 ```
 0x1FA0: 44 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 40
         mov [rsp+0x18], r8d
@@ -93,40 +95,40 @@
         sub rsp, 0x40
 ```
 
-**Контекст** (код до вызова MmMapLockedPagesSpecifyCache):
+**Context** (code before the MmMapLockedPagesSpecifyCache call):
 ```
 0x1FF0: 00 0F 86 13 02 00 00 48 8B 7C 24 30 4C 8D BA C8
 0x2000: 0C 00 00 49 83 3F 00 0F 85 AB 01 00 00 44 8B CD
-        mov rdi, [rsp+0x30]         ; rdi = параметр функции (1-й?)
-        lea r15, [r10+0xCC8]        ; r15 = указатель + 0xCC8
-        cmp qword [r15], 0          ; проверка [r15]
-        jne label                   ; если не ноль - уже инициализировано
+        mov rdi, [rsp+0x30]         ; rdi = a function parameter (the 1st?)
+        lea r15, [r10+0xCC8]        ; r15 = pointer + 0xCC8
+        cmp qword [r15], 0          ; check [r15]
+        jne label                   ; if not zero - already initialised
         
 0x2010: 45 33 C0 48 8B D7 B9 00 20 00 00 FF 15 EF C0 00
         xor r8d, r8d
-        mov rdx, rdi                ; rdx = первый параметр
+        mov rdx, rdi                ; rdx = the first parameter
         mov ecx, 0x2000             ; ecx = 0x2000 (8192 bytes)
-        call [rip+0xC0EF]           ; какой-то вызов (allocation?)
+        call [rip+0xC0EF]           ; some call (allocation?)
         
 0x2020: 00 48 8B F0 48 85 C0 0F 84 D8 01 00 00 39 68 28
-        mov rsi, rax                ; rsi = результат
+        mov rsi, rax                ; rsi = the result
         test rax, rax
         je error
-        cmp [rax+0x28], ebp         ; проверка поля +0x28
+        cmp [rax+0x28], ebp         ; check field +0x28
         
 0x2030: 48 8B C8 0F AE E8 0F 82 B8 01 00 00 C7 44 24 28
-        mov rcx, rax                ; rcx = MDL для MmMapLockedPages
+        mov rcx, rax                ; rcx = the MDL for MmMapLockedPages
         lfence
         jb error
-        mov dword [rsp+0x28], 0x40000020  ; флаг кэша
+        mov dword [rsp+0x28], 0x40000020  ; cache flag
         
 0x2040: 20 00 00 40 45 33 C9 83 64 24 20 00 45 33 C0 33
-0x2050: D2 FF 15 A9 C0 00 00        ; вызов MmMapLockedPagesSpecifyCache
+0x2050: D2 FF 15 A9 C0 00 00        ; MmMapLockedPagesSpecifyCache call
 ```
 
-**Контекст после вызова**:
+**Context after the call**:
 ```
-0x2057: 48 89 44 24 30              ; сохранить rax в [rsp+0x30]
+0x2057: 48 89 44 24 30              ; store rax in [rsp+0x30]
 0x205C: 0F AE E8                    ; lfence
 0x205F: 48 85 C0                    ; test rax, rax
 0x2062: 0F 84 89 01 00 00           ; je error_handler
@@ -145,142 +147,144 @@
 
 ---
 
-## АНАЛИЗ НАЗНАЧЕНИЯ
+## PURPOSE ANALYSIS
 
-### Что отображается?
+### What is mapped?
 
-Функция:
-1. Выделяет **8192 bytes** (0x2000) на RVA 0x2010
-2. Проверяет поле +0x28 полученного объекта
-3. Отображает страницы через **MmMapLockedPagesSpecifyCache** с MDL из первого выделения
-4. Сохраняет виртуальный адрес в [rsp+0x30]
-5. Выделяет дополнительный буфер размером `(ebp >> 0xC + 1) * 24 bytes`
+The function:
+1. Allocates **8192 bytes** (0x2000) at RVA 0x2010
+2. Checks field +0x28 of the object obtained
+3. Maps the pages with **MmMapLockedPagesSpecifyCache** using the MDL from the first allocation
+4. Stores the virtual address in [rsp+0x30]
+5. Allocates an extra buffer of `(ebp >> 0xC + 1) * 24 bytes`
 
-**ebp** = параметр функции (вероятно, размер в байтах или страницах).
+**ebp** = a function parameter (probably a size in bytes or pages).
 
-### Связь с аудиобуферами?
+### Link to audio buffers?
 
-**НЕ ОПРЕДЕЛЕНА** из текущего участка кода.
+**NOT DETERMINED** from this piece of code.
 
-**Требуется**:
-1. Трассировка вызовов этой функции (кто вызывает RVA 0x1FA0?)
-2. Анализ параметра ebp (откуда берётся значение?)
-3. Поиск использования [rsp+0x30] после возврата
-4. Связь с полями +0xCC8 объекта (инициализация буфера?)
-
----
-
-## КРИТИЧЕСКИЕ ВЫВОДЫ
-
-### 1. Все ориентиры из задачи НЕВЕРНЫ для данного бинарника
-
-- IAT@0xE058 не вызывается
-- RVA 0x17204/0x1721C не содержат MmMapIoSpaceEx
-- Паттерны +0x68/+0x70 отсутствуют
-- Константы 0x204/0x404 отсутствуют
-
-**Гипотезы**:
-- Данные взяты из другой версии драйвера
-- RVA перепутаны с file offset
-- Ошибка в дизассемблере/инструменте анализа
-- Информация получена из другого модуля (не AppleAudio.sys)
-
-### 2. MmMapIoSpaceEx НЕ НАЙДЕН в коде
-
-Поиск через:
-- IAT слоты 0xE000-0xF000: 152 вызова найдено, **ни один не ведёт к 0xE058**
-- Паттерн "FF 15" (call [rip+offset]): нет вызовов к MmMapIoSpaceEx
-- Косвенные вызовы (call rax/rcx/rdx): всего 2 в .text
-
-**Возможность 1**: MmMapIoSpaceEx вызывается из другого модуля (AppleUSBVHCI.sys)  
-**Возможность 2**: Этот драйвер использует только MmMapLockedPages (не IoSpace)  
-**Возможность 3**: Отображение выполняется framework-ом (WDF/PortCls), не явно
-
-### 3. Единственный вызов MmMapLockedPagesSpecifyCache
-
-**RVA 0x2051** в функции 0x1FA0.
-
-**Что известно**:
-- Отображает MDL размером 8192 bytes
-- Использует кэш-флаг 0x40000020
-- Результат сохраняется в локальной переменной
-- Выполняется условно (проверка [r15+0xCC8])
-
-**Что НЕ известно**:
-- Откуда вызывается функция 0x1FA0
-- Какие данные содержит MDL (PCM? control structures?)
-- Куда записывается результат отображения после выхода из функции
-- Связь с WaveSpeaker/audio rendering pipeline
+**Needed**:
+1. Trace the callers of this function (who calls RVA 0x1FA0?)
+2. Analyse the ebp parameter (where does its value come from?)
+3. Find the uses of [rsp+0x30] after return
+4. The link to field +0xCC8 of the object (buffer initialisation?)
 
 ---
 
-## РЕКОМЕНДАЦИИ
+## CRITICAL CONCLUSIONS
 
-### Продолжение статического анализа
+### 1. All landmarks from the task are WRONG for this binary
 
-**Шаг 1**: Найти вызовы функции 0x1FA0
+- IAT@0xE058 is never called
+- RVA 0x17204/0x1721C contain no MmMapIoSpaceEx
+- The +0x68/+0x70 patterns are absent
+- The constants 0x204/0x404 are absent
+
+**Hypotheses**:
+- The data was taken from another driver version
+- RVAs were confused with file offsets
+- A bug in the disassembler/analysis tool
+- The information came from another module (not AppleAudio.sys)
+
+### 2. MmMapIoSpaceEx NOT FOUND in the code
+
+Searched through:
+- IAT slots 0xE000-0xF000: 152 calls found, **none leads to 0xE058**
+- The pattern "FF 15" (call [rip+offset]): no calls to MmMapIoSpaceEx
+- Indirect calls (call rax/rcx/rdx): only 2 in .text
+
+**Possibility 1**: MmMapIoSpaceEx is called from another module (AppleUSBVHCI.sys)  
+**Possibility 2**: this driver uses only MmMapLockedPages (not IoSpace)  
+**Possibility 3**: the mapping is done by a framework (WDF/PortCls), not explicitly
+
+(Later finding: `MmMapIoSpaceEx` is called in function 0x16FF0, see `BUFFER_PATH_ANALYSIS.md`.)
+
+### 3. The only MmMapLockedPagesSpecifyCache call
+
+**RVA 0x2051** in function 0x1FA0.
+
+**Known**:
+- Maps an MDL of 8192 bytes
+- Uses the cache flag 0x40000020
+- The result is stored in a local variable
+- Runs conditionally (check of [r15+0xCC8])
+
+**NOT known**:
+- Where function 0x1FA0 is called from
+- What data the MDL holds (PCM? control structures?)
+- Where the mapping result is written after the function returns
+- The link to the WaveSpeaker/audio rendering pipeline
+
+---
+
+## RECOMMENDATIONS
+
+### Continue the static analysis
+
+**Step 1**: find the calls of function 0x1FA0
 ```powershell
-# Искать call [rip+offset] -> 0x1FA0
-# Искать call rva_absolute (E8 xx xx xx xx)
+# Look for call [rip+offset] -> 0x1FA0
+# Look for call rva_absolute (E8 xx xx xx xx)
 ```
 
-**Шаг 2**: Трассировать параметр ebp назад к источнику
+**Step 2**: trace the ebp parameter back to its source
 
-**Шаг 3**: Найти использование [rsp+0x30] после возврата из MmMapLockedPages
+**Step 3**: find the uses of [rsp+0x30] after the return from MmMapLockedPages
 
-**Шаг 4**: Проверить offset +0xCC8 в структурах объектов
+**Step 4**: check offset +0xCC8 in the object structures
 
-**Шаг 5**: Связать с известными символами WaveSpeaker/Speaker/Audio
+**Step 5**: link to the known WaveSpeaker/Speaker/Audio symbols
 
-### Возможность runtime debugging
+### Runtime debugging option
 
-**Если** статический анализ не даёт результата:
+**If** the static analysis gives nothing:
 1. WinDbg kernel debugging
-2. Breakpoint на MmMapLockedPagesSpecifyCache
-3. Захват стека вызовов, параметров, возврата
-4. Проверка, вызывается ли во время воспроизведения аудио
+2. A breakpoint on MmMapLockedPagesSpecifyCache
+3. Capture the call stack, parameters, return value
+4. Check whether it is called during audio playback
 
-### Проверка AppleUSBVHCI.sys
+### Checking AppleUSBVHCI.sys
 
-**Если** AppleAudio.sys НЕ выполняет отображение сам:
-- Проверить экспорты AppleUSBVHCI.sys (может предоставлять функции)
-- Проверить вызовы DeviceIoControl с неизвестными IOCTL
-- Возможно, буферы отображаются в AppleUSBVHCI, адрес возвращается через IOCTL
-
----
-
-## ОТВЕТЫ НА ВОПРОСЫ ЗАДАЧИ
-
-### Что именно отображается?
-
-**НЕИЗВЕСТНО**.
-
-Единственное найденное отображение (RVA 0x2051):
-- Размер: 8192 bytes (0x2000)
-- Тип: MmMapLockedPagesSpecifyCache (user-mode MDL mapping)
-- Назначение: требуется дальнейшая трассировка
-
-### Найден ли PCM-буфер?
-
-**НЕТ**.
-
-Связь найденного отображения с PCM-буферами не установлена.
-
-### Какой конкретный вызов/поле остаётся неразрешённым?
-
-**Неразрешённое**:
-1. Кто вызывает функцию 0x1FA0 (откуда приходит управление)?
-2. Что содержит MDL на 8192 bytes (аудио? дескрипторы?)?
-3. Куда записывается виртуальный адрес [rsp+0x30] после выхода?
-4. Где находится вызов MmMapIoSpaceEx (если он есть)?
-5. Как физические буферы T2 (PCI BAR0) связаны с этим кодом?
+**If** AppleAudio.sys does NOT do the mapping itself:
+- Check the exports of AppleUSBVHCI.sys (it may provide functions)
+- Check DeviceIoControl calls with unknown IOCTLs
+- Perhaps the buffers are mapped in AppleUSBVHCI and the address returned through an IOCTL
 
 ---
 
-## ЗАКЛЮЧЕНИЕ
+## ANSWERS TO THE TASK'S QUESTIONS
 
-**Все предоставленные ориентиры (RVA 0x17204, 0x1721C, IAT 0xE058, offset +0x68/+0x70) НЕ СООТВЕТСТВУЮТ бинарнику AppleAudio.sys 6.1.8100.4 с SHA256 cd8b81fabc9be6127a082da22c4cc046a4d46e0225eb6baf6d27e0dc9862a150.**
+### What exactly is mapped?
 
-**Фактически найдено**: один вызов MmMapLockedPagesSpecifyCache на RVA 0x2051, назначение не определено, требуется дальнейшая трассировка вызывающей стороны и использования результата.
+**UNKNOWN** (at the time).
 
-**Путь к PCM-буферу НЕ НАЙДЕН** в рамках предоставленных ориентиров.
+The only mapping found (RVA 0x2051):
+- Size: 8192 bytes (0x2000)
+- Type: MmMapLockedPagesSpecifyCache (MDL mapping)
+- Purpose: needs further tracing
+
+### Was the PCM buffer found?
+
+**NO**.
+
+No link between the mapping found and the PCM buffers was established.
+
+### Which call/field remains unresolved?
+
+**Unresolved**:
+1. Who calls function 0x1FA0 (where does control come from)?
+2. What the 8192-byte MDL holds (audio? descriptors?)
+3. Where the virtual address [rsp+0x30] is written after the return
+4. Where the MmMapIoSpaceEx call is (if there is one)
+5. How the physical T2 buffers (PCI BAR0) relate to this code
+
+---
+
+## CONCLUSION
+
+**All the landmarks provided (RVA 0x17204, 0x1721C, IAT 0xE058, offsets +0x68/+0x70) DO NOT MATCH the binary AppleAudio.sys 6.1.8100.4 with SHA256 cd8b81fabc9be6127a082da22c4cc046a4d46e0225eb6baf6d27e0dc9862a150.**
+
+**Actually found**: one MmMapLockedPagesSpecifyCache call at RVA 0x2051, purpose undetermined; the callers and the use of the result need further tracing.
+
+**The path to the PCM buffer was NOT FOUND** within the landmarks provided.

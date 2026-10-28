@@ -1,31 +1,33 @@
-# Установка T2AudioPort для ежедневного использования
+# Installing T2AudioPort for daily use
 
-> **Статус:** экспериментально. Постоянный режим и установщик собраны 2026-10-28.
-> **На железе ещё не проверены**, проверка — по `GEMINI.md` («▶ СЛЕДУЮЩИЙ ЗАПУСК»).
-> Звуковой тракт (`SpeakerDsp=3`, пресет «Как на Mac») владелец проверил на 1.0.11.0.
+> **Status:** experimental. Persistent mode and the installer were built on 2026-10-28.
+> **Not yet tested on hardware**; the test plan is in `GEMINI.md` ("▶ NEXT RUN").
+> The sound path (`SpeakerDsp=3`, preset "Как на Mac" / "Like on a Mac") was verified by the owner on 1.0.11.0.
+>
+> The installer's menus and messages are in Russian. This guide gives the English meaning.
 
-## Что нужно
+## Requirements
 
-* MacBookPro16,1 под Windows 10/11 x64; Boot Camp-драйвер Apple (`AppleAudio`) установлен.
-* `testsigning` включён (`bcdedit /set testsigning on`, перезагрузка; Secure Boot выключен в «Утилите безопасной загрузки»).
-* Подписанный пакет в `packaging\`: `T2AudioMiniport.inf`, `T2AudioMiniport.sys`, `t2audiominiport.cat` (сборка и подпись — `GEMINI.md` §2) и тестовый сертификат проекта в доверенных.
+* A MacBookPro16,1 running Windows 10/11 x64, with Apple's Boot Camp driver (`AppleAudio`) installed.
+* `testsigning` on (`bcdedit /set testsigning on`, reboot; Secure Boot off in the Startup Security Utility).
+* A signed package in `packaging\`: `T2AudioMiniport.inf`, `T2AudioMiniport.sys`, `t2audiominiport.cat` (build and signing: `GEMINI.md` §2), and the project's test certificate in the trusted stores.
 
-## Установка
+## Install
 
-PowerShell **от имени администратора**, из корня репозитория:
+PowerShell **as Administrator**, from the repository root:
 
 ```powershell
 .\tools\T2Audio-Setup.ps1
 ```
 
-Откроется меню:
+The menu offers:
 
-1. **Установить / обновить** — спросит пресет, привяжет драйвер к устройству, включит постоянный режим, снимет Mute с динамиков T2 и поставит громкость 30 %.
-2. **Сменить пресет звука** — перезапустит устройство (звук пропадёт на пару секунд).
-3. **Сбросить защиту от падений** — если драйвер перестал стартовать после двух сбоев.
-4. **Вернуть драйвер Apple** — удалит T2AudioPort, устройство вернётся на `AppleAudio`.
+1. **Install / update** («Установить / обновить»): asks for a preset, binds the driver to the device, turns persistent mode on, unmutes the T2 speakers and sets the volume to 30 %.
+2. **Change the sound preset** («Сменить пресет звука»): restarts the device (sound drops for a couple of seconds).
+3. **Reset the crash guard** («Сбросить защиту от падений»): if the driver stopped starting after two failures.
+4. **Restore the Apple driver** («Вернуть драйвер Apple»): removes T2AudioPort; the device goes back to `AppleAudio`.
 
-Без меню:
+Without the menu:
 
 ```powershell
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
@@ -35,34 +37,35 @@ PowerShell **от имени администратора**, из корня р�
 .\tools\T2Audio-Setup.ps1 -Action Uninstall
 ```
 
-## Пресеты
+## Presets
 
-| Пресет | Что внутри | Для чего |
+| Preset | Contents | Purpose |
 |---|---|---|
-| `macos` ★ | `SpeakerDsp=3`, `DspGainDb=6` | Эквалайзер Apple для 6 динамиков, виртуальный бас, компрессор. **Проверен владельцем.** |
-| `bright` | как `macos` + `TweeterTrimDb=3` | Больше «воздуха», если звук кажется глуховатым |
-| `loud` | `SpeakerDsp=4`, `DspGainDb=9`, `WooferLimitDb=3` | Громче; защита вуферов от дребезга |
-| `maxvolume` | `SpeakerDsp=4`, `DspGainDb=6`, `WooferLimitDb=6` | Громкая музыка с басом без гула |
-| `even` | как `macos` + `DspAutoGain=1` | Ровная громкость: тихие записи до +6 дБ громче, громкие до −12 дБ тише |
-| `warm` | `SpeakerDsp=2` | Без компрессора: больше динамики, чуть тише |
-| `natural` | `SpeakerDsp=1` | Только эквалайзер и кроссовер Apple |
-| `raw` | `SpeakerDsp=0` | Без обработки — для сравнения (плоско, без баса) |
+| `macos` ★ | `SpeakerDsp=3`, `DspGainDb=6` | Apple's EQ for the 6 speakers, virtual bass, compressor. **Verified by the owner.** |
+| `bright` | `macos` + `TweeterTrimDb=3` | More "air", if the sound seems muffled |
+| `loud` | `SpeakerDsp=4`, `DspGainDb=9`, `WooferLimitDb=3` | Louder; woofer rattle protection |
+| `maxvolume` | `SpeakerDsp=4`, `DspGainDb=6`, `WooferLimitDb=6` | Loud music with bass, without hum |
+| `even` | `macos` + `DspAutoGain=1` | Even loudness: quiet recordings up to +6 dB louder, loud ones up to −12 dB quieter |
+| `warm` | `SpeakerDsp=2` | No compressor: more dynamics, slightly quieter |
+| `natural` | `SpeakerDsp=1` | Apple's EQ and crossover only |
+| `raw` | `SpeakerDsp=0` | No processing, for comparison (flat, no bass) |
 
-Значения лежат в `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`
-(описание каждого — `docs/DRIVER_GUIDE.md` §8.3).
+The values live in `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`
+(each one is described in `docs/DRIVER_GUIDE.md` §8.3).
 
-## Защита от падений
+## Crash guard
 
-Перед стартом аппаратной сессии драйвер ставит в реестре флаг `CrashGuardArmed=1` (и сбрасывает его на диск), а снимает его при штатном завершении: остановка устройства, переход в D1–D3 (простой, сон, гибернация), выключение Windows. Если при загрузке флаг ещё стоит, прошлая сессия оборвалась (BSOD, зависание, выключение кнопкой) — это «удар». **После двух ударов подряд драйвер перестаёт стартовать**; звука нет, но Windows грузится нормально. Тогда:
+Before starting a hardware session the driver sets the registry flag `CrashGuardArmed=1` (and flushes it to disk). It clears the flag on a clean end: device stop, a transition to D1–D3 (idle, sleep, hibernation), Windows shutdown. If the flag is still set at boot, the previous session was cut short (BSOD, hang, power button): that is a "strike". **After two strikes in a row the driver stops starting**; there is no sound, but Windows boots normally. Then either:
 
-1. `.\tools\T2Audio-Setup.ps1 -Action Uninstall` — вернуть AppleAudio, или
-2. разобраться в причине (минидамп `C:\Windows\Minidump`) и `-Action ResetGuard`.
+1. `.\tools\T2Audio-Setup.ps1 -Action Uninstall` to go back to AppleAudio, or
+2. find the cause (minidump in `C:\Windows\Minidump`) and run `-Action ResetGuard`.
 
-В безопасном режиме драйвер не стартует никогда.
+In Safe Mode the driver never starts.
 
-## Известные ограничения
+## Known limitations
 
-* **Наушники не поддерживаются.** Звук всегда идёт в динамики. Драйвер пока только читает состояние разъёма (`docs/HEADPHONES.md`). Для наушников — Bluetooth/USB или «Вернуть драйвер Apple».
-* Микрофоны не поддерживаются.
-* Обновление Windows может вернуть `AppleAudio` (у него подпись Microsoft). Тогда запустите установщик ещё раз.
-* Сон и пробуждение с работающим драйвером ещё не проверены на железе.
+* **Headphones are not supported.** Sound always goes to the speakers. The driver only reads the jack state so far (`docs/HEADPHONES.md`). For headphones use Bluetooth/USB, or "Restore the Apple driver".
+* Microphones are not supported.
+* A Windows Update may bring `AppleAudio` back (it is Microsoft-signed). Run the installer again in that case.
+* Sleep and wake with the driver running are not yet tested on hardware.
+* Volume is software only (the Windows slider scales the samples); hardware volume is planned (`docs/ROADMAP.md`).

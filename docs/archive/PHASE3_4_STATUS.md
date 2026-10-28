@@ -6,9 +6,9 @@
 
 ## Summary
 
-Phase 3 и Phase 4 реализованы и успешно собраны. Драйвер переведён с KMDF function driver на стандартный **Pure PortCls adapter driver** с полной регистрацией WaveRT subdevice. Добавлен Phase 4 skeleton с подготовкой MMIO MDL и T2 protocol command serialization, но без активации на реальном устройстве.
+Phase 3 and Phase 4 are implemented and build successfully. The driver moved from a KMDF function driver to a standard **pure PortCls adapter driver** with full WaveRT subdevice registration. A Phase 4 skeleton was added with MMIO MDL preparation and T2 protocol command serialization, but without activation on the real device.
 
-**Драйвер пока НЕ ГОТОВ для установки на Apple Audio Device.**
+**The driver is NOT YET READY to be installed on the Apple Audio Device.**
 
 ---
 
@@ -43,60 +43,60 @@ portcls.sys:
   - PcGetDeviceProperty
 ```
 
-**Вердикт:** бинарник корректен, импорты соответствуют Pure PortCls driver model.
+**Verdict:** the binary is correct; the imports match the pure PortCls driver model.
 
 ---
 
 ## Phase 3: PortCls Adapter Architecture
 
-### Что реализовано
+### What is implemented
 
 #### 1. Driver Lifecycle (Driver.c)
-- `DriverEntry`: вызывает `PcInitializeAdapterDriver` вместо `WdfDriverCreate`.
-- `T2AudioAddDevice`: вызывает `PcAddAdapterDevice` с callback `T2AudioStartDevice`.
+- `DriverEntry`: calls `PcInitializeAdapterDriver` instead of `WdfDriverCreate`.
+- `T2AudioAddDevice`: calls `PcAddAdapterDevice` with the callback `T2AudioStartDevice`.
 - `T2AudioStartDevice`:
-  - Выделяет `T2AUDIO_DEVICE_CONTEXT` (adapter extension).
-  - Вызывает `T2AudioMapResources` для BAR1/BAR2 mapping через `IResourceList`.
-  - Создаёт WaveRT port: `PcNewPort(&CLSID_PortWaveRT)`.
-  - Создаёт miniport: `T2AudioCreateMiniport`.
-  - Инициализирует port: `IPortWaveRT::Init`.
-  - **Регистрирует subdevice:** `PcRegisterSubdevice(DeviceObject, L"Wave", port)`.
+  - Allocates `T2AUDIO_DEVICE_CONTEXT` (adapter extension).
+  - Calls `T2AudioMapResources` for the BAR1/BAR2 mapping through `IResourceList`.
+  - Creates the WaveRT port: `PcNewPort(&CLSID_PortWaveRT)`.
+  - Creates the miniport: `T2AudioCreateMiniport`.
+  - Initialises the port: `IPortWaveRT::Init`.
+  - **Registers the subdevice:** `PcRegisterSubdevice(DeviceObject, L"Wave", port)`.
 
 #### 2. Resource Mapping (Device.c)
-- Читает BAR1 (audio buffers) и BAR2 (config/GPR) через `IResourceList::FindTranslatedEntry`.
-- Сохраняет `Bar1Physical` для Phase 4 MDL PFN calculation.
-- Использует `MmMapIoSpaceEx`:
-  - BAR1: `PAGE_READONLY | PAGE_WRITECOMBINE` (0x404, как AppleAudio.sys).
+- Reads BAR1 (audio buffers) and BAR2 (config/GPR) through `IResourceList::FindTranslatedEntry`.
+- Keeps `Bar1Physical` for the Phase 4 MDL PFN calculation.
+- Uses `MmMapIoSpaceEx`:
+  - BAR1: `PAGE_READONLY | PAGE_WRITECOMBINE` (0x404, as AppleAudio.sys).
   - BAR2: `PAGE_READONLY | PAGE_NOCACHE` (0x204).
-- Валидирует GPR (BAR2+0xC000): version, signature 0x19870423, buffer offset.
-- Парсит BufferStruct, находит Speaker buffer.
-- **Device ID:** пока установлен в 0 (BufferStruct не содержит BCE device_id).
+- Validates the GPR (BAR2+0xC000): version, signature 0x19870423, buffer offset.
+- Parses BufferStruct, finds the Speaker buffer.
+- **Device ID:** set to 0 for now (BufferStruct holds no BCE device_id).
 
 #### 3. WaveRT Miniport (WaveRTMiniport.c)
-- `IMiniportWaveRT` COM object с vtable:
+- `IMiniportWaveRT` COM object with a vtable:
   - `QueryInterface`, `AddRef`, `Release`
   - `Init`, `GetDescription`, `DataRangeIntersection`, `NewStream`, `GetDeviceDescription`
 - Pin descriptor:
   - 1 render pin (KSPIN_DATAFLOW_IN)
   - 6 channels, 48 kHz, 32-bit samples, 24 bytes/frame
-  - `KSDATARANGE_AUDIO` с `KSDATAFORMAT_SUBTYPE_PCM`, `KSDATAFORMAT_SPECIFIER_WAVEFORMATEX`
+  - `KSDATARANGE_AUDIO` with `KSDATAFORMAT_SUBTYPE_PCM`, `KSDATAFORMAT_SPECIFIER_WAVEFORMATEX`
   - Category: `KSCATEGORY_AUDIO`, Name: `KSNODETYPE_SPEAKER`
-- `PCFILTER_DESCRIPTOR` с 1 pin, 0 nodes.
+- `PCFILTER_DESCRIPTOR` with 1 pin, 0 nodes.
 
 #### 4. WaveRT Stream (WaveRTStream.c)
-- `IMiniportWaveRTStream` COM object с vtable:
+- `IMiniportWaveRTStream` COM object with a vtable:
   - `SetFormat`, `SetState`, `GetPosition`
   - `AllocateAudioBuffer`, `FreeAudioBuffer`
   - `GetHWLatency`, `GetPositionRegister`, `GetClockRegister`
-- Format validation: проверяет 6ch/48kHz/32bit/24 bytes per frame.
+- Format validation: checks 6ch/48kHz/32bit/24 bytes per frame.
 - State machine: `KSSTATE_STOP → ACQUIRE → PAUSE → RUN`.
-- QPC anchor при переходе в `KSSTATE_RUN`.
-- **`AllocateAudioBuffer`:** пока возвращает `STATUS_NOT_SUPPORTED` (см. Phase 4 ограничения).
-- **`GetPosition`:** stub, возвращает PlayOffset=0, WriteOffset=0.
+- QPC anchor on the transition to `KSSTATE_RUN`.
+- **`AllocateAudioBuffer`:** returns `STATUS_NOT_SUPPORTED` for now (see the Phase 4 limitations).
+- **`GetPosition`:** a stub, returns PlayOffset=0, WriteOffset=0.
 
-### Архитектурные изменения
+### Architecture changes
 
-| Было (KMDF)               | Стало (PortCls)                     |
+| Before (KMDF)             | After (PortCls)                     |
 |---------------------------|-------------------------------------|
 | `WdfDriverCreate`         | `PcInitializeAdapterDriver`         |
 | `EvtDeviceAdd`            | `T2AudioAddDevice` (callback)       |
@@ -105,17 +105,17 @@ portcls.sys:
 | `WDF_OBJECT_ATTRIBUTES`   | `ExAllocatePoolWithTag` context     |
 | `WdfCmResourceList`       | `PRESOURCELIST` (IResourceList)     |
 
-### Статус
-✅ **Сборка успешна**  
-✅ **PortCls subdevice регистрируется**  
-⚠️ **Не устанавливалось на устройство** (INF намеренно без Hardware ID)  
-⚠️ **Endpoint не тестировался** (нет audio buffer path)
+### Status
+✅ **Build succeeds**  
+✅ **The PortCls subdevice registers**  
+⚠️ **Not installed on the device** (the INF deliberately has no Hardware ID)  
+⚠️ **The endpoint was not tested** (no audio buffer path)
 
 ---
 
 ## Phase 4: MMIO Buffer and T2 Protocol
 
-### Что реализовано
+### What is implemented
 
 #### 1. MMIO MDL Construction (Phase4.c)
 ```c
@@ -125,56 +125,56 @@ NTSTATUS T2AudioCreateSpeakerMdl(
     _Out_ ULONG *OffsetFromFirstPage,
     _Out_ ULONG *ActualSize);
 ```
-- Создаёт MDL для Speaker buffer в BAR1.
-- Использует `IoAllocateMdl` с флагом `MDL_IO_SPACE`.
-- Вычисляет PFN напрямую от `Bar1Physical.QuadPart + SpeakerBufferOffset`.
-- Возвращает offset и size, aligned to page boundaries.
-- **Cache type:** `MmWriteCombined` (соответствует BAR1 mapping 0x404).
+- Creates an MDL for the Speaker buffer in BAR1.
+- Uses `IoAllocateMdl` with the `MDL_IO_SPACE` flag.
+- Computes the PFN directly from `Bar1Physical.QuadPart + SpeakerBufferOffset`.
+- Returns the offset and size, aligned to page boundaries.
+- **Cache type:** `MmWriteCombined` (matches the BAR1 mapping 0x404).
 
 ```c
 VOID T2AudioFreeSpeakerMdl(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 ```
-- Освобождает MDL через `IoFreeMdl`.
+- Frees the MDL with `IoFreeMdl`.
 
 #### 2. T2 Protocol Commands (Phase4.c)
 ```c
 NTSTATUS T2AudioStartIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioStopIo(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 ```
-- Строят KAIT2EN-compatible messages:
+- Build KAIT2EN-compatible messages:
   - `START_IO`: opcode 0x80 (bit 7 set)
   - `STOP_IO`: opcode 0
-  - Device ID берётся из `Context->SpeakerDeviceId` (пока 0)
-  - Offset/size используются из `SpeakerBufferOffset/Size`
+  - The device ID comes from `Context->SpeakerDeviceId` (0 for now)
+  - Offset/size come from `SpeakerBufferOffset/Size`
 - **Message format:**
   ```c
-  message[0] = opcode;           // 0x80 или 0
-  message[1] = device_id;        // пока 0
-  message[2..5] = offset (LE32)  // Speaker buffer offset в BAR1
+  message[0] = opcode;           // 0x80 or 0
+  message[1] = device_id;        // 0 for now
+  message[2..5] = offset (LE32)  // Speaker buffer offset in BAR1
   message[6..9] = size (LE32)    // Speaker buffer size
   ```
-- **Transport:** пока не подключён, функции возвращают `STATUS_NOT_SUPPORTED`.
+- **Transport:** not connected yet; the functions return `STATUS_NOT_SUPPORTED`.
 
 #### 3. Stream State Integration
 - `WaveRTStream.c::T2AudioStreamSetState`:
-  - `KSSTATE_RUN`: вызывает `T2AudioStartIo` (пока fail с NOT_SUPPORTED).
-  - `KSSTATE_STOP`: вызывает `T2AudioStopIo` (пока fail с NOT_SUPPORTED).
-- State transition **блокируется**, если команда возвращает ошибку.
+  - `KSSTATE_RUN`: calls `T2AudioStartIo` (fails with NOT_SUPPORTED for now).
+  - `KSSTATE_STOP`: calls `T2AudioStopIo` (fails with NOT_SUPPORTED for now).
+- The state transition is **blocked** if the command returns an error.
 
-### Ограничения Phase 4
+### Phase 4 limitations
 
-⚠️ **MMIO MDL не активирован**
-- `AllocateAudioBuffer` возвращает `STATUS_NOT_SUPPORTED`.
-- MDL construction code присутствует, но **не вызывается** из WaveRT callback.
-- **Причина:** physical page mapping и cache coherency не проверены на реальном устройстве. Некорректный MDL может вызвать BSOD или повреждение MMIO.
+⚠️ **The MMIO MDL is not activated**
+- `AllocateAudioBuffer` returns `STATUS_NOT_SUPPORTED`.
+- The MDL construction code is present but **not called** from the WaveRT callback.
+- **Reason:** the physical page mapping and cache coherency are not verified on the real device. A wrong MDL could cause a BSOD or MMIO corruption.
 
-⚠️ **T2 command transport не подключён**
-- `T2AudioStartIo`/`T2AudioStopIo` возвращают `STATUS_NOT_SUPPORTED` сразу после сериализации message.
-- **Причина:** user-mode IOCTL 0x222018 к AppleUSBVHCI.sys нельзя вызывать из kernel mode без правильного IoGetDeviceObjectPointer и IRP stack построения. Нужен безопасный kernel BCE/AppleUSBVHCI wrapper.
+⚠️ **The T2 command transport is not connected**
+- `T2AudioStartIo`/`T2AudioStopIo` return `STATUS_NOT_SUPPORTED` right after serialising the message.
+- **Reason:** the user-mode IOCTL 0x222018 to AppleUSBVHCI.sys cannot be called from kernel mode without a proper IoGetDeviceObjectPointer and IRP stack setup. A safe kernel BCE/AppleUSBVHCI wrapper is needed.
 
-⚠️ **Device ID неизвестен**
+⚠️ **The device ID is unknown**
 - `Context->SpeakerDeviceId = 0` (hardcoded).
-- **Причина:** BufferStruct (BAR1 metadata) не содержит BCE device ID. В Linux KAIT2EN device ID приходит из отдельного BCE protocol handshake (`GET_DEVICE_LIST` command). Нужна kernel BCE enumeration.
+- **Reason:** BufferStruct (BAR1 metadata) holds no BCE device ID. In Linux KAIT2EN the device ID comes from a separate BCE protocol handshake (the `GET_DEVICE_LIST` command). Kernel BCE enumeration is needed.
 
 ---
 
@@ -191,10 +191,10 @@ Phase2/Driver/
 
 Phase2/
 ├── T2AudioMiniport.vcxproj    [MSBuild project: WDM, PortCls, no KMDF]
-└── Driver/T2AudioMiniport.inf [Stub INF без Hardware ID]
+└── Driver/T2AudioMiniport.inf [Stub INF without a Hardware ID]
 ```
 
-**Lines of code:** ~1200 (без комментариев и пустых строк)
+**Lines of code:** ~1200 (without comments and blank lines)
 
 ---
 
@@ -219,14 +219,14 @@ DriverVer=10/05/2026,1.0.0.0
 ProviderName="T2AudioPort"
 ```
 
-**Статус:** ❌ Не содержит Hardware ID `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B`  
-**Причина:** драйвер не готов для установки, может вызвать BSOD или conflict с AppleAudio.sys.
+**Status:** ❌ Does not contain the Hardware ID `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B`  
+**Reason:** the driver is not ready to be installed; it could cause a BSOD or a conflict with AppleAudio.sys.
 
 ---
 
 ## What Works
 
-✅ BAR1/BAR2 mapping через PortCls `IResourceList`  
+✅ BAR1/BAR2 mapping through PortCls `IResourceList`  
 ✅ GPR validation (BAR2+0xC000)  
 ✅ BufferStruct parsing  
 ✅ Speaker buffer discovery  
@@ -234,17 +234,17 @@ ProviderName="T2AudioPort"
 ✅ COM interface vtables (IMiniportWaveRT, IMiniportWaveRTStream)  
 ✅ PortCls subdevice registration (`PcRegisterSubdevice`)  
 ✅ State machine (STOP/ACQUIRE/PAUSE/RUN)  
-✅ MMIO MDL construction code (не активирован)  
-✅ T2 START_IO/STOP_IO message serialization (не отправляются)
+✅ MMIO MDL construction code (not activated)  
+✅ T2 START_IO/STOP_IO message serialization (not sent)
 
 ---
 
 ## What's Missing (Critical Blockers)
 
 ### 1. Kernel BCE/AppleUSBVHCI Transport
-**Проблема:**
-- User-mode IOCTL 0x222018 нельзя безопасно вызвать из kernel mode.
-- Нужен kernel-mode wrapper:
+**Problem:**
+- The user-mode IOCTL 0x222018 cannot be called safely from kernel mode.
+- A kernel-mode wrapper is needed:
   ```c
   NTSTATUS T2AudioOpenBceTransport(
       _Out_ PDEVICE_OBJECT *BceDevice,
@@ -259,69 +259,69 @@ ProviderName="T2AudioPort"
       _In_ PDEVICE_OBJECT BceDevice,
       _In_ PFILE_OBJECT BceFileObject);
   ```
-- Требуется:
-  - `IoGetDeviceObjectPointer(L"\\Device\\AppleUSBVHCI", ...)` для получения device stack.
-  - `IoBuildDeviceIoControlRequest(IOCTL_UNKNOWN, ...)` для отправки команды.
-  - Синхронное ожидание через `KeWaitForSingleObject(&event, ...)`.
+- Needed:
+  - `IoGetDeviceObjectPointer(L"\\Device\\AppleUSBVHCI", ...)` to get the device stack.
+  - `IoBuildDeviceIoControlRequest(IOCTL_UNKNOWN, ...)` to send the command.
+  - A synchronous wait with `KeWaitForSingleObject(&event, ...)`.
 
-**Риск:** неправильный IRP stack или reference counting может вызвать BSOD.
+**Risk:** a wrong IRP stack or reference counting could cause a BSOD.
 
-**Решение:**
-1. Реализовать BCE transport wrapper в отдельном файле `BceTransport.c`.
-2. Протестировать отправку dummy команды (GET_DEVICE_LIST) на тестовой загрузке с kernel debugger.
-3. Подключить к `T2AudioStartIo`/`T2AudioStopIo`.
+**Solution:**
+1. Implement the BCE transport wrapper in a separate file `BceTransport.c`.
+2. Test sending a dummy command (GET_DEVICE_LIST) on a test boot with a kernel debugger.
+3. Connect it to `T2AudioStartIo`/`T2AudioStopIo`.
 
 ---
 
 ### 2. BCE Device Enumeration
-**Проблема:**
-- Speaker device ID неизвестен.
-- BufferStruct (BAR1 metadata) содержит только имя устройства `"Speaker"`, но не BCE protocol device ID.
+**Problem:**
+- The Speaker device ID is unknown.
+- BufferStruct (BAR1 metadata) holds only the device name `"Speaker"`, not the BCE protocol device ID.
 
 **Linux KAIT2EN reference:**
 ```c
-// audio.c:452 - device ID приходит от BCE enumeration
+// audio.c:452 - the device ID comes from BCE enumeration
 static int t2audio_probe_device(struct t2audio_dev *adev, u8 device_id) {
-    // device_id получен из BCE GET_DEVICE_LIST response
+    // device_id obtained from the BCE GET_DEVICE_LIST response
     adev->device_id = device_id;
     ...
 }
 ```
 
-**Решение:**
-1. Отправить BCE команду `GET_DEVICE_LIST` в `T2AudioStartDevice` после BAR mapping.
-2. Распарсить response, найти device с типом "audio output" и именем "Speaker".
-3. Сохранить `device_id` в `Context->SpeakerDeviceId`.
+**Solution:**
+1. Send the BCE command `GET_DEVICE_LIST` in `T2AudioStartDevice` after the BAR mapping.
+2. Parse the response, find the device of type "audio output" named "Speaker".
+3. Store `device_id` in `Context->SpeakerDeviceId`.
 
 ---
 
 ### 3. MMIO Buffer Validation
-**Проблема:**
-- MDL для BAR1 speaker buffer построен, но не проверен на реальном устройстве.
-- Некорректный cache type или PFN calculation может вызвать:
+**Problem:**
+- The MDL for the BAR1 speaker buffer is built but not verified on the real device.
+- A wrong cache type or PFN calculation could cause:
   - BSOD (DRIVER_IRQL_NOT_LESS_OR_EQUAL).
   - Memory corruption.
-  - DMA conflict с AppleAudio.sys (если оно ещё загружено).
+  - A DMA conflict with AppleAudio.sys (if it is still loaded).
 
-**Решение:**
-1. Создать minimal test: вернуть MDL из `AllocateAudioBuffer`, но **не позволять Windows audio engine писать в buffer**.
-2. Установить драйвер на тестовой загрузке с kernel debugger.
-3. Проверить:
-   - MDL создаётся без BSOD.
-   - User-mode mapping успешен (`MmMapLockedPagesSpecifyCache`).
-   - Physical address соответствует BAR1.
-4. Только после успешной валидации разрешить реальный audio playback.
+**Solution:**
+1. Create a minimal test: return the MDL from `AllocateAudioBuffer`, but **do not let the Windows audio engine write into the buffer**.
+2. Install the driver on a test boot with a kernel debugger.
+3. Check:
+   - The MDL is created without a BSOD.
+   - The user-mode mapping succeeds (`MmMapLockedPagesSpecifyCache`).
+   - The physical address matches BAR1.
+4. Allow real audio playback only after successful validation.
 
 ---
 
 ### 4. Hardware Position Tracking
-**Проблема:**
-- `GetPosition` возвращает stub (PlayOffset=0, WriteOffset=0).
-- Windows audio engine использует `GetPosition` для glitch prevention и sync.
+**Problem:**
+- `GetPosition` returns a stub (PlayOffset=0, WriteOffset=0).
+- The Windows audio engine uses `GetPosition` for glitch prevention and sync.
 
-**Решение (вариант A - hardware pointer):**
+**Solution (option A - hardware pointer):**
 ```c
-// Если T2 chip обновляет hardware write pointer в GPR или BufferStruct:
+// If the T2 chip updates a hardware write pointer in the GPR or BufferStruct:
 NTSTATUS T2AudioStreamGetPosition(...) {
     ULONG hwPointer = READ_REGISTER_ULONG(Context->GprBase + T2_HW_PTR_OFFSET);
     Position->PlayOffset = hwPointer * instance->BytesPerFrame;
@@ -330,9 +330,9 @@ NTSTATUS T2AudioStreamGetPosition(...) {
 }
 ```
 
-**Решение (вариант B - software position via QPC):**
+**Solution (option B - software position via QPC):**
 ```c
-// Использовать Phase 1 RingBufferMath и QPC interpolation:
+// Use the Phase 1 RingBufferMath and QPC interpolation:
 #include "../Phase1/RingBufferMath.h"
 
 NTSTATUS T2AudioStreamGetPosition(...) {
@@ -350,21 +350,21 @@ NTSTATUS T2AudioStreamGetPosition(...) {
 }
 ```
 
-**Выбор:** зависит от того, обновляет ли T2 chip hardware pointer (нужно проверить на устройстве).
+**Choice:** depends on whether the T2 chip updates a hardware pointer (to be checked on the device). (Answer: it does not; the position comes from `UPDATE_TIMESTAMP`.)
 
 ---
 
 ### 5. Hardware Latency / FIFO Size
-**Проблема:**
-- `GetHWLatency` возвращает stub (0 FIFO, 0 interrupt delay).
-- Windows audio engine использует latency для buffer size negotiation.
+**Problem:**
+- `GetHWLatency` returns a stub (0 FIFO, 0 interrupt delay).
+- The Windows audio engine uses the latency to negotiate the buffer size.
 
-**Решение:**
-1. Найти FIFO size в GPR или BufferStruct metadata.
-2. Или использовать empirical value из AppleAudio.sys (reverse engineering).
-3. Обновить:
+**Solution:**
+1. Find the FIFO size in the GPR or the BufferStruct metadata.
+2. Or use an empirical value from AppleAudio.sys (reverse engineering).
+3. Update:
    ```c
-   Latency->FifoSize = 4096;  // bytes, пример
+   Latency->FifoSize = 4096;  // bytes, an example
    Latency->ChipsetDelay = 0;
    Latency->CodecDelay = 0;
    ```
@@ -372,10 +372,10 @@ NTSTATUS T2AudioStreamGetPosition(...) {
 ---
 
 ### 6. INF Hardware Match
-**Проблема:**
-- INF не содержит Hardware ID, драйвер не может быть установлен через Device Manager.
+**Problem:**
+- The INF has no Hardware ID; the driver cannot be installed through Device Manager.
 
-**Решение (только после всех блокеров):**
+**Solution (only after all blockers):**
 ```ini
 [Standard.NTamd64]
 %T2Audio.DeviceDesc%=T2Audio_Install,PCI\VEN_106B&DEV_1803&SUBSYS_1887106B
@@ -401,21 +401,21 @@ T2Audio.DeviceDesc="Apple T2 Audio Device (6-channel)"
 T2Audio.ServiceDesc="T2 Audio PortCls Driver"
 ```
 
-⚠️ **НЕ добавлять Hardware ID до полной валидации!**
+⚠️ **Do NOT add the Hardware ID before full validation!**
 
 ---
 
-## Testing Strategy (когда будет готово)
+## Testing Strategy (when ready)
 
 ### Pre-Installation Checklist
-- [ ] BCE transport реализован и протестирован с kernel debugger
-- [ ] Device ID получен через GET_DEVICE_LIST
-- [ ] MMIO MDL проверен на тестовой загрузке (без audio playback)
-- [ ] Position tracking реализован (hardware или software)
-- [ ] Hardware latency/FIFO настроены
-- [ ] INF обновлён с Hardware ID
-- [ ] Создана точка восстановления (если System Protection включён)
-- [ ] Подготовлен WinRE USB для recovery
+- [ ] BCE transport implemented and tested with a kernel debugger
+- [ ] Device ID obtained through GET_DEVICE_LIST
+- [ ] MMIO MDL verified on a test boot (without audio playback)
+- [ ] Position tracking implemented (hardware or software)
+- [ ] Hardware latency/FIFO set up
+- [ ] INF updated with the Hardware ID
+- [ ] A restore point created (if System Protection is on)
+- [ ] A WinRE USB prepared for recovery
 
 ### Installation Steps (DANGER ZONE)
 1. **Backup AppleAudio.sys:**
@@ -462,65 +462,65 @@ T2Audio.ServiceDesc="T2 Audio PortCls Driver"
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| BSOD при регистрации subdevice | Low | High | Kernel debugger, WinRE recovery |
-| BSOD при MMIO MDL mapping | Medium | High | Test на dummy device сначала |
-| T2 command отклонён (bad device_id) | High | Low | GET_DEVICE_LIST enumeration |
+| BSOD on subdevice registration | Low | High | Kernel debugger, WinRE recovery |
+| BSOD on the MMIO MDL mapping | Medium | High | Test on a dummy device first |
+| T2 command rejected (bad device_id) | High | Low | GET_DEVICE_LIST enumeration |
 | Audio glitching (bad position) | High | Medium | Software QPC fallback |
-| Conflict с AppleAudio.sys | Low | High | Disable AppleAudio service перед установкой |
-| Повреждение speaker hardware | Very Low | Critical | -30 dB test tone, 100ms limit |
+| Conflict with AppleAudio.sys | Low | High | Disable the AppleAudio service before installing |
+| Speaker hardware damage | Very Low | Critical | -30 dB test tone, 100ms limit |
 
 ---
 
 ## Next Steps (Priority Order)
 
 ### Phase 5: BCE Transport (HIGH PRIORITY)
-1. Создать `BceTransport.c` с kernel-mode wrapper для AppleUSBVHCI IOCTL.
-2. Реализовать `T2AudioOpenBceTransport`, `T2AudioSendBceCommand`, `T2AudioCloseBceTransport`.
-3. Протестировать с dummy command на kernel debugger.
-4. Подключить к `T2AudioStartIo`/`T2AudioStopIo`.
+1. Create `BceTransport.c` with a kernel-mode wrapper for the AppleUSBVHCI IOCTL.
+2. Implement `T2AudioOpenBceTransport`, `T2AudioSendBceCommand`, `T2AudioCloseBceTransport`.
+3. Test with a dummy command under a kernel debugger.
+4. Connect it to `T2AudioStartIo`/`T2AudioStopIo`.
 
 ### Phase 6: Device Enumeration (HIGH PRIORITY)
-1. Отправить `GET_DEVICE_LIST` command в `T2AudioStartDevice`.
-2. Распарсить BCE response, найти Speaker device ID.
-3. Сохранить в `Context->SpeakerDeviceId`.
+1. Send the `GET_DEVICE_LIST` command in `T2AudioStartDevice`.
+2. Parse the BCE response, find the Speaker device ID.
+3. Store it in `Context->SpeakerDeviceId`.
 
 ### Phase 7: MMIO Buffer Validation (CRITICAL SAFETY)
-1. Активировать `AllocateAudioBuffer` (вернуть MDL вместо NOT_SUPPORTED).
-2. Установить драйвер на тестовой загрузке с kernel debugger.
-3. Проверить MDL mapping без audio playback.
-4. Только после валидации разрешить SetState(RUN).
+1. Activate `AllocateAudioBuffer` (return the MDL instead of NOT_SUPPORTED).
+2. Install the driver on a test boot with a kernel debugger.
+3. Check the MDL mapping without audio playback.
+4. Allow SetState(RUN) only after validation.
 
 ### Phase 8: Position Tracking (MEDIUM PRIORITY)
-1. Проверить GPR/BufferStruct на наличие hardware write pointer.
-2. Если нет - использовать QPC interpolation (Phase 1 RingBufferMath).
-3. Обновить `GetPosition`.
+1. Check GPR/BufferStruct for a hardware write pointer.
+2. If there is none, use QPC interpolation (Phase 1 RingBufferMath).
+3. Update `GetPosition`.
 
 ### Phase 9: Hardware Latency (LOW PRIORITY)
-1. Reverse engineer FIFO size из AppleAudio.sys или GPR.
-2. Обновить `GetHWLatency`.
+1. Reverse engineer the FIFO size from AppleAudio.sys or the GPR.
+2. Update `GetHWLatency`.
 
-### Phase 10: INF и Installation (FINAL STEP)
-1. Добавить Hardware ID в INF.
-2. Создать installation guide с safety checklist.
-3. Протестировать установку на реальном устройстве.
+### Phase 10: INF and Installation (FINAL STEP)
+1. Add the Hardware ID to the INF.
+2. Write an installation guide with a safety checklist.
+3. Test the installation on the real device.
 
 ---
 
 ## Conclusion
 
-Phase 3 и Phase 4 успешно реализованы:
-- ✅ Драйвер переведён на Pure PortCls architecture.
-- ✅ WaveRT subdevice регистрируется через `PcRegisterSubdevice`.
-- ✅ MMIO MDL и T2 protocol command serialization готовы (но не активированы).
+Phase 3 and Phase 4 are implemented:
+- ✅ The driver moved to a pure PortCls architecture.
+- ✅ The WaveRT subdevice registers through `PcRegisterSubdevice`.
+- ✅ The MMIO MDL and T2 protocol command serialization are ready (but not activated).
 
-**Драйвер пока не готов для установки.** Критические блокеры:
-1. BCE transport (kernel-mode wrapper для AppleUSBVHCI).
+**The driver is not yet ready to be installed.** Critical blockers:
+1. BCE transport (kernel-mode wrapper for AppleUSBVHCI).
 2. Device ID enumeration (GET_DEVICE_LIST command).
-3. MMIO buffer validation (проверка на тестовой загрузке).
+3. MMIO buffer validation (check on a test boot).
 
 **Estimated work remaining:** ~3-4 phases (BCE transport, device enum, MMIO validation, position tracking).
 
-**Safety note:** не устанавливать на реальное устройство до завершения Phase 5-7 и проверки с kernel debugger.
+**Safety note:** do not install on the real device before Phases 5-7 are complete and checked with a kernel debugger.
 
 ---
 

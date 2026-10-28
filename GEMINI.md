@@ -1,222 +1,225 @@
-# GEMINI.md — план работ для Gemini (сборка, подпись, тест на железе)
+# GEMINI.md — work plan for Gemini (build, signing, hardware tests)
 
-> Этот файл — инструкция для агента Gemini, который работает в этом репозитории на Windows-машине с WDK и на тестовом MacBookPro16,1.
-> Перед работой прочитай:
-> 1. [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md) — как устроен драйвер (железо, протокол, тракт, стадии, лог);
-> 2. последнюю датированную запись в [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) — единственный авторитетный статус;
-> 3. [`docs/analysis/RE_speaker_layout_and_clock.md`](docs/analysis/RE_speaker_layout_and_clock.md) — раскладка динамиков и часы T2;
-> 4. [`docs/REVIEW_20261028.md`](docs/REVIEW_20261028.md) — что изменилось после этапа D, найденные проблемы и быстрые откаты.
+> This file is the instruction set for the Gemini agent that works in this repository on a Windows machine with the WDK and on the test MacBookPro16,1.
+> Before starting, read:
+> 1. [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md) — how the driver works (hardware, protocol, data path, stages, log);
+> 2. the latest dated entry in [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) — the only authoritative status;
+> 3. [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is left until the driver is fully functional;
+> 4. [`docs/analysis/RE_speaker_layout_and_clock.md`](docs/analysis/RE_speaker_layout_and_clock.md) — speaker layout and the T2 clock;
+> 5. [`docs/REVIEW_20261028.md`](docs/REVIEW_20261028.md) — what changed after Stage D, problems found, quick rollbacks.
 
 ---
 
-## ▶ СЛЕДУЮЩИЙ ЗАПУСК — делай по шагам (обновлено 2026-10-28: установщик и постоянный режим)
+## ▶ NEXT RUN — follow the steps in order (updated 2026-10-28: installer and persistent mode)
 
-**Где мы:** звук `SpeakerDsp=3` одобрен (1.0.11.0). Для ежедневного использования добавлены, **на железе не проверены**:
-* **постоянный режим** (`Parameters\EnableProduction=1`): драйвер стартует при каждой загрузке без агента, под защитой от падений (`src/T2AudioCrashGuard.h`);
-* **установщик с пресетами** `tools/T2Audio-Setup.ps1` (`docs/INSTALL.md`);
-* **чтение разъёма наушников** при пробе (`docs/HEADPHONES.md`, шаг 1);
-* **лимитер с заглядыванием вперёд** на всех уровнях DSP (вместо мгновенного; звук задерживается на 0,5 мс) и **автоусиление** `DspAutoGain` (пресет `even`).
+**Where we are:** sound with `SpeakerDsp=3` is approved (1.0.11.0). Added for daily use, **not yet tested on hardware**:
+* **persistent mode** (`Parameters\EnableProduction=1`): the driver starts on every boot without the agent, protected by the crash guard (`src/T2AudioCrashGuard.h`);
+* **installer with presets** `tools/T2Audio-Setup.ps1` (`docs/INSTALL.md`);
+* **headphone jack read** at probe time (`docs/HEADPHONES.md`, step 1);
+* **lookahead limiter** on every DSP level (instead of the instant one; sound is delayed by 0.5 ms) and **autogain** `DspAutoGain` (preset `even`).
 
-Проверить всё это — задача сессии. Агент `T2Audio-TestAgent.ps1` для установки не нужен; лог ядра снимай DbgView (`tools/Capture-T2AudioLog.ps1` или DbgViewCLI вручную) с самого начала каждого шага.
+Verifying all of this is the goal of the session. The agent `T2Audio-TestAgent.ps1` is not needed for the install; capture the kernel log with DbgView (`tools/Capture-T2AudioLog.ps1` or DbgViewCLI by hand) from the very start of each step.
 
-**Шаг 1. Сборка 1.0.12.0** с актуальной `diagnostics`.
-1. CI зелёный.
-2. Сборка и подпись по §2. `.sys`, `.cat` и `.inf` с `DriverVer` 1.0.12.0 положи в `packaging\`, SHA256 запиши.
-3. Перед установкой устройство на AppleAudio, `Parameters` пуст.
+The installer's UI is in Russian. The strings quoted below are what it prints; the English meaning is given in brackets.
 
-**Шаг 2. Установка установщиком** (звук разрешён):
+**Step 1. Build 1.0.12.0** from the current `diagnostics`.
+1. CI is green.
+2. Build and sign as in §2. Put `.sys`, `.cat` and `.inf` with `DriverVer` 1.0.12.0 into `packaging\`, record the SHA256.
+3. Before installing, the device is on AppleAudio and `Parameters` is empty.
+
+**Step 2. Install with the installer** (sound allowed):
 ```powershell
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 ```
-PASS, если:
-* в выводе «T2AudioPort установлен и работает» и «Динамики T2: Mute снят, громкость 30 %»;
-* `-Action Status` показывает драйвер T2AudioPort, постоянный режим включён, пресет «Как на Mac», защита в порядке;
-* в логе ядра есть `persistent mode active`, `crash guard armed` и строка `BCE probe: headphone jack device … : PLUGGED/unplugged` (запиши её дословно).
+PASS if:
+* the output contains «T2AudioPort установлен и работает» [T2AudioPort installed and running] and «Динамики T2: Mute снят, громкость 30 %» [T2 speakers: unmuted, volume 30 %];
+* `-Action Status` shows the T2AudioPort driver, persistent mode on, preset «Как на Mac» [Like on a Mac], crash guard OK;
+* the kernel log contains `persistent mode active`, `crash guard armed` and the line `BCE probe: headphone jack device … : PLUGGED/unplugged` (copy it verbatim).
 
-Владелец слушает музыку 2–3 минуты: звук как в прослушивании №3?
+The owner listens to music for 2–3 minutes: does it sound like listening session #3?
 
-**Шаг 3. Перезагрузка — главный тест защиты.**
-1. Обычная перезагрузка Windows.
-2. После загрузки `-Action Status`: драйвер T2AudioPort стартовал сам; **«Защита от падений: в порядке»**, то есть `CrashGuardStrikes` = 0.
+**Step 3. Reboot — the main crash-guard test.**
+1. Ordinary Windows restart.
+2. After boot, `-Action Status`: the T2AudioPort driver started by itself; **«Защита от падений: в порядке»** [crash guard: OK], i.e. `CrashGuardStrikes` = 0.
 
-Если после обычной перезагрузки появился удар (strikes = 1) — штатное выключение не снимает флаг. Стоп, отчёт для Claude: строки лога про `crash guard` и `PowerChangeState` перед выключением.
+If an ordinary restart produced a strike (strikes = 1), a clean shutdown does not clear the flag. Stop and report to Claude: the log lines about `crash guard` and `PowerChangeState` before the shutdown.
 
-**Шаг 4. Наушники (только чтение).** Вставь наушники, затем `-Action Preset -Preset macos` (это перезапускает устройство). В логе строка разъёма должна стать `PLUGGED`. Вынь — снова перезапуск, `unplugged`. Звук в наушниках пока не пойдёт; это ожидаемо.
+**Step 4. Headphones (read only).** Plug headphones in, then `-Action Preset -Preset macos` (this restarts the device). The jack line in the log must become `PLUGGED`. Unplug, restart again: `unplugged`. No sound in the headphones yet; that is expected.
 
-**Шаг 5. Пресеты.** `-Action Preset -Preset bright`, затем `loud`, `maxvolume`, `even`, `macos`. После каждого в логе `mode parameters` с нужными значениями (у `even` — `DspAutoGain=1`). Владелец коротко оценивает на слух:
-* `maxvolume` и `loud` — басовый трек на 100 %: есть ли гул, хрип на пиках (лимитер теперь с заглядыванием вперёд, хрип на пиках должен уменьшиться);
-* `even` — сначала тихая запись (старая, классика, подкаст), потом громкая (современный поп/рок): громкость между ними стала ровнее? Нет ли «качания» (громкость заметно плывёт вверх-вниз в паузах и после ударов)? В `run summary` запиши `autoGainDb10=` (десятые дБ; например `-45` = −4,5 дБ).
+**Step 5. Presets.** `-Action Preset -Preset bright`, then `loud`, `maxvolume`, `even`, `macos`. After each one the log line `mode parameters` shows the expected values (`even` has `DspAutoGain=1`). The owner gives a short verdict by ear:
+* `maxvolume` and `loud`: a bass-heavy track at 100 %. Is there hum, or harshness on peaks? (The limiter now looks ahead, so harshness on peaks should be lower.)
+* `even`: first a quiet recording (old, classical, a podcast), then a loud one (modern pop/rock). Is the level between them more even? Any "pumping" (volume noticeably drifting up and down in pauses and after hits)? Record `autoGainDb10=` from `run summary` (tenths of a dB; e.g. `-45` = −4.5 dB).
 
-**Шаг 6. Сон** (только с согласия владельца на этот шаг):
-1. Запусти музыку, отправь Mac в сон на 1–2 минуты, разбуди.
-2. Звук вернулся? BSOD нет?
-3. После пробуждения `-Action Status`: защита в порядке.
+**Step 6. Sleep** (only if the owner agrees to this step):
+1. Play music, put the Mac to sleep for 1–2 minutes, wake it.
+2. Did the sound come back? No BSOD?
+3. After wake, `-Action Status`: crash guard OK.
 
-Если BSOD — после перезагрузки `-Action Status` покажет удар; минидамп в отчёт.
+On a BSOD, after the reboot `-Action Status` shows a strike; add the minidump to the report.
 
-**Шаг 7. Возврат к Apple:**
+**Step 7. Back to Apple:**
 ```powershell
 .\tools\T2Audio-Setup.ps1 -Action Uninstall
 ```
-PASS: «Устройство снова на AppleAudio», `Status` показывает AppleAudio.
+PASS: «Устройство снова на AppleAudio» [device is back on AppleAudio], `Status` shows AppleAudio.
 
-**Шаг 8. Отчёт:**
-1. `docs/logs/EXCERPT_*.md`: вывод установщика на каждом шаге, строки лога (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` с `maxCopyUs`), слова владельца.
-2. Запись в `docs/CURRENT_STATE.md`.
-3. PR в `diagnostics`.
+**Step 8. Report:**
+1. `docs/logs/EXCERPT_*.md`: installer output at every step, log lines (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` with `maxCopyUs`), the owner's words (verbatim, with a translation).
+2. An entry in `docs/CURRENT_STATE.md`.
+3. A PR into `diagnostics`.
 
-**Если что-то не работает:** `.\tools\T2Audio-Setup.ps1 -Action Uninstall`, логи, запись в `CURRENT_STATE.md`, сообщить владельцу. Код не чинить; «доказано» — только проверенное.
-
----
-
-## 0. Текущее состояние (на 2026-10-28, вечер; актуальное — в блоке выше и в `docs/CURRENT_STATE.md`)
-
-* Основная ветка — **`diagnostics`** (ветка по умолчанию). CI (`.github/workflows/build.yml`): драйвер собирается с WDK (Release x64), три хост-теста проходят на MSVC, gcc и clang.
-* **Этапы B, C и D пройдены на железе.** Последний прогон D: сборка 1.0.7.0, хэш `48F336C1…BE4`, `docs/logs/EXCERPT_20261028_043442.md`.
-  * BSOD `0x7E` не возникает: `IOCTL 0x222020` перехватывается в ядре.
-  * Ответы START_IO/STOP_IO принимаются (`msg=1`/`msg=3`, `status=0`).
-  * Поток входит в RUN, часы T2 держат опережение 1000 кадров.
-  * После STOP_IO метки времени больше не приходят.
-* **Ещё не проверено на железе:** что T2 читает наше кольцо (то есть сам звук), питание (сон/D3), переполнение hostTime на большом аптайме.
-* **Новое после прогона D (только исходники, на железе не проверено):**
-  * `Parameters\OutputAttenuation`: защитное ослабление каждого сэмпла шагами по 6 дБ. По умолчанию 3, то есть −18 дБ; 0 выключает, максимум 16. Значение видно в логе: `mode parameters: … OutputAttenuation=3 (-18 dB)`.
-  * `tools/Test-WasapiTone.ps1 -EndpointVolume` (сейчас до 0.25): тихий тон только на явно указанной точке, после тона Mute и громкость 0 возвращаются. Исправлена запись 32-битного PCM: раньше в 32-битный буфер писались 16-битные сэмплы.
-  * `tools/T2Audio-TestAgent.ps1 -AudibleVolume <до 0.25> -OwnerApprovedAudible`: этап E. Сначала идёт беззвучная проба, только потом тон.
-  * `Parameters\ClockRateTracking` (по умолчанию 0): подстройка скорости под часы T2 против скачков при дрейфе. Найдено симуляцией `tests/T2AudioPipelineTest.c`, см. §7 E2/E3.
-  * Уборка: старые документы перенесены в `docs/archive/`. `.sys` и `.cat` больше не коммитятся (§2 A3). Пути к DbgViewCLI: `$env:T2AUDIO_DBGVIEW` или `..\DebugView\`.
-  * CI компилирует C# из `Test-WasapiTone.ps1` и `Test-WasapiRender.ps1`, гоняет pipeline-тест. PSScriptAnalyzer, InfVerif и анализ кода работают в режиме «только отчёт».
-* Открытых PR нет.
+**If something does not work:** `.\tools\T2Audio-Setup.ps1 -Action Uninstall`, logs, an entry in `CURRENT_STATE.md`, tell the owner. Do not fix code; "proven" means verified only.
 
 ---
 
-## 1. Жёсткие правила (нарушать нельзя)
+## 0. State (as of 2026-10-28 evening; the current state is in the block above and in `docs/CURRENT_STATE.md`)
 
-0. **Тишина.** Дома спят. Пока владелец явно не разрешил звук:
-   * не запускай `tools/Test-WasapiTone.ps1` (кроме проверки компиляции из §7 S1, которая звук не включает), музыку, системные звуки, «проверку динамиков» Windows;
-   * не проверяй AppleAudio «на слух» после отката — только состояние устройства (`Get-PnpDevice`);
-   * **перед любым прогоном на железе:** Mute в Windows и громкость 0.
-
-   `tools/Test-WasapiRender.ps1` допустим: он только открывает поток (`Initialize`/`Start`/`Stop`) и сэмплов не пишет.
-1. **`-BceIo` / `-OwnerApprovedBceIo` — только после того, как владелец в чате написал разрешение на этот конкретный прогон.** Не отправляй `START_IO` в обход агента: ни своим скриптом, ни через реестр (`EnableBceIo`).
-1a. **Звук (`-AudibleVolume`, `-Listen`, `-OwnerApprovedAudible`)** — только по разрешению владельца на звук. Разрешение на START_IO звук не разрешает. Тон: громкость точки ≤ 0.25, амплитуда ≤ 0.3. В `-Listen` громкостью управляет владелец, начинать с 5–10 %. `OutputAttenuation` не ставить ниже 1 без разрешения.
-2. **Не меняй гейты запуска** в `src/Driver.c`. Автозапуск — только через постоянный режим установщика (`EnableProduction`, с защитой от падений) и только с согласия владельца.
-3. **Не уводи Mac в сон** во время сессии стадии ≥ 3 (обработка питания есть, но не проверена).
-4. Стадии поднимай **по одной**: 1 → 2 → 3 → 5 без START_IO → (с разрешения) START_IO. Следующая стадия — только если предыдущая прошла все критерии.
-5. После каждого прогона, особенно после сбоя: `.\tools\T2Audio-TestAgent.ps1 -Mode Recover`. Устройство в итоге должно вернуться на **AppleAudio** (Started, без ошибок).
-6. Не пиши «исправлено» / «работает» в документации и коммитах без доказательства с железа (лог, дамп, хэш бинарника).
-7. Не коммить сертификаты, `.pfx`, приватные ключи, полные логи ядра (`docs/logs/capture_*/` в `.gitignore`), бинарники Apple и проекты REA/Ghidra. В репозиторий кладутся только выдержки; бинарники и большие листинги — в приватный `imacorpoliz/mbp`.
-8. В `diagnostics` напрямую не пушь. Работай в своей ветке от `diagnostics` (например, `gemini/hw-stage3`) и открывай PR в `diagnostics`.
-9. `-RawChannels` (6 сырых каналов, **твитеры без защиты**) — только для проверки раскладки и динамиков и только со звуком, разрешённым владельцем. На каналы 2/5 (твитеры) не ниже 1 кГц — это проверяют и агент, и скрипт тона.
+* The main branch is **`diagnostics`** (the default branch). CI (`.github/workflows/build.yml`): the driver builds with the WDK (Release x64); the host tests pass on MSVC, gcc and clang.
+* **Stages B, C and D passed on hardware.** Last Stage D run: build 1.0.7.0, hash `48F336C1…BE4`, `docs/logs/EXCERPT_20261028_043442.md`.
+  * No BSOD `0x7E`: `IOCTL 0x222020` is intercepted in the kernel.
+  * START_IO/STOP_IO replies are accepted (`msg=1`/`msg=3`, `status=0`).
+  * The stream enters RUN, and the T2 clock keeps a lead of 1000 frames.
+  * After STOP_IO no more timestamps arrive.
+* **Stage E (first sound) passed afterwards** (1.0.8.0), and the DSP levels 2 and 3 were approved by the owner (1.0.10.0, 1.0.11.0). See `docs/CURRENT_STATE.md`.
+* **Changes after the Stage D run** (some since verified on hardware; see CURRENT_STATE):
+  * `Parameters\OutputAttenuation`: a safety cut on every sample in 6 dB steps. Default is now 1 (−6 dB); 0 disables, maximum 16. Visible in the log: `mode parameters: … OutputAttenuation=1 (-6 dB)`.
+  * `tools/Test-WasapiTone.ps1 -EndpointVolume` (up to 0.25): a quiet tone only on an explicitly named endpoint; after the tone, Mute and volume 0 are restored. Fixed 32-bit PCM writing: 16-bit samples used to be written into a 32-bit buffer.
+  * `tools/T2Audio-TestAgent.ps1 -AudibleVolume <up to 0.25> -OwnerApprovedAudible`: Stage E. A silent probe always runs first, the tone only afterwards.
+  * `Parameters\ClockRateTracking` (default 0): rate tracking against the T2 clock to avoid jumps under drift. Found by the simulation `tests/T2AudioPipelineTest.c`, see §7 E2/E3.
+  * Cleanup: old documents moved to `docs/archive/`. `.sys` and `.cat` are no longer committed (§2 A3). DbgViewCLI path: `$env:T2AUDIO_DBGVIEW` or `..\DebugView\`.
+  * CI compiles the C# inside `Test-WasapiTone.ps1`, `Test-WasapiRender.ps1` and `T2Audio-Setup.ps1` and runs all host tests. PSScriptAnalyzer, InfVerif and code analysis are report-only.
 
 ---
 
-## 2. Этап A — сборка и подпись тестового пакета
+## 1. Hard rules (never break them)
 
-### A1. Сборка
+0. **Silence.** People are asleep at home. Until the owner explicitly allows sound:
+   * do not run `tools/Test-WasapiTone.ps1` (except the compile check of §7 S1, which plays nothing), music, system sounds, or the Windows "speaker test";
+   * do not check AppleAudio "by ear" after a rollback, only the device state (`Get-PnpDevice`);
+   * **before any hardware run:** Mute in Windows and volume 0.
+
+   `tools/Test-WasapiRender.ps1` is allowed: it only opens a stream (`Initialize`/`Start`/`Stop`) and writes no samples.
+1. **`-BceIo` / `-OwnerApprovedBceIo` only after the owner has written permission for that specific run in the chat.** Never send `START_IO` around the agent: neither with your own script nor through the registry (`EnableBceIo`).
+1a. **Sound (`-AudibleVolume`, `-Listen`, `-OwnerApprovedAudible`)** only with the owner's permission for sound. Permission for START_IO does not allow sound. Tone: endpoint volume ≤ 0.25, amplitude ≤ 0.3. In `-Listen` the owner controls the volume; start at 5–10 %. Do not set `OutputAttenuation` below 1 without permission.
+2. **Do not change the start gates** in `src/Driver.c`. Autostart only through the installer's persistent mode (`EnableProduction`, with the crash guard) and only with the owner's consent.
+3. **Do not put the Mac to sleep** during a stage ≥ 3 session (power handling exists but is not verified) unless the owner allows the sleep test.
+4. Raise stages **one at a time**: 1 → 2 → 3 → 5 without START_IO → (with permission) START_IO. Go to the next stage only if the previous one met every criterion.
+5. After every run, especially after a failure: `.\tools\T2Audio-TestAgent.ps1 -Mode Recover` (or `T2Audio-Setup.ps1 -Action Uninstall` for an installer setup). In the end the device must be back on **AppleAudio** (Started, no errors), unless the owner decided to keep T2AudioPort installed.
+6. Never write "fixed" / "works" in docs and commits without proof from hardware (log, dump, binary hash).
+7. Never commit certificates, `.pfx`, private keys, full kernel logs (`docs/logs/capture_*/` is in `.gitignore`), Apple binaries, or REA/Ghidra projects. Only excerpts go into the repository; binaries and large listings go into the private `imacorpoliz/mbp`.
+8. Do not push to `diagnostics` directly. Work in your own branch off `diagnostics` (e.g. `gemini/hw-stage3`) and open a PR into `diagnostics`.
+9. `-RawChannels` (6 raw channels, **tweeters unprotected**) only to check the layout and speakers, and only with sound allowed by the owner. Nothing below 1 kHz on channels 2/5 (tweeters); both the agent and the tone script enforce this.
+
+---
+
+## 2. Stage A — build and sign a test package
+
+### A1. Build
 
 ```powershell
 git fetch origin
 git checkout -b gemini/hw-stage3 origin/diagnostics
 
 msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Rebuild `
-        /p:WindowsTargetPlatformVersion=10.0.26100.0     # или версия установленного SDK
+        /p:WindowsTargetPlatformVersion=10.0.26100.0     # or the installed SDK version
 # -> src\bin\Release\T2AudioMiniport.sys
 ```
 
-В проекте указан `WindowsTargetPlatformVersion 10.0.28000.0`. Если такого SDK нет, передай установленный через `/p:`, как это делает CI. Вместо локальной сборки можно взять артефакт `T2AudioMiniport-unsigned-<sha>` из GitHub Actions того же коммита.
+The project sets `WindowsTargetPlatformVersion 10.0.28000.0`. If that SDK is not installed, pass the installed one with `/p:`, as CI does. Instead of a local build you can take the `T2AudioMiniport-unsigned-<sha>` artifact from GitHub Actions for the same commit.
 
-### A2. Хост-тесты (обязательно перед каждым бинарником)
+### A2. Host tests (mandatory before every binary)
 
 ```powershell
-foreach ($t in 'BceProtocolLogicTest','T2AudioBufferLogicTest','T2AudioSpeakerLogicTest') {
+foreach ($t in 'BceProtocolLogicTest','T2AudioBufferLogicTest','T2AudioSpeakerLogicTest',
+               'T2AudioPipelineTest','T2AudioDspTest','T2AudioCrashGuardTest') {
     cl /nologo /W4 /Fe:tests\$t.exe tests\$t.c
     & "tests\$t.exe"; if ($LASTEXITCODE) { throw "$t failed" }
 }
 ```
 
-### A3. Пакет и подпись
+### A3. Package and signing
 
-1. Скопируй `src\bin\Release\T2AudioMiniport.sys` в `packaging\`.
-2. **Подними `DriverVer`** в `packaging\T2AudioMiniport.inf`: сегодняшняя дата и следующая версия после последней установленной (например, `1.0.5.0`).
-3. Подпиши `.sys`, пересоздай и подпиши каталог тестовым сертификатом проекта (SHA1 `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`, `docs/T2AudioCert_thumbprint.txt`; он должен лежать в `Cert:\CurrentUser\My` и в доверенных):
+1. Copy `src\bin\Release\T2AudioMiniport.sys` into `packaging\`.
+2. **Raise `DriverVer`** in `packaging\T2AudioMiniport.inf`: today's date and the next version after the last installed one (e.g. `1.0.12.0`).
+3. Sign the `.sys`, regenerate the catalog and sign it with the project's test certificate (SHA1 `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`, `docs/T2AudioCert_thumbprint.txt`; it must be in `Cert:\CurrentUser\My` and in the trusted stores):
 
 ```powershell
-$kit = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"   # своя версия
+$kit = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"   # your version
 cd packaging
 & "$kit\signtool.exe" sign /fd SHA256 /sha1 CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE `
     /t http://timestamp.digicert.com T2AudioMiniport.sys
 & "$kit\makecat.exe" t2audio.cdf                      # -> t2audiominiport.cat
 & "$kit\signtool.exe" sign /fd SHA256 /sha1 CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE `
     /t http://timestamp.digicert.com t2audiominiport.cat
-(Get-FileHash .\T2AudioMiniport.sys -Algorithm SHA256).Hash   # запомни: это -ExpectedSysHash
+(Get-FileHash .\T2AudioMiniport.sys -Algorithm SHA256).Hash   # note it: this is -ExpectedSysHash
 ```
 
-4. Проверь подписи: `& "$kit\signtool.exe" verify /pa /v T2AudioMiniport.sys`, то же для `.cat`.
+4. Verify the signatures: `& "$kit\signtool.exe" verify /pa /v T2AudioMiniport.sys`, the same for the `.cat`.
 
-**Готово, когда:** тесты прошли, `.sys` и `.cat` подписаны, хэш `.sys` записан.
+**Done when:** the tests passed, `.sys` and `.cat` are signed, the `.sys` hash is recorded.
 
-**Не коммить `.sys` и `.cat`** (они в `.gitignore` с 2026-10-28). В репозиторий идут только `T2AudioMiniport.inf` с новым `DriverVer` и хэш `.sys` в отчёте. Подписанные пакеты, если их нужно хранить, кладутся в приватный `imacorpoliz/mbp`.
+**Do not commit `.sys` and `.cat`** (they are in `.gitignore` since 2026-10-28). Only `T2AudioMiniport.inf` with the new `DriverVer` and the `.sys` hash in the report go into the repository. Signed packages, if they need to be kept, go into the private `imacorpoliz/mbp`.
 
 ---
 
-## 3. Этап B — прогон на железе, стадии 1 → 3 (беззвучно)
+## 3. Stage B — hardware run, stages 1 → 3 (silent)
 
-### B1. Подготовка
+### B1. Preparation
 
 ```powershell
 .\tools\PreInstall-Check.ps1
-.\tools\Install-T2AudioDriver.ps1            # только добавляет пакет в driver store
-.\tools\Install-T2AudioDriver.ps1 -Bind      # привязка к устройству (может потребовать перезагрузку, Code 14)
+.\tools\Install-T2AudioDriver.ps1            # only adds the package to the driver store
+.\tools\Install-T2AudioDriver.ps1 -Bind      # binds it to the device (may need a reboot, Code 14)
 .\tools\T2Audio-TestAgent.ps1 -Mode Status
 ```
 
-Для логов нужен `DbgViewCLI.exe` (Sysinternals, см. `tools/README.md`). Mute и громкость 0 — до первого прогона.
+Logs need `DbgViewCLI.exe` (Sysinternals, see `tools/README.md`). Mute and volume 0 before the first run.
 
-**После обновления со старой 6-канальной сборки** Windows может держать в кэше старый формат endpoint, а новый драйвер его отклоняет. В логе это строка `Validate: 6 channels not offered`, endpoint не стартует. Лечение: «Звук → Свойства устройства → Дополнительно → 2 канала, 32 бит, 48000 Гц». Или переустанови устройство (`pnputil /remove-device <InstanceId>`, затем `pnputil /add-driver packaging\T2AudioMiniport.inf /install`).
+**After upgrading from the old 6-channel build** Windows may keep the old endpoint format cached, and the new driver rejects it. The log shows `Validate: 6 channels not offered` and the endpoint does not start. Fix: "Sound → Device properties → Advanced → 2 channels, 32 bit, 48000 Hz". Or reinstall the device (`pnputil /remove-device <InstanceId>`, then `pnputil /add-driver packaging\T2AudioMiniport.inf /install`).
 
-### B2. Прогоны
+### B2. Runs
 
 ```powershell
-$h = '<SHA256 из A3>'
+$h = '<SHA256 from A3>'
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 2 -ExpectedSysHash $h
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 3 -ExpectedSysHash $h
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
 ```
 
-При BSOD или зависании на любой стадии останавливайся. После перезагрузки: `-Mode Recover`, собрать `C:\Windows\Minidump\*.dmp` (`!analyze -v`, стек), в отчёт — только это.
+On a BSOD or a hang at any stage, stop. After the reboot: `-Mode Recover`, collect `C:\Windows\Minidump\*.dmp` (`!analyze -v`, stack); only that goes into the report.
 
-### B3. Критерии приёма (строки лога `T2Audio:`)
+### B3. Acceptance criteria (`T2Audio:` log lines)
 
-| Стадия | Должно быть |
+| Stage | Expected |
 |---|---|
-| 1 | `diagnostic session active stage=1 … rawChannels=0`, `PcRegisterAdapterPowerManagement status=0x00000000`, `StartDevice SUCCESS`; WASAPI-проба открывает endpoint (формат **2 ch / 48000 / 32 bit**); без BSOD |
+| 1 | `diagnostic session active stage=1 … rawChannels=0`, `PcRegisterAdapterPowerManagement status=0x00000000`, `StartDevice SUCCESS`; the WASAPI probe opens the endpoint (format **2 ch / 48000 / 32 bit**); no BSOD |
 | 1 | `mode parameters: … TweeterMode=1` |
 | 2 | `Resource[0] mapped at … (write-combining\|uncached)`, `GPR read: … signature=0x19870423`, `MapResources SUCCESS: … size=0x61800` |
-| 3 | `BCE probe: 5 device(s)`, `uid="Speaker"` для `0x39` |
+| 3 | `BCE probe: 5 device(s)`, `uid="Speaker"` for `0x39` |
 | 3 | `speaker stream 0x3A pft: rate=48000 id=0x6C70636D flags=0x4 bpp=24 fpp=1 bpf=24 ch=6 bits=24` |
-| 3 | `speaker sample shift=8 latency=A+B frames safety=C frames` — **запиши A, B, C** |
+| 3 | `speaker sample shift=8 latency=A+B frames safety=C frames` — **record A, B, C** |
 | 3 | `BCE probe done; speaker id 0x39 stream 0x3A format=1` |
-| 3 | при выключении: `PnP minor 0x02/0x04 - releasing hardware`, без BSOD и без зависания PnP |
-| все | после `-Mode Recover` устройство на AppleAudio, Started |
+| 3 | on shutdown: `PnP minor 0x02/0x04 - releasing hardware`, no BSOD and no PnP hang |
+| all | after `-Mode Recover` the device is on AppleAudio, Started |
 
-### B4. Отчёт
+### B4. Report
 
-Создай `docs/logs/EXCERPT_<YYYYMMDD_HHMMSS>.md`:
+Create `docs/logs/EXCERPT_<YYYYMMDD_HHMMSS>.md`:
 
-* хэш `.sys`, коммит, версия INF;
-* команды, которые запускал;
-* выдержка лога по каждой стадии (только строки `T2Audio:`);
-* PASS/FAIL по каждому критерию B3, значения latency/safety;
-* состояние устройства после Recover.
+* `.sys` hash, commit, INF version;
+* the commands you ran;
+* a log excerpt per stage (`T2Audio:` lines only);
+* PASS/FAIL per B3 criterion, latency/safety values;
+* device state after Recover.
 
-Добавь датированную запись в `docs/CURRENT_STATE.md`: что проверено, на каком хэше, что прошло, что нет. Закоммить и открой PR.
+Add a dated entry to `docs/CURRENT_STATE.md`: what was verified, on which hash, what passed, what did not. Commit and open a PR.
 
 ---
 
-## 4. Этап C — стадии 4 и 5 без START_IO (только если B полностью PASS)
+## 4. Stage C — stages 4 and 5 without START_IO (only if B fully PASSED)
 
-Цель: удержание открытого транспорта (стадия 4), затем запись в BAR0 (стерео → 6 каналов, WC + `sfence`) и обнуление кольца (стадия 5). Звука **не будет**: без START_IO T2 кольцо не читает.
+Goal: keeping the transport open (stage 4), then writing into BAR0 (stereo → 6 channels, WC + `sfence`) and zeroing the ring (stage 5). There will be **no sound**: without START_IO the T2 does not read the ring.
 
 ```powershell
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 4 -ExpectedSysHash $h
@@ -224,104 +227,104 @@ $h = '<SHA256 из A3>'
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
 ```
 
-Критерии:
+Criteria:
 
-* нет BSOD;
-* стадия 4: `audio path ENABLED for speaker 0x39 (bceIo=0, transport held open)`;
-* стадия 5: `AllocateAudioBuffer: system … size=…` (размер кратен 8 — стерео), `SetState 3 …`, на стопе `SetState 0 … ticks=N` с N > 0;
-* строк `T2 clock: re-aimed` быть **не должно**: без START_IO нет и меток;
-* после Recover устройство на AppleAudio, `Started`.
+* no BSOD;
+* stage 4: `audio path ENABLED for speaker 0x39 (bceIo=0, transport held open)`;
+* stage 5: `AllocateAudioBuffer: system … size=…` (size a multiple of 8, i.e. stereo), `SetState 3 …`, on stop `SetState 0 … ticks=N` with N > 0;
+* there must be **no** `T2 clock: re-aimed` lines: without START_IO there are no timestamps;
+* after Recover the device is on AppleAudio, `Started`.
 
-Отчёт — как в B4.
+Report as in B4.
 
 ---
 
-## 5. Этап D — беззвучный START_IO (только с разрешения владельца)
+## 5. Stage D — silent START_IO (only with the owner's permission)
 
-Это проверка исправления BSOD и часов T2. Звука нет: Windows в Mute, движок пишет нули, кольцо перед стартом обнуляется.
+This verifies the BSOD fix and the T2 clock. No sound: Windows is muted, the engine writes zeros, and the ring is zeroed before the start.
 
-Условия: B и C полностью PASS (выполнено), R1 по минидампам не противоречит причине (выполнено), и **владелец в чате разрешил этот прогон**.
+Conditions: B and C fully PASSED (done), R1 on the minidumps does not contradict the root cause (done), and **the owner allowed this run in the chat**.
 
-Перед прогоном (обязательно):
-1. Пересобери пакет из текущего `diagnostics` (порядок — блок «▶ Следующий запуск» в начале файла).
-2. **Заглуши саму конечную точку T2, а не устройство по умолчанию.** Windows хранит громкость и Mute для каждой конечной точки отдельно, а новая точка T2 может стать устройством по умолчанию на 100 %. Сделай прогон `-Stage 1`: проба теперь сама ставит Mute и громкость 0 на точке T2. В `wasapi.txt` должно быть `endpoint mute=True volume=0` и `T2 endpoint muted, volume 0.`. Если там `MUTE NOT CONFIRMED`, стоп. Windows запоминает это состояние, поэтому на прогоне D точка уже будет заглушена, и проба проверит это ещё раз до `Start`.
-3. «Панель управления → Звук → Звуки → Звуковая схема: Без звука» на время прогона (верни после), плюс Mute и громкость 0 на AppleAudio.
+Before the run (mandatory):
+1. Rebuild the package from the current `diagnostics` (order: the "▶ Next run" block at the top of this file).
+2. **Mute the T2 endpoint itself, not the default device.** Windows keeps volume and Mute per endpoint, and the new T2 endpoint may become the default device at 100 %. Do a `-Stage 1` run: the probe now mutes the T2 endpoint and sets volume 0 by itself. `wasapi.txt` must contain `endpoint mute=True volume=0` and `T2 endpoint muted, volume 0.`. If it says `MUTE NOT CONFIRMED`, stop. Windows remembers this state, so for the D run the endpoint is already muted, and the probe checks it again before `Start`.
+3. "Control Panel → Sound → Sounds → Sound scheme: No sounds" for the duration of the run (restore it afterwards), plus Mute and volume 0 on AppleAudio.
 
 ```powershell
-# Mute + громкость 0 — проверь ещё раз
+# Mute + volume 0: check again
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -ExpectedSysHash $h
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
 ```
 
-Ожидаемое в логе:
+Expected in the log:
 
 ```
 T2Audio: SetState RUN StartIo status=0x00000000
 T2Audio: START_IO sent to device 0x39
 T2Audio: VHCI UPDATE_TIMESTAMP #1 dev=0x39 t2=… seed=… sample=…
-T2Audio: VHCI UPDATE_TIMESTAMP #2 …                          # примерно через 347 мс
-T2Audio: T2 clock: re-aimed lead by … frames (#1, …)          # 0–2 раза в начале, дальше редко
-T2Audio: STOP_IO sent to device 0x39                          # на стопе
+T2Audio: VHCI UPDATE_TIMESTAMP #2 …                          # about 347 ms later
+T2Audio: T2 clock: re-aimed lead by … frames (#1, …)          # 0–2 times at the start, rarely afterwards
+T2Audio: STOP_IO sent to device 0x39                          # on stop
 ```
 
-Критерий беззвучности: в `wasapi.txt` строка `endpoint mute=True volume=0`.
+Silence criterion: `wasapi.txt` contains `endpoint mute=True volume=0`.
 
-Запиши:
-* шаг `sample` между метками (ожидается 16 640);
-* интервал между метками;
-* сколько раз сработало `re-aimed` за минуту.
+Record:
+* the `sample` step between timestamps (expected 16 640);
+* the interval between timestamps;
+* how many times `re-aimed` fired per minute.
 
-Если `re-aimed` срабатывает на каждой метке — это ошибка модели часов. Остановись и приложи лог.
+If `re-aimed` fires on every timestamp, the clock model is wrong. Stop and attach the log.
 
-**BSOD** → стоп, минидамп, отчёт. Повторять нельзя, пока не разобрано.
+**BSOD** → stop, minidump, report. Do not repeat until it is analysed.
 
 ---
 
-### 5.1 Повтор этапа D (после исправления ответа START_IO)
+### 5.1 Stage D repeat (after the START_IO reply fix)
 
-Первый прогон D (2026-10-28) прошёл без BSOD, но ответ T2 на START_IO был отклонён нашей проверкой, и поток не вошёл в RUN. Проверка исправлена. Повтор — по тем же правилам и **только с новым разрешением владельца**: пересобрать, Stage 1 с подтверждением mute, затем тот же прогон D. Ожидаемое:
+The first D run (2026-10-28) had no BSOD, but the T2's reply to START_IO was rejected by our check, and the stream did not enter RUN. The check is fixed. The repeat follows the same rules and **needs a new permission from the owner**: rebuild, Stage 1 with the mute confirmation, then the same D run. Expected:
 
 ```
-T2Audio: START_IO reply size=256 tag=… type=… dev=0x… msg=1 status=0x00000000   # запиши все поля
+T2Audio: START_IO reply size=256 tag=… type=… dev=0x… msg=1 status=0x00000000   # record every field
 T2Audio: SetState RUN StartIo status=0x00000000
 T2Audio: VHCI UPDATE_TIMESTAMP #1 … sample=…
-T2Audio: T2 clock: re-aimed lead by … frames (#1, …)    # ожидается 1 раз в начале (~ −1900: T2 начинает читать ~40 мс после START_IO)
+T2Audio: T2 clock: re-aimed lead by … frames (#1, …)    # expected once at the start (~ −1900: the T2 starts reading ~40 ms after START_IO)
 T2Audio: STOP_IO reply size=… msg=3 status=0x00000000
 T2Audio: STOP_IO sent to device 0x39
 ```
 
-Запиши:
-* все поля строк `START_IO reply` и `STOP_IO reply`;
-* сколько раз сработало `re-aimed` и на сколько кадров. Больше 2–3 раз за 2 секунды — ошибка, приложи лог;
-* `ticks` > 0 на стопе;
-* после стопа метки времени **больше не приходят**;
-* аптайм на момент теста (`(Get-CimInstance Win32_OperatingSystem).LastBootUpTime`) — для проверки переполнения hostTime.
+Record:
+* every field of the `START_IO reply` and `STOP_IO reply` lines;
+* how many times `re-aimed` fired and by how many frames. More than 2–3 times in 2 seconds is a bug; attach the log;
+* `ticks` > 0 on stop;
+* after the stop **no more** timestamps arrive;
+* uptime at the time of the test (`(Get-CimInstance Win32_OperatingSystem).LastBootUpTime`), to check the hostTime overflow.
 
-Если START_IO снова отклонён (`START_IO response invalid`), сразу после него в логе должен быть `STOP_IO`, и метки должны прекратиться.
+If START_IO is rejected again (`START_IO response invalid`), a `STOP_IO` must follow immediately in the log, and the timestamps must stop.
 
-## 6. Этап E — первый звук (только когда владелец разрешит шуметь)
+## 6. Stage E — first sound (only once the owner allows noise)
 
-### 6.0 Сборка для этапа E
+### 6.0 Build for Stage E
 
-Пересобери из актуальной `diagnostics` (этап A полностью, новый `DriverVer`, хэш в отчёт). Проверь, что CI зелёный: изменения в `Driver.c`, `WaveRTStream.c` и `Test-WasapiTone.ps1` (C# внутри `Add-Type`) ещё ни разу не компилировались на Windows. Если `Add-Type` падает, исправь компиляцию отдельным коммитом и опиши ошибку.
+Rebuild from the current `diagnostics` (all of Stage A, a new `DriverVer`, hash in the report). Check that CI is green. If `Add-Type` fails, fix the compilation in a separate commit and describe the error.
 
-Перед звуковым прогоном сделай беззвучный повтор этапа D на новой сборке, это тоже только с разрешения владельца. В логе должна быть строка `OutputAttenuation=3 (-18 dB)`.
+Before the audible run, do a silent repeat of Stage D on the new build, again only with the owner's permission. The log must contain the line `OutputAttenuation=…`.
 
-### 6.1 Стерео: тихий тон через агент
+### 6.1 Stereo: a quiet tone through the agent
 
-Только после явного разрешения владельца на **звук** (разрешение на START_IO не считается):
+Only after the owner's explicit permission for **sound** (permission for START_IO does not count):
 
 ```powershell
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
     -AudibleVolume 0.03 -OwnerApprovedAudible -ToneFrequency 440 -ToneSeconds 3 -ToneAmplitude 0.05
 ```
 
-Как устроен прогон:
-* агент сначала делает беззвучную пробу (`wasapi.txt`, Mute подтверждён);
-* затем играет тон (`tone.txt`) и в конце снова ставит Mute и громкость 0;
-* в драйвере сэмплы дополнительно ослаблены на 18 дБ.
+How the run works:
+* the agent first does a silent probe (`wasapi.txt`, Mute confirmed);
+* then it plays the tone (`tone.txt`) and at the end sets Mute and volume 0 again;
+* in the driver the samples are additionally attenuated by `OutputAttenuation`.
 
-Что должно быть в `tone.txt`:
+Expected in `tone.txt`:
 
 ```
 endpoint mute=False volume=0.03
@@ -331,77 +334,78 @@ wrote frames=…
 after run: endpoint mute=True volume=0
 ```
 
-Запиши:
-* слышен ли тон, с какой стороны и из каких динамиков (вуферы/твитеры);
-* есть ли треск или щелчки раз в ~0,35 с (это была бы ошибка опережения);
-* что в логе ядра: `re-aimed` и `ticks`, как на этапе D.
+Record:
+* whether the tone is heard, on which side and from which speakers (woofers/tweeters);
+* any crackle or clicks every ~0.35 s (that would be a lead error);
+* the kernel log: `re-aimed` and `ticks`, as in Stage D.
 
-Тона нет, а в логе всё как на этапе D? Повтори с `-ToneFrequency 1000` и `Parameters\OutputAttenuation=1` (−6 дБ). Громкость точки не повышай. Если и так тихо, остановись и пиши отчёт: значит, T2 не читает кольцо, нужен реверс (§7).
+No tone, but the log looks like Stage D? Repeat with `-ToneFrequency 1000` and `Parameters\OutputAttenuation=1` (−6 dB). Do not raise the endpoint volume. If it is still silent, stop and write the report: the T2 does not read the ring, and reverse engineering is needed (§7).
 
-Если твитеры неприятны: `Parameters\TweeterMode=0` (только вуферы) и перезапуск устройства.
+If the tweeters are unpleasant: `Parameters\TweeterMode=0` (woofers only) and restart the device.
 
-Обычная музыка допустима только после PASS тона, на громкости 1–5 % и с тем же `OutputAttenuation`.
+Ordinary music is allowed only after the tone PASSED, at 1–5 % volume and with the same `OutputAttenuation`.
 
-### 6.2 Раскладка (по одному каналу)
+### 6.2 Layout (one channel at a time)
 
-Только с `-RawChannels` (**твитеры без защиты**): тихий тон **1 кГц и выше**, по одному каналу 0…5. Агент пускает `-AudibleVolume` вместе с `-RawChannels` только с `-ToneChannel 0..5`, а на каналы 2/5 только с `-ToneFrequency >= 1000`. Удобнее — `-SpeakerCheck -RawChannels` (см. блок «▶ СЛЕДУЮЩИЙ ЗАПУСК»). Сам скрипт тона тоже отказывает (`TWEETER REFUSED`), если ниже 1 кГц идёт на каналы 2/5 или на все каналы.
+Only with `-RawChannels` (**tweeters unprotected**): a quiet tone of **1 kHz and above**, one channel 0…5 at a time. The agent accepts `-AudibleVolume` together with `-RawChannels` only with `-ToneChannel 0..5`, and for channels 2/5 only with `-ToneFrequency >= 1000`. Easier: `-SpeakerCheck -RawChannels`. The tone script itself refuses too (`TWEETER REFUSED`) if anything below 1 kHz goes to channels 2/5 or to all channels.
 
 ```powershell
 foreach ($c in 0..5) {
   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -RawChannels `
       -AudibleVolume 0.03 -OwnerApprovedAudible -ToneChannel $c -ToneFrequency 1000 -ExpectedSysHash $h
   .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-  Read-Host "Канал ${c}: какой динамик звучал? (запиши)"
+  Read-Host "Channel ${c}: which speaker played? (write it down)"
 }
 ```
 
-Запиши, какой динамик звучит. Низкие частоты на каналы 2 и 5 **не подавать**. Если порядок не совпал с таблицей в `DRIVER_GUIDE.md` §4.3, поправь `T2AUDIO_SPK_*` в `src/T2AudioSpeakerLogic.h` и тесты.
+Record which speaker plays. **Never** send low frequencies to channels 2 and 5. If the order does not match the table in `DRIVER_GUIDE.md` §4.3, fix `T2AUDIO_SPK_*` in `src/T2AudioSpeakerLogic.h` and the tests.
 
 ---
 
-## 7. TODO для билдера (без железа или после этапа E)
+## 7. TODO for the builder (without hardware, or after Stage E)
 
-Каждая задача — отдельная ветка от `diagnostics` и PR. Отмечай выполненное здесь же: `[x]`, дата и ссылка на PR.
+Each task gets its own branch off `diagnostics` and a PR. Mark finished items here: `[x]`, the date and a link to the PR. The overall plan to full functionality is in [`docs/ROADMAP.md`](docs/ROADMAP.md); the items below are the builder's share of it.
 
-**Сразу (без железа):**
-- [x] **S1. Сборка новой `diagnostics` на Windows** для этапа E: драйвер, подпись, хэш (§2). Собрано 2026-10-28, DriverVer 1.0.8.0, SHA256 26A701DCA40DEF0EFBF6DC74D0D30849A83AA12D0B1E31F82436F25959ED7D7B. Звук успешно получен на железе.
-- [ ] **S2. Упаковка в CI (D4).** Копировать `.sys` в `packaging/`, проставлять `DriverVer`, прогонять `InfVerif`, собирать неподписанный каталог (как `BuildT2TouchId.yml` у osaul4ik). Секреты в CI не добавлять.
-- [ ] **S3. INF: значения по умолчанию.** Записать `OutputAttenuation=3` и `TweeterMode=1` в `Parameters` через `AddReg`, чтобы они были видны и редактируемы в реестре. Сейчас это только значения по умолчанию в коде.
-- [ ] **S5. Driver Verifier** (стандартные флаги + IRQL checking) на стадиях 1–3, беззвучно, только с разрешения владельца. После прогона Verifier выключить (`verifier /reset`, перезагрузка) и записать результат.
-- [ ] **S6. Разобрать отчёты CI с флагом report-only** (PSScriptAnalyzer, InfVerif, анализ кода WDK) в логе Actions. Первый разбор анализа кода — таблица в `docs/REVIEW_20261028.md` §1.7. Исправить найденное отдельными PR, затем убрать `continue-on-error`.
-- [ ] **S4. Удалить устаревший hardware-MDL путь** (`T2AudioCreateSpeakerMdl`, `MdlVariant`, `tools/Test-MdlVariants.ps1`): буфер WaveRT давно живёт в системной памяти. Только если CI остаётся зелёным, без изменения поведения.
+**Now (no hardware):**
+- [x] **S1. Build the new `diagnostics` on Windows** for Stage E: driver, signing, hash (§2). Built 2026-10-28, DriverVer 1.0.8.0, SHA256 26A701DCA40DEF0EFBF6DC74D0D30849A83AA12D0B1E31F82436F25959ED7D7B. Sound obtained on hardware.
+- [ ] **S2. Packaging in CI (D4).** Copy the `.sys` into `packaging/`, stamp `DriverVer`, run `InfVerif`, build an unsigned catalog (like `BuildT2TouchId.yml` by osaul4ik). No secrets in CI.
+- [ ] **S3. INF defaults.** Write the parameter defaults into `Parameters` through `AddReg` so they are visible and editable in the registry. Today they are only defaults in code (the installer writes the preset values).
+- [ ] **S5. Driver Verifier** (standard flags + IRQL checking) on stages 1–3 silently, then on the persistent-mode setup with sound, only with the owner's permission. Afterwards turn Verifier off (`verifier /reset`, reboot) and record the result.
+- [ ] **S6. Go through the report-only CI output** (PSScriptAnalyzer, InfVerif, WDK code analysis) in the Actions log. The first code-analysis triage is the table in `docs/REVIEW_20261028.md` §1.7. Fix the findings in separate PRs, then remove `continue-on-error`.
+- [ ] **S4. Remove the obsolete hardware-MDL path** (`T2AudioCreateSpeakerMdl`, `MdlVariant`, `tools/Test-MdlVariants.ps1`): the WaveRT buffer has lived in system memory for a long time. Only if CI stays green and behaviour does not change.
 
-**Инструменты:**
-- [x] **T1. Выбор канала в `Test-WasapiTone.ps1`** (`-Channel`): сделано 2026-10-28 (Claude), компилируется в CI. На железе не проверено.
-- [x] **T2. `-RawChannels` в агенте вместе с тоном** (`-ToneChannel`, ≥ 1 кГц): сделано 2026-10-28 (Claude). На железе не проверено, это §6.2.
+**Tools:**
+- [x] **T1. Channel selection in `Test-WasapiTone.ps1`** (`-Channel`): done 2026-10-28 (Claude), compiled in CI.
+- [x] **T2. `-RawChannels` in the agent together with the tone** (`-ToneChannel`, ≥ 1 kHz): done 2026-10-28 (Claude).
 
-**Реверс (REA + Ghidra, `docs/REVERSE_PLAN.md`):**
-- [ ] **R4.** Нужен ли `SET_PROPERTY 'nsrt'` перед START_IO.
-- [ ] **R5.** Что такое `'pfta'`, `'ring'`, `'sact'`, `'term'`, `'lcdr'`, `'lcdv'`.
-- [ ] **R6.** Номера каналов в 6-канальной ветке цикла копирования AppleAudio (`0x14000A715`–`0x14000B2C0`): статическое подтверждение раскладки.
-- [ ] **R7.** Как AppleAudio управляет громкостью: msg 28 (`controls`), диапазон и шаги. Нужен для аппаратной громкости.
+**Reverse engineering (REA + Ghidra, `docs/REVERSE_PLAN.md`):**
+- [ ] **R4.** Whether `SET_PROPERTY 'nsrt'` is needed before START_IO.
+- [ ] **R5.** What `'pfta'`, `'ring'`, `'sact'`, `'term'`, `'lcdr'`, `'lcdv'` are.
+- [ ] **R6.** Channel numbers in the 6-channel branch of AppleAudio's copy loop (`0x14000A715`–`0x14000B2C0`): static confirmation of the layout.
+- [ ] **R7.** How AppleAudio controls volume: msg 28 (`controls`), range and steps. Needed for hardware volume.
 
-**Часы (после PASS этапа E, с разрешения владельца на звук):**
-- [ ] **E2. Долгий прогон, 10 минут, `ClockRateTracking=0`** (текущее поведение). Тихая музыка или тон. Посчитать в логе строки `re-aimed` и отметить на слух щелчки и пропуски. Симуляция (`tests/T2AudioPipelineTest.c`) предсказывает при дрейфе ±80 ppm скачок раз в 1–2 минуты. Измерь реальный дрейф: разница шага `sample` (16 640) и интервала между метками в мс.
-- [ ] **E3. Тот же прогон с `Parameters\ClockRateTracking=1`** (dword) и перезапуском устройства. Ожидается:
-  * в логе `T2 clock: rate=… ppb drift=… ppb lead=…`, где drift — реальный дрейф T2 и стабилен;
-  * `lead` держится в пределах 1000 ± 100;
-  * `re-aimed` не больше 1–2 раз в начале.
-  Если `rate` упирается в ±1 000 000 или `lead` уходит, верни 0 и приложи лог.
+**Clock (after Stage E PASSED, with the owner's permission for sound):**
+- [ ] **E2. Long run, 10 minutes, `ClockRateTracking=0`** (current behaviour). Quiet music or a tone. Count the `re-aimed` lines in the log and note clicks and dropouts by ear. Measure the real drift: the difference between the `sample` step (16 640) and the interval between timestamps in ms. (Session #3 measured ~10 ppm: one jump every ~18 min.)
+- [ ] **E3. The same run with `Parameters\ClockRateTracking=1`** (dword) and a device restart. Expected:
+  * log lines `T2 clock: rate=… ppb drift=… ppb lead=…`, where drift is the real T2 drift and stable;
+  * `lead` stays within 1000 ± 100;
+  * `re-aimed` no more than 1–2 times at the start.
+  If `rate` hits ±1 000 000 or `lead` runs away, set it back to 0 and attach the log.
 
-**После PASS этапа E (этапы F/G из README):**
-- [ ] **F1.** Эквалайзер по профилю kaiT2en `dsp/profiles/16_1`. Сначала через Equalizer APO на стерео-точке, без изменения драйвера. Готовая заготовка: `SpeakerDSP-APO` (`bankstown.dll` + `generate_config.py`) в приватном `imacorpoliz/mbp`. Учти, что она рассчитана на 6 каналов, а точка T2 стерео: конфиг надо переделать под стерео.
-- [ ] **F2.** Лимитер/DRC в драйвере: целочисленный, в `T2AudioSpeakerLogic.h` с тестами, вместо грубого `OutputAttenuation`.
-- [ ] **G1.** Аппаратная громкость (после R7).
-- [ ] **G2.** Наушники: события `'jack'`.
-- [ ] **G3.** Микрофон (`0x21 Digital Mic` / `0x44 Codec Input`).
-- [ ] **G4.** Обычный автозапуск без `TestSession` — **только по решению владельца**, после проверки сна/D3 на железе (правило 2 §1 до тех пор действует).
+**After Stage E (stages F/G of the README):**
+- [x] **F1.** Equalizer from the kaiT2en profile `dsp/profiles/16_1`: done in the driver instead of Equalizer APO (`src/T2AudioDsp.h`, `SpeakerDsp=1..4`; level 3 approved by the owner).
+- [x] **F2.** Limiter/DRC in the driver: done (lookahead limiter, compressors; the lookahead version is not yet tested on hardware).
+- [ ] **G1.** Hardware volume (after R7).
+- [ ] **G2.** Headphones: `'jack'` events and the headphone output (`docs/HEADPHONES.md`).
+- [ ] **G3.** Microphone (`0x21 Digital Mic` / `0x44 Codec Input`).
+- [~] **G4.** Autostart without `TestSession`: implemented as the installer's persistent mode with the crash guard; awaiting the hardware test (next run, steps 2–3 and 6).
 
 ---
 
-## 8. Как оформлять работу
+## 8. How to do the work
 
-* Коммиты небольшие, с понятным сообщением: что, зачем, чем проверено.
-* Любая новая арифметика или разбор — в `src/BceProtocolLogic.h` / `src/T2AudioBufferLogic.h` / `src/T2AudioSpeakerLogic.h`, плюс тест в `tests/`. CI должен быть зелёным.
-* Изменение статуса — датированная запись в `docs/CURRENT_STATE.md`. Изменение поведения — обновить `docs/DRIVER_GUIDE.md`.
-* В отчётах различай «проверено на железе (хэш …)», «проверено тестами» и «гипотеза».
+* Small commits with a clear message: what, why, how it was verified.
+* Any new arithmetic or parsing goes into `src/BceProtocolLogic.h` / `src/T2AudioBufferLogic.h` / `src/T2AudioSpeakerLogic.h` / `src/T2AudioDsp.h`, plus a test in `tests/`. CI must be green.
+* A status change is a dated entry in `docs/CURRENT_STATE.md`. A behaviour change updates `docs/DRIVER_GUIDE.md`.
+* All documentation is in English. Quote the owner verbatim (Russian) and add an English translation.
+* In reports, distinguish "verified on hardware (hash …)", "verified by tests" and "hypothesis".

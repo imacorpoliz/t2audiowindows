@@ -1,142 +1,144 @@
-# План реверс-инжиниринга (для Gemini)
+# Reverse-engineering plan (for Gemini)
 
-> Задача — закрыть оставшиеся вопросы о том, как `AppleAudio.sys` и `AppleUSBVHCI.sys` работают с T2. От ответов зависят звук через `START_IO`, аппаратные часы, jack и сон.
-> Сначала прочитай [`analysis/START_IO_BSOD_ROOT_CAUSE.md`](analysis/START_IO_BSOD_ROOT_CAUSE.md): там найденная причина BSOD и адреса, от которых нужно отталкиваться.
+> The goal is to close the remaining questions about how `AppleAudio.sys` and `AppleUSBVHCI.sys` work with the T2. The answers decide sound through `START_IO`, the hardware clock, the jack and sleep.
+> Read [`analysis/START_IO_BSOD_ROOT_CAUSE.md`](analysis/START_IO_BSOD_ROOT_CAUSE.md) first: it has the root cause of the BSOD and the addresses to start from.
+> What is still open for full functionality is summarised in [`ROADMAP.md`](ROADMAP.md) (headphones, microphones, hardware volume, sleep, other models).
 
-## 0. Исходные данные
+## 0. Inputs
 
-| Что | Где |
+| What | Where |
 |---|---|
-| `AppleUSBVHCI.sys` 6.1.7500.5 | приватный репозиторий `imacorpoliz/mbp`: `AppleUSBVHCI-extracted/` (SHA256 `0438292090fc…55c1`) |
+| `AppleUSBVHCI.sys` 6.1.7500.5 | private repository `imacorpoliz/mbp`: `AppleUSBVHCI-extracted/` (SHA256 `0438292090fc…55c1`) |
 | `AppleAudio.sys` + `appleaudio.inf` | `imacorpoliz/mbp`: `MBP-Audio-driver/` (SHA256 `cd8b81fabc9b…a150`) |
-| Прежние дизассемблерные выборки | `imacorpoliz/mbp`: `evidence/traces/` (36 файлов) |
-| Прежние отчёты | этот репозиторий: `docs/analysis/*.md` |
-| Минидампы BSOD | на тестовой машине: `C:\Windows\Minidump\100826-15859-01.dmp`, `100826-23546-01.dmp` |
-| Linux-эталон | [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (`protocol_bce.c`, `audio.c`, `pcm.c`, `timing.h`) |
+| Earlier disassembly excerpts | `imacorpoliz/mbp`: `evidence/traces/` (36 files) |
+| Earlier reports | this repository: `docs/analysis/*.md` |
+| BSOD minidumps | on the test machine: `C:\Windows\Minidump\100826-15859-01.dmp`, `100826-23546-01.dmp` |
+| Linux reference | [kaiT2en/KaiT2en-Fedora](https://github.com/kaiT2en/KaiT2en-Fedora) `modules/t2bce_audio` (`protocol_bce.c`, `audio.c`, `pcm.c`, `timing.h`) |
 
-**Основной инструмент — REA (Reverse Engineer Anything)**, тот же фреймворк, которым сделаны прежние отчёты (`analysis/AppleAudio_Reverse_Engineering_Report.md`). В связке с ним — Ghidra 12.x. Каждую задачу R1–R9 веди через REA: загрузи нужный бинарник, перейди к указанным адресам, получи декомпиляцию, граф вызовов и перекрёстные ссылки. Проекты и выгрузки REA/Ghidra сохраняй только в приватный `imacorpoliz/mbp` (например, `rea/<задача>/`). Вспомогательные инструменты: WinDbg с символами Microsoft (`.symfix; .reload`) — только для минидампов (R1); `objdump -d -M intel` — для быстрой сверки адресов. Адреса ниже — VA при ImageBase `0x140000000` (RVA = VA − `0x140000000`).
+**The main tool is REA (Reverse Engineer Anything)**, the same framework used for the earlier reports (`analysis/AppleAudio_Reverse_Engineering_Report.md`), together with Ghidra 12.x. Run every task R1–R9 through REA: load the binary, go to the given addresses, get the decompilation, the call graph and the cross-references. Keep REA/Ghidra projects and exports only in the private `imacorpoliz/mbp` (e.g. `rea/<task>/`). Auxiliary tools: WinDbg with Microsoft symbols (`.symfix; .reload`), only for the minidumps (R1); `objdump -d -M intel` for quick address checks. Addresses below are VAs with ImageBase `0x140000000` (RVA = VA − `0x140000000`).
 
-## 1. Правила
+## 1. Rules
 
-0. **Никакого воспроизведения звука** (дома спят). Реверс — офлайн-работа с бинарниками и дампами, ей звук не нужен. Не запускай тоны, плееры, `tools/Test-WasapiTone.ps1` и проверки динамиков. Если для задачи нужен прогон на железе — только беззвучный (см. `GEMINI.md`, правило 0).
-
-1. **Бинарники Apple, декомпилированные листинги целиком и проекты Ghidra — только в приватный `imacorpoliz/mbp`.** Публичный `t2audiowindows` получает только отчёты: адреса, короткие (≤ 15 строк) выдержки инструкций, выводы.
-2. Каждый вывод помечай: **доказано** (инструкции/дамп), **вероятно** (косвенно) или **гипотеза**. Указывай адреса.
-3. Отчёт по каждой задаче — `docs/analysis/RE_<тема>.md`. Сводку изменений внеси в `analysis/START_IO_BSOD_ROOT_CAUSE.md` §5 (открытые вопросы) и в `CURRENT_STATE.md`.
-4. Код драйвера по итогам реверса меняй отдельным PR: чистый разборщик в `src/BceProtocolLogic.h` + тест, затем код ядра. Ничего не включай на железе без этапов из `GEMINI.md`.
+0. **No audio playback** unless the owner allows it. Reverse engineering is offline work with binaries and dumps and needs no sound. Do not run tones, players, `tools/Test-WasapiTone.ps1` or speaker checks. If a task needs a hardware run, it must be silent (see `GEMINI.md`, rule 0).
+1. **Apple binaries, whole decompiled listings and Ghidra projects go only into the private `imacorpoliz/mbp`.** The public `t2audiowindows` gets only reports: addresses, short (≤ 15 lines) instruction excerpts, conclusions.
+2. Mark every conclusion as **proven** (instructions/dump), **probable** (indirect) or **hypothesis**. Give addresses.
+3. One report per task: `docs/analysis/RE_<topic>.md`, in English. Put a summary of changes into `analysis/START_IO_BSOD_ROOT_CAUSE.md` §5 (open questions) and into `CURRENT_STATE.md`.
+4. Change the driver code after reverse engineering in a separate PR: a pure parser in `src/BceProtocolLogic.h` + a test, then the kernel code. Enable nothing on hardware without the stages of `GEMINI.md`.
 
 ---
 
-## 2. Задачи (по приоритету)
+## 2. Tasks (by priority)
 
-> **Статус (2026-10-28):** R1–R3 — PR imacorpoliz/t2audiowindows#1 (Gemini, с замечаниями ревью). R4, R5, R8, R9, msg 28 — [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). R6 (часы) и R7 (раскладка динамиков) — [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md), уже в коде (стерео-endpoint, ФВЧ твитеров, коррекция по `UPDATE_TIMESTAMP`). Осталось (не блокирует первый звук): нужен ли `SET_PROPERTY 'nsrt'` перед START_IO; свойства `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`; номера каналов в цикле копирования AppleAudio (подтвердить раскладку статически). `IAdapterPowerManagement` уже в коде (`src/Power.c`).
+> **Status (2026-10-28):** R1–R3: PR imacorpoliz/t2audiowindows#1 (Gemini, with review remarks). R4, R5, R8, R9, msg 28: [`analysis/RE_appleaudio_protocol.md`](analysis/RE_appleaudio_protocol.md). R6 (clock) and R7 (speaker layout): [`analysis/RE_speaker_layout_and_clock.md`](analysis/RE_speaker_layout_and_clock.md), already in the code (stereo endpoint, tweeter HPF, correction from `UPDATE_TIMESTAMP`). Left (does not block sound): whether `SET_PROPERTY 'nsrt'` is needed before START_IO; the properties `'pfta'`/`'ring'`/`'sact'`/`'term'`/`'lcdr'`/`'lcdv'`; channel numbers in AppleAudio's copy loop (static confirmation of the layout); msg 28 (`controls`) value ranges for hardware volume; the input-stream (microphone) path; the headphone stream registration. `IAdapterPowerManagement` is already in the code (`src/Power.c`).
 
-### R1. Подтвердить причину BSOD по минидампам — **первым делом**
+### R1. Confirm the BSOD cause from the minidumps (first)
 
-Гипотеза: AppleUSBVHCI доставляет сообщение bridgeOS через `IOCTL 0x222020` в наш стек, а KS разыменовывает `NULL` FileObject.
+Hypothesis: AppleUSBVHCI delivers a bridgeOS message through `IOCTL 0x222020` into our stack, and KS dereferences a `NULL` FileObject.
 
 ```
 windbg -z C:\Windows\Minidump\100826-23546-01.dmp
 .symfix; .reload
 !analyze -v
-kv                                  ; найти кадр AppleUSBVHCI+0x259a
-.frame /r <номер кадра ks!DispatchDeviceIoControl>
-; IRP — второй аргумент (rdx) у ks!DispatchDeviceIoControl
-!irp <адрес IRP>                    ; ожидается: IRP_MJ_DEVICE_CONTROL, IoControlCode 0x222020, FileObject 0
-!devstack <DeviceObject из IRP>     ; ожидается: ksthunk над T2AudioMiniport над PCI
-db <SystemBuffer> L40               ; ожидается: msg (смещение 0x0D) == 4 (UPDATE_TIMESTAMP)
+kv                                  ; find the AppleUSBVHCI+0x259a frame
+.frame /r <frame number of ks!DispatchDeviceIoControl>
+; the IRP is the second argument (rdx) of ks!DispatchDeviceIoControl
+!irp <IRP address>                  ; expected: IRP_MJ_DEVICE_CONTROL, IoControlCode 0x222020, FileObject 0
+!devstack <DeviceObject from the IRP>   ; expected: ksthunk over T2AudioMiniport over PCI
+db <SystemBuffer> L40               ; expected: msg (offset 0x0D) == 4 (UPDATE_TIMESTAMP)
 ```
 
-В минидампе могут отсутствовать страницы с IRP или буфером. Запиши, что удалось увидеть, а что нет.
+The minidump may lack the pages with the IRP or the buffer. Record what you could see and what you could not.
 
-**Готово, когда:** в `RE_minidump.md` указаны IoControlCode, `FileObject`, стек устройств и (если доступен) `msg` из буфера, либо явно отмечено, что в дампе этого нет.
+**Done when:** `RE_minidump.md` gives the IoControlCode, `FileObject`, the device stack and (if available) `msg` from the buffer, or states explicitly that the dump does not contain them.
 
-### R2. Семантика поля `tag` (первые 4 байта сообщения)
+### R2. Semantics of the `tag` field (first 4 bytes of the message)
 
-Мы отправляем `"Audt"`, AppleAudio — счётчик 1..127 (`FUN_140004a4c`: `*tag = *tag % 0x7F + 1`), kaiT2en — `'S'+3 цифры`.
+We used to send `"Audt"`; AppleAudio sends a counter 1..127 (`FUN_140004a4c`: `*tag = *tag % 0x7F + 1`), kaiT2en `'S'` + 3 digits.
 
-1. В AppleUSBVHCI найди обработчик `IOCTL 0x222018`: поиск по `cmp …, 0x222018` / `0x222018` и таблице диспетчеризации из `AppleUSBVHCI_IOCTL_COMPLETE_ANALYSIS.md`.
-2. Проследи, как используются первые 4 байта входного буфера: индекс в таблицу ожидающих запросов? ключ сопоставления ответа? Есть ли ограничение 1..127 (≤ `0x7F`)?
-3. Найди **всех вызывающих** функцию доставки `0x1400023F0` (`IoGetDeviceInterfaces` → `0x222020`). При каких условиях сообщение уходит в неё: только уведомления/команды от bridgeOS (type 1/3) или ещё и ответы, не сопоставленные с ожидающим запросом?
-4. Что AppleUSBVHCI возвращает в выходной буфер `0x222018` и каким `Information`?
+1. In AppleUSBVHCI find the `IOCTL 0x222018` handler: search for `cmp …, 0x222018` / `0x222018` and the dispatch table from `AppleUSBVHCI_IOCTL_COMPLETE_ANALYSIS.md`.
+2. Trace how the first 4 bytes of the input buffer are used: an index into the pending-request table? a key for matching the reply? Is there a 1..127 (≤ `0x7F`) limit?
+3. Find **all callers** of the delivery function `0x1400023F0` (`IoGetDeviceInterfaces` → `0x222020`). Under which conditions does a message go there: only notifications/commands from bridgeOS (type 1/3), or also replies not matched to a pending request?
+4. What does AppleUSBVHCI return in the `0x222018` output buffer, and with what `Information`?
 
-**Результат:** надо ли нам слать 1..127 вместо `"Audt"` и чем грозит текущее значение. Это определяет изменение `T2AudioSendBceMessage` и сборку заголовка.
+**Result:** whether we must send 1..127 instead of `"Audt"`, and what the old value risks. (Done: the driver now sends 1..127.)
 
-### R3. Нужен ли ответ на `UPDATE_TIMESTAMP`
+### R3. Is a reply to `UPDATE_TIMESTAMP` needed
 
-kaiT2en отвечает `UPDATE_TIMESTAMP_RESPONSE` (msg 34) с тем же тегом. AppleAudio (`0x14000435C`) только сохраняет timestamp и ничего не отправляет.
+kaiT2en replies with `UPDATE_TIMESTAMP_RESPONSE` (msg 34) with the same tag. AppleAudio (`0x14000435C`) only stores the timestamp and sends nothing.
 
-1. В AppleUSBVHCI рядом с вызовом `0x1400023F0` и после него: формирует ли он сам ответ (константа `0x22` = 34 в поле msg по смещению 13)?
-2. В AppleAudio: есть ли где-то запись msg = 34 / вызов `FUN_140004a4c` с ним?
-3. Если ответ не отправляет никто — запиши это. Тогда на железе проверь, продолжают ли приходить отметки (счётчик `VhciTimestampCount` в логе).
+1. In AppleUSBVHCI near and after the call to `0x1400023F0`: does it build the reply itself (constant `0x22` = 34 in the msg field at offset 13)?
+2. In AppleAudio: is msg = 34 written anywhere / passed to `FUN_140004a4c`?
+3. If nobody sends a reply, record that. Then check on hardware whether the timestamps keep arriving (the `VhciTimestampCount` counter in the log).
 
-### R4. Формат `PROPERTY_CHANGED` (msg 13) и jack
+(Done: AppleUSBVHCI replies itself, `RE_update_timestamp.md`; timestamps keep arriving on hardware.)
 
-AppleAudio `0x1400012CC`–`0x140001332`: сравнение `*(u32*)(buf+0x21)` с `'outp'`/`'inpt'`, флаги `[g+0x38]`/`[g+0x39]`, вызов `[0x14000E250]` (определи импорт — вероятно `KeSetEvent`).
+### R4. `PROPERTY_CHANGED` (msg 13) format and the jack
 
-1. Сопоставь смещения с `t2audio_msg_read_property_changed` в kaiT2en (devid, obj, scope/selector/element).
-2. Что сигналится и кто ждёт событие (наушники → переключение endpoint)?
+AppleAudio `0x1400012CC`–`0x140001332`: compares `*(u32*)(buf+0x21)` with `'outp'`/`'inpt'`, flags `[g+0x38]`/`[g+0x39]`, calls `[0x14000E250]` (identify the import, probably `KeSetEvent`).
 
-**Результат:** раскладка сообщения для `src/BceProtocolLogic.h` и описание логики jack.
+1. Match the offsets with `t2audio_msg_read_property_changed` in kaiT2en (devid, obj, scope/selector/element).
+2. What is signalled, and who waits for the event (headphones → endpoint switch)?
 
-### R5. Последовательность инициализации AppleAudio до первого `START_IO`
+**Result:** the message layout for `src/BceProtocolLogic.h` and a description of the jack logic.
 
-1. Перечисли **все** вызовы `FUN_140004a4c` (отправка `0x222018`) в порядке выполнения от `DriverEntry`/StartDevice/создания потока: код msg, device_id, payload.
-2. Особо: есть ли `NOTIFICATION_ALIVE` (100), `SET_REMOTE_ACCESS` (32, с каким mode), `GET_INPUT/OUTPUT_STREAM_LIST`, `SET_PROPERTY` (9), `PROPERTY_LISTENER` (11), `SET_INPUT_STREAM_ADDRESS_RANGES` (18)?
-3. Сравни с нашей последовательностью (`DRIVER_GUIDE.md` §5.3) и kaiT2en (`t2audio_init_cmd`, `t2audio_init_dev`).
+### R5. AppleAudio's initialisation sequence before the first `START_IO`
 
-**Результат:** таблица «AppleAudio / kaiT2en / мы» и список того, чего у нас не хватает.
+1. List **all** calls of `FUN_140004a4c` (the `0x222018` send) in execution order from `DriverEntry`/StartDevice/stream creation: msg code, device_id, payload.
+2. In particular: is there `NOTIFICATION_ALIVE` (100), `SET_REMOTE_ACCESS` (32, with which mode), `GET_INPUT/OUTPUT_STREAM_LIST`, `SET_PROPERTY` (9), `PROPERTY_LISTENER` (11), `SET_INPUT_STREAM_ADDRESS_RANGES` (18)?
+3. Compare with our sequence (`DRIVER_GUIDE.md` §5.3) and kaiT2en (`t2audio_init_cmd`, `t2audio_init_dev`).
 
-### R6. Часы и позиция в AppleAudio
+**Result:** a table "AppleAudio / kaiT2en / us" and a list of what we lack.
 
-AppleAudio сохраняет timestamp в контекст устройства (`+0xE958`, счётчик `+0xE954`).
+### R6. Clock and position in AppleAudio
 
-1. Найди чтения `+0xE958`/`+0xE954`: как из них считается позиция для WaveRT (`GetPosition` / регистр позиции)?
-2. Сопоставь с kaiT2en `t2audio_handle_timestamp` / `t2audio_position_frames` (sampleTime, hostTime, latency).
+AppleAudio stores the timestamp in the device context (`+0xE958`, counter `+0xE954`).
 
-**Результат:** модель часов, которой можно заменить QPC-экстраполяцию в `T2AudioStreamAdvanceLocked`.
+1. Find the reads of `+0xE958`/`+0xE954`: how is the WaveRT position (`GetPosition` / position register) computed from them?
+2. Match with kaiT2en `t2audio_handle_timestamp` / `t2audio_position_frames` (sampleTime, hostTime, latency).
 
-### R7. Формат сэмплов и копирование в AppleAudio
+**Result:** a clock model to replace the QPC extrapolation in `T2AudioStreamAdvanceLocked`. (Done: lead model 1000 ± 500, in the code and proven on hardware.)
 
-Мы сдвигаем 32-битные сэмплы на 8 бит вправо (S24_LE, по `'pft '`). Нужно подтвердить по AppleAudio:
+### R7. Sample format and copying in AppleAudio
 
-1. Найди цикл, который пишет PCM в кольцо BAR0 (или регистрирует свой буфер в `BufferStruct` — `FUN_1400046f8`, `FUN_140001fa4`).
-2. Есть ли там `sar …, 8` / маскирование / перестановка каналов? Какой формат AppleAudio заявляет Windows (стерео PCM16) и как он раскладывает его по 6 каналам T2?
+We shift 32-bit samples right by 8 bits (S24_LE, per `'pft '`). Confirm from AppleAudio:
 
-**Результат:** подтверждение или опровержение `>> 8` и **порядок каналов**, а значит, какой канал какой динамик.
+1. Find the loop that writes PCM into the BAR0 ring (or registers its own buffer in `BufferStruct`: `FUN_1400046f8`, `FUN_140001fa4`).
+2. Is there `sar …, 8` / masking / channel reordering? Which format does AppleAudio declare to Windows (stereo PCM16), and how does it spread it over the 6 T2 channels?
 
-### R8. Питание
+**Result:** confirmation or refutation of `>> 8` and the **channel order**, i.e. which channel is which speaker. (The `>> 8` and the layout are consistent with hardware listening; the static confirmation is still open.)
 
-1. Обработчики `IRP_MJ_POWER` / `IAdapterPowerManagement` в AppleAudio: что делается при переходе в D3 и обратно? Есть ли запись sleep marker `0x19770525` в GPR `+0x10`, `SET_REMOTE_ACCESS(OFF/ON)`, повторная регистрация буферов?
-2. Сравни с kaiT2en `t2audio_quiesce`, `t2audio_suspend`, `t2audio_reset_buffers`.
+### R8. Power
 
-### R9. Выбор получателя `0x222020` и сосуществование
+1. The `IRP_MJ_POWER` / `IAdapterPowerManagement` handlers in AppleAudio: what happens on the transition to D3 and back? Is the sleep marker `0x19770525` written into GPR `+0x10`, `SET_REMOTE_ACCESS(OFF/ON)`, are the buffers re-registered?
+2. Compare with kaiT2en `t2audio_quiesce`, `t2audio_suspend`, `t2audio_reset_buffers`.
 
-1. Аргументы `IoGetDeviceInterfaces` в `0x140002477` (флаги: только включённые интерфейсы?).
-2. Перечисляет ли AppleUSBVHCI интерфейсы на **каждое** сообщение или кэширует указатель? (Важно для частоты `UPDATE_TIMESTAMP`.)
-3. Что будет, если в системе есть и наш, и AppleAudio интерфейс?
+### R9. Choice of the `0x222020` receiver and coexistence
+
+1. The arguments of `IoGetDeviceInterfaces` at `0x140002477` (flags: enabled interfaces only?).
+2. Does AppleUSBVHCI enumerate the interfaces on **every** message or cache the pointer? (Matters for the `UPDATE_TIMESTAMP` rate.)
+3. What happens if both our interface and AppleAudio's exist in the system?
 
 ---
 
-## 3. После реверса: проверка на железе (только с одобрения владельца)
+## 3. After reverse engineering: hardware check (only with the owner's approval)
 
-Исправление R1 уже в коде (`T2AudioDeviceControl` в `src/Driver.c`). Агент `tools/T2Audio-TestAgent.ps1` принимает `-BceIo` только вместе с `-Mmio` и флагом владельца `-OwnerApprovedBceIo`. Запускать можно только когда выполнено всё:
+(Historical: done in Stage D.) The R1 fix is in the code (`T2AudioDeviceControl` in `src/Driver.c`). The agent `tools/T2Audio-TestAgent.ps1` accepts `-BceIo` only together with `-Mmio` and the owner flag `-OwnerApprovedBceIo`. A run is allowed only when all of the following hold:
 
-1. R1 подтверждает гипотезу (или дамп хотя бы не противоречит ей).
-2. R2 и R3 не выявили дополнительного обязательного шага (смена тега, ответ на timestamp). Если выявили — он реализован и покрыт тестами.
-3. Стадии 1–3 и стадия 5 без `-BceIo` прошли по `GEMINI.md`.
-4. **Владелец проекта явно разрешил** прогон `-Mmio -BceIo -OwnerApprovedBceIo` (`-Mmio` обязателен: без него кольцо не обнуляется, и после START_IO T2 сыграл бы остатки буфера).
+1. R1 confirms the hypothesis (or the dump at least does not contradict it).
+2. R2 and R3 found no additional mandatory step (tag change, timestamp reply). If they did, it is implemented and covered by tests.
+3. Stages 1–3 and stage 5 without `-BceIo` passed per `GEMINI.md`.
+4. **The project owner explicitly allowed** the `-Mmio -BceIo -OwnerApprovedBceIo` run (`-Mmio` is mandatory: without it the ring is not zeroed, and after START_IO the T2 would play the buffer's leftovers).
 
-Прогон — **беззвучный**: Mute и громкость 0, без тона и плееров. Для проверки причины BSOD звук не нужен — достаточно, чтобы `START_IO` прошёл и пришли отметки времени.
+The run is **silent**: Mute and volume 0, no tone or players. Checking the BSOD cause needs no sound; it is enough that `START_IO` succeeds and timestamps arrive.
 
-Ожидаемое в логе при первом `START_IO`:
+Expected in the log at the first `START_IO`:
 
 ```
 T2Audio: START_IO sent to device 0x39
 T2Audio: VHCI UPDATE_TIMESTAMP #1 dev=0x39 t2=… seed=… sample=…
-T2Audio: T2 clock: re-aimed lead by … frames (#1, …)   # допустимо несколько раз в начале
+T2Audio: T2 clock: re-aimed lead by … frames (#1, …)   # a few times at the start is acceptable
 ```
 
-Ожидается: метки примерно раз в 347 мс (один круг кольца, 16 640 кадров), `sample` растёт на один и тот же шаг (запиши его — это `timestampPeriod`).
+Expected: timestamps about every 347 ms (one ring revolution, 16 640 frames), `sample` growing by the same step each time (record it: that is `timestampPeriod`),
 
-и **никакого** BSOD. После прогона: `-Mode Recover`, проверка AppleAudio, отчёт в `docs/logs/EXCERPT_*.md` и `CURRENT_STATE.md`.
+and **no** BSOD. After the run: `-Mode Recover`, check AppleAudio, report in `docs/logs/EXCERPT_*.md` and `CURRENT_STATE.md`.

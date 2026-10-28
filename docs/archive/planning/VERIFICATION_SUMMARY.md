@@ -1,97 +1,99 @@
-# Итоговая сводка: Повторная независимая проверка AppleAudio.sys
+# Final summary: independent re-verification of AppleAudio.sys
 
-**Дата**: 2026-10-04  
-**Задача**: Исправление ошибок RVA→offset преобразования, полное сканирование исполняемых секций, трассировка MmMapIoSpaceEx usage
+**Date**: 2026-10-04  
+**Task**: fix the RVA→offset conversion errors, scan all executable sections, trace the MmMapIoSpaceEx usage
+
+> Archived. The PCM write path that this document could not find is AppleAudio's copy loop `0x14000A715`–`0x14000B2C0` (`docs/analysis/RE_appleaudio_protocol.md` §3). The recommended option 2 (a new kernel driver) is T2AudioPort.
 
 ---
 
-## Исправленные ошибки предыдущего анализа
+## Errors in the previous analysis, fixed
 
-### 1. RVA → file offset преобразование
+### 1. RVA → file offset conversion
 
-**Ошибка**: Применение единого смещения 0xC00 (разница .text RVA/raw) ко всем секциям.
+**Error**: a single offset of 0xC00 (the .text RVA/raw difference) was applied to every section.
 
-**Исправление**: Индивидуальные смещения по таблице секций PE:
+**Fix**: per-section offsets from the PE section table:
 ```
 .text: RVA 0x1000, raw 0x400      → offset = RVA - 0x1000 + 0x400
 PAGE:  RVA 0x16000, raw 0x13600   → offset = RVA - 0x16000 + 0x13600
 INIT:  RVA 0x1E000, raw 0x1A800   → offset = RVA - 0x1E000 + 0x1A800
 ```
 
-**Последствие**: Неверный RVA 0x171F4 (из предыдущего отчёта) на самом деле был file offset 0x165F4, соответствующий RVA 0x18FF4 в секции PAGE — не там, где находятся вызовы.
+**Consequence**: the wrong RVA 0x171F4 (from the previous report) was really file offset 0x165F4, i.e. RVA 0x18FF4 in the PAGE section, not where the calls are.
 
-### 2. Неполное сканирование секций
+### 2. Incomplete section scan
 
-**Ошибка**: Поиск только в секции .text (RVA 0x1000-0x15xxx).
+**Error**: only the .text section was searched (RVA 0x1000-0x15xxx).
 
-**Исправление**: Полное сканирование всех секций с флагом IMAGE_SCN_MEM_EXECUTE:
+**Fix**: a full scan of every section with the IMAGE_SCN_MEM_EXECUTE flag:
 - .text: 0x1000–0x15608 (executable)
 - PAGE: 0x16000–0x1D478 (executable)
 - INIT: 0x1E000–0x1E360 (executable)
 
-**Результат**: Найдены 2 вызова MmMapIoSpaceEx в секции **PAGE**, не в .text.
+**Result**: 2 MmMapIoSpaceEx calls found in the **PAGE** section, not in .text.
 
-### 3. Проверка реальных байтов
+### 3. Checking the real bytes
 
-**Ошибка**: Подстановка ожидаемых байтов в отчёт без проверки.
+**Error**: expected bytes were put into the report without checking.
 
-**Исправление**: Прямое чтение файла по вычисленным file offsets.
+**Fix**: the file is read directly at the computed file offsets.
 
 ---
 
-## Подтверждённые находки
+## Confirmed findings
 
-### MmMapIoSpaceEx вызовы
+### MmMapIoSpaceEx calls
 
-| RVA     | File Offset | Байты               | Инструкция                 | IAT Slot | Import Function   |
+| RVA     | File Offset | Bytes               | Instruction                | IAT Slot | Import Function   |
 |---------|-------------|---------------------|----------------------------|----------|-------------------|
 | 0x17204 | 0x14804     | `FF 15 4E 6E FF FF` | `call qword ptr [rip-0x91B2]` | 0xE058   | MmMapIoSpaceEx    |
 | 0x1721C | 0x1481C     | `FF 15 36 6E FF FF` | `call qword ptr [rip-0x91CA]` | 0xE058   | MmMapIoSpaceEx    |
 
-**Функция**: 0x16FF0–0x172FE (device initialization)  
-**Секция**: PAGE (не .text)  
-**Проверка**: Независимый дизассемблер (capstone) подтверждает оба вызова
+**Function**: 0x16FF0–0x172FE (device initialisation)  
+**Section**: PAGE (not .text)  
+**Check**: an independent disassembler (capstone) confirms both calls
 
-### Функция 0x16FF0: Device Initialization
+### Function 0x16FF0: device initialisation
 
-**Назначение**: EvtDevicePrepareHardware callback — инициализация T2 аппаратных ресурсов
+**Purpose**: the EvtDevicePrepareHardware callback, initialising the T2 hardware resources
 
-**Логика**:
-1. Получение WDF resource list (CM_RESOURCE_LIST) через vtable callback
-2. Итерация по ресурсам с фильтрацией по типу 3 (CmResourceTypeMemory)
-3. **Первый memory-ресурс**:
+**Logic**:
+1. Gets the WDF resource list (CM_RESOURCE_LIST) through a vtable callback
+2. Iterates over the resources, filtering type 3 (CmResourceTypeMemory)
+3. **First memory resource**:
    - `MmMapIoSpaceEx(physical_address1, size1, PAGE_CACHE_TYPE=0x404)`
    - Cache type: MmCached | MmWriteCombined
-   - Результат сохраняется в `[rbx+0x68]`
-4. **Второй memory-ресурс**:
+   - The result is stored in `[rbx+0x68]`
+4. **Second memory resource**:
    - `MmMapIoSpaceEx(physical_address2, size2, PAGE_CACHE_TYPE=0x204)`
    - Cache type: MmNonCached | MmWriteCombined
-   - Результат сохраняется в `[rbx+0x70]`
-5. Обнуление полей при ошибке (0x171A5, 0x171AC)
-6. Копирование mapped-адресов в глобальный объект:
+   - The result is stored in `[rbx+0x70]`
+5. The fields are zeroed on error (0x171A5, 0x171AC)
+6. The mapped addresses are copied into the global object:
    - `[global_0x14690 + 0x28]` = `[rbx+0x68]` (BAR1)
    - `[global_0x14690 + 0x30]` = `[rbx+0x70] + 0xC000` (BAR2+0xC000)
 
-**Объект RBX**: Device context structure (параметр rcx на входе в функцию)
+**The RBX object**: the device context structure (the rcx parameter on entry)
 
-**Физические адреса**: Из PCI BAR ресурсов, предоставленных PnP manager
+**Physical addresses**: from the PCI BAR resources provided by the PnP manager
 
 ### Global Object 0x14690
 
-**Расположение**: .data section, RVA 0x14690  
-**Назначение**: Хранилище аппаратных указателей для T2 доступа
+**Location**: .data section, RVA 0x14690  
+**Purpose**: storage for the hardware pointers used to access the T2
 
-**Ключевые поля**:
-- `+0x28` (offset 0x146B8): Mapped BAR1 base (T2 buffer memory region)
-- `+0x30` (offset 0x146C0): Mapped BAR2+0xC000 (GPR registers region)
+**Key fields**:
+- `+0x28` (offset 0x146B8): mapped BAR1 base (T2 buffer memory region)
+- `+0x30` (offset 0x146C0): mapped BAR2+0xC000 (GPR register region)
 
-**Использование**: 347 code locations читают эти поля для доступа к T2 hardware
+**Usage**: 347 code locations read these fields to access the T2 hardware
 
-### Сопоставление с Linux KAIT2EN
+### Mapping to Linux KAIT2EN
 
 #### Hardware Layout
 
-| Linux (KAIT2EN)           | Windows (AppleAudio.sys)        | Назначение                  |
+| Linux (KAIT2EN)           | Windows (AppleAudio.sys)        | Purpose                     |
 |---------------------------|---------------------------------|-----------------------------|
 | `pci_resource_start(dev, 0)` | First CM_RESOURCE (type=Memory) | Physical address BAR0/BAR1  |
 | `pci_iomap(dev, 0, 0)`    | `MmMapIoSpaceEx(phys1, size1, 0x404)` | Map BAR1 (cached)           |
@@ -107,15 +109,15 @@ INIT:  RVA 0x1E000, raw 0x1A800   → offset = RVA - 0x1E000 + 0x1A800
 | +0x04  | signature           | `[rax+4]` == 0x19870423             | Magic signature (T2AUDIO_SIG) |
 | +0x08  | bs_offset           | `[rax+8]`                           | BufferStruct offset (relative to BAR1) |
 
-**Различие версий**: Linux требует version >= 3, Windows >= 2.
+**Version difference**: Linux requires version >= 3, Windows >= 2.
 
 #### BufferStruct Layout
 
 **Signature**: 0x19870423 (T2AUDIO_SIG)  
-**Location**: BAR1 + offset (из GPR[2])  
-**Device entry stride**: 0xBDEC (48620 bytes) — **совпадает точно**
+**Location**: BAR1 + offset (from GPR[2])  
+**Device entry stride**: 0xBDEC (48620 bytes), **an exact match**
 
-**Структура** (из Linux audio.h, совпадает с Windows):
+**Structure** (from Linux audio.h, matches Windows):
 ```c
 struct t2audio_buffer_struct {
     u32 version;                    // +0x00
@@ -147,7 +149,7 @@ struct buffer {
 };  // sizeof = 0x30 (48 bytes)
 ```
 
-**Функция 0x4700** (Windows) читает эту структуру для получения device metadata.
+**Function 0x4700** (Windows) reads this structure to get the device metadata.
 
 #### PCM Buffer Access (Linux)
 
@@ -160,182 +162,182 @@ strm->buffers[i].size = bs_strm->buffers[i].size;
 substream->runtime->dma_area = astream->buffers[0].ptr;  // Zero-copy!
 ```
 
-**Механизм**: ALSA напрямую пишет в mapped BAR1 память. T2 читает из своей памяти (shared memory, не DMA transfer).
+**Mechanism**: ALSA writes directly into the mapped BAR1 memory. The T2 reads from its own memory (shared memory, not a DMA transfer).
 
 #### PCM Buffer Access (Windows)
 
-**НЕ НАЙДЕНО** статическим анализом.
+**NOT FOUND** by static analysis.
 
-**Гипотеза**: Один из 347 consumers глобального объекта выполняет:
+**Hypothesis**: one of the 347 consumers of the global object does:
 ```c
 void* bar1_base = global->bar1_mapped;  // [global+0x28]
-size_t buffer_offset = /* из BufferStruct.devices[i].output_streams[j].buffers[k].address */;
+size_t buffer_offset = /* from BufferStruct.devices[i].output_streams[j].buffers[k].address */;
 void* pcm_buffer = (u8*)bar1_base + buffer_offset;
-memcpy(pcm_buffer, audio_samples, size);  // или write-combining stores
+memcpy(pcm_buffer, audio_samples, size);  // or write-combining stores
 ```
 
-**Альтернатива**: PortCls framework абстрагирует доступ, либо используется WaveRT shared memory mode.
+**Alternative**: the PortCls framework abstracts the access, or WaveRT shared memory mode is used.
 
 ---
 
-## Воспроизводимые артефакты
+## Reproducible artefacts
 
 ### 1. Verify_RVA.ps1
 
-**Назначение**: Независимая проверка PE-структуры, RVA→offset преобразования, сканирование вызовов
+**Purpose**: independent check of the PE structure, the RVA→offset conversion, the call scan
 
-**Функции**:
-- PE-парсер (DOS header, NT headers, section table)
-- IAT-парсер (import directory, function names)
-- Полное сканирование исполняемых секций (IMAGE_SCN_MEM_EXECUTE)
-- Поиск паттерна `FF 15` (call [rip+offset]) с разрешением IAT slots
-- Вывод реальных байтов по file offsets без подстановки ожидаемых значений
+**Features**:
+- PE parser (DOS header, NT headers, section table)
+- IAT parser (import directory, function names)
+- Full scan of the executable sections (IMAGE_SCN_MEM_EXECUTE)
+- Search for the `FF 15` pattern (call [rip+offset]) with IAT slot resolution
+- Prints the real bytes at the file offsets, never substituting expected values
 
-**Результат**: Подтверждены 2 вызова MmMapIoSpaceEx на RVA 0x17204/0x1721C (file offsets 0x14804/0x1481C).
+**Result**: 2 MmMapIoSpaceEx calls confirmed at RVA 0x17204/0x1721C (file offsets 0x14804/0x1481C).
 
 ### 2. disasm2.py
 
-**Назначение**: Независимый дизассемблер и xref-анализатор
+**Purpose**: an independent disassembler and xref analyser
 
-**Функции**:
-- Capstone disassembler для всех исполняемых секций
-- Распознавание call/jmp через IAT
-- RIP-relative address resolution (LEA, MOV с [rip+disp])
-- Field access scanner (поиск обращений к смещениям +0x68/+0x70)
-- Функция разметка по .pdata (exception directory)
+**Features**:
+- Capstone disassembler for all executable sections
+- Recognising call/jmp through the IAT
+- RIP-relative address resolution (LEA, MOV with [rip+disp])
+- A field access scanner (accesses to offsets +0x68/+0x70)
+- Function boundaries from .pdata (exception directory)
 
-**Результат**:
-- Подтверждены вызовы MmMapIoSpaceEx
-- Найдено 80+ обращений к полям +0x68/+0x70 (отфильтрованы RSP-relative, оставлены объектные)
-- Дизассемблирована функция 0x16FF0 полностью
+**Result**:
+- MmMapIoSpaceEx calls confirmed
+- 80+ accesses to fields +0x68/+0x70 found (RSP-relative ones filtered out, object ones kept)
+- Function 0x16FF0 disassembled completely
 
 ### 3. fields.txt
 
-**Назначение**: Список всех обращений к полям +0x68/+0x70 с контекстом
+**Purpose**: a list of every access to fields +0x68/+0x70 with context
 
-**Формат**: `RVA [секция] инструкция ; комментарий (функция)`
+**Format**: `RVA [section] instruction ; comment (function)`
 
-**Использование**: Фильтрация по non-RSP обращениям для трассировки объектов
-
----
-
-## Статус выполнения задач
-
-### ✓ Выполнено
-
-1. **Исправлено RVA→offset преобразование** по таблице секций PE
-2. **Проверены реальные байты** на file offsets 0x14804/0x1481C
-3. **Просканированы все исполняемые секции** (.text, PAGE, INIT)
-4. **Подтверждены 2 вызова MmMapIoSpaceEx** независимым дизассемблером
-5. **Разобрана функция 0x16FF0** (device init, BAR mapping, global object setup)
-6. **Прослежены поля +0x68/+0x70** до глобального объекта 0x14690
-7. **Найдена функция 0x4700** (BufferStruct metadata reader)
-8. **Сопоставлены структуры с Linux KAIT2EN** (полная таблица соответствия)
-9. **Обновлены отчёты** с удалением опровергнутых утверждений
-
-### ⚠ Частично выполнено
-
-10. **Трассировка полей +0x68/+0x70** до работы с буферами:
-    - ✓ Найдена запись в глобальный объект (функция 0x45F0)
-    - ✓ Найдена функция чтения метаданных (0x4700)
-    - ✗ НЕ НАЙДЕНА функция записи PCM-сэмплов
-    - Причина: требуется анализ всех 347 consumers глобального объекта
-
-### ✗ Не выполнено (вне scope статического анализа)
-
-11. **Подтверждение вызовов независимым дизассемблером runtime**:
-    - Выполнено статически (capstone), но не в runtime (WinDbg)
-    - Требует kernel debugging на реальном hardware
-
-12. **Трассировка до actual PCM buffer write**:
-    - Механизм не найден статическим анализом
-    - Требует runtime breakpoints или анализ PortCls callbacks
+**Use**: filtering non-RSP accesses to trace objects
 
 ---
 
-## Практические рекомендации
+## Task status
 
-### Для исследования PCM write path
+### ✓ Done
 
-**Вариант 1: Продолжить статический анализ** (40+ часов)
-- Проанализировать все 347 consumers глобального объекта 0x14690
-- Найти функцию, читающую BufferStruct.devices[].output_streams[].buffers[] offsets
-- Идентифицировать pointer arithmetic: `[global+0x28] + buffer_offset`
-- Найти memcpy/write loop в computed address
+1. **RVA→offset conversion fixed** using the PE section table
+2. **Real bytes checked** at file offsets 0x14804/0x1481C
+3. **All executable sections scanned** (.text, PAGE, INIT)
+4. **2 MmMapIoSpaceEx calls confirmed** by an independent disassembler
+5. **Function 0x16FF0 analysed** (device init, BAR mapping, global object setup)
+6. **Fields +0x68/+0x70 traced** to the global object 0x14690
+7. **Function 0x4700 found** (BufferStruct metadata reader)
+8. **Structures mapped to Linux KAIT2EN** (full mapping table)
+9. **Reports updated**, refuted claims removed
 
-**Вариант 2: Runtime debugging** (10-20 часов, требует hardware)
-- WinDbg kernel debugging на MacBook Pro с Windows
-- Breakpoint на read access: `ba r8 AppleAudio!global_object+0x28`
-- Trigger audio playback, захватить callstack
+### ⚠ Partly done
+
+10. **Tracing fields +0x68/+0x70** to the buffer work:
+    - ✓ The write into the global object found (function 0x45F0)
+    - ✓ The metadata reading function found (0x4700)
+    - ✗ The function writing PCM samples NOT FOUND
+    - Reason: needs analysis of all 347 consumers of the global object
+
+### ✗ Not done (outside the scope of static analysis)
+
+11. **Confirming the calls with an independent runtime disassembler**:
+    - Done statically (capstone), not at runtime (WinDbg)
+    - Needs kernel debugging on real hardware
+
+12. **Tracing to the actual PCM buffer write**:
+    - The mechanism was not found by static analysis
+    - Needs runtime breakpoints or analysis of the PortCls callbacks
+
+---
+
+## Practical recommendations
+
+### To investigate the PCM write path
+
+**Option 1: continue static analysis** (40+ hours)
+- Analyse all 347 consumers of the global object 0x14690
+- Find the function reading the BufferStruct.devices[].output_streams[].buffers[] offsets
+- Identify the pointer arithmetic: `[global+0x28] + buffer_offset`
+- Find the memcpy/write loop at the computed address
+
+**Option 2: runtime debugging** (10-20 hours, needs hardware)
+- WinDbg kernel debugging on the MacBook Pro running Windows
+- A breakpoint on read access: `ba r8 AppleAudio!global_object+0x28`
+- Trigger audio playback, capture the call stack
 - Monitor memory writes: `ba w4 <BAR1_phys>+<offset>`
 
-**Вариант 3: Портировать Linux logic** (40-60 часов, рекомендуется)
-- Использовать проверенные структуры из KAIT2EN
-- Написать minimal WaveRT driver с прямым mapped memory access
-- Начать с read-only операций (enumerate, validate)
-- Постепенно добавить PCM write по Linux-логике
+**Option 3: port the Linux logic** (40-60 hours, recommended)
+- Use the proven structures from KAIT2EN
+- Write a minimal WaveRT driver with direct mapped memory access
+- Start with read-only operations (enumerate, validate)
+- Gradually add the PCM write following the Linux logic
 
-### Для получения 6-channel audio
+### To get 6-channel audio
 
-**Блокеры**:
-- AppleAudio.sys WaveSpeaker заблокирован на stereo (Win32 error 1169)
-- PCM write mechanism не найден для bypass
+**Blockers**:
+- AppleAudio.sys WaveSpeaker is locked to stereo (Win32 error 1169)
+- No PCM write mechanism found to bypass it
 
-**Опции**:
-1. **Reverse engineer AppleAudio.sys stereo limitation** и пропатчить
-2. **Написать новый kernel driver** на базе Linux KAIT2EN logic
-3. **Использовать существующий interface** через audio mixing (software upmix stereo→6ch)
+**Options**:
+1. **Reverse engineer the AppleAudio.sys stereo limitation** and patch it
+2. **Write a new kernel driver** based on the Linux KAIT2EN logic
+3. **Use the existing interface** with audio mixing (software upmix stereo→6ch)
 
-**Рекомендация**: Вариант 2 (новый driver) — наименьший risk, полный контроль, проверенная логика.
-
----
-
-## Финальные выводы
-
-### Что известно точно
-
-1. **T2 Hardware Access**: AppleAudio.sys использует MmMapIoSpaceEx для mapping PCI BAR ресурсов
-2. **BAR Layout**: BAR1 (buffer memory) + BAR4+0xC000 (GPR registers)
-3. **BufferStruct Protocol**: Signature 0x19870423, device stride 0xBDEC, layout идентичен Linux
-4. **Global Object**: 0x14690 хранит mapped pointers, используется из 347 locations
-5. **Metadata Reading**: Функция 0x4700 читает device names и buffer offsets
-6. **Message Path**: IOCTL 0x222018 для T2 protocol commands (полностью traced)
-
-### Что неизвестно (blocking)
-
-1. **PCM Write Function**: Функция, копирующая audio samples в BAR1 + buffer_offset
-2. **WaveSpeaker → T2 Link**: Как PortCls callbacks связаны с BufferStruct stream buffers
-3. **BufferStruct Parser**: Функция, извлекающая buffer offsets из devices[].output_streams[]
-4. **Stereo Bypass**: Можно ли отправить 6ch напрямую через T2 без AppleAudio.sys
-
-### Качество доказательств
-
-- **Hardware access mechanism**: ★★★★★ (байты проверены, дизассемблер подтверждён, Linux-совпадение)
-- **BufferStruct layout**: ★★★★★ (Linux source code, Windows metadata reader найден)
-- **PCM write path**: ★☆☆☆☆ (hypothesis only, статический анализ не нашёл)
-
-### Итоговая оценка выполнения
-
-**Исходное задание**: Исправить преобразование RVA→offset, полное сканирование секций, independent verification, трассировка полей до буферов.
-
-**Результат**: 
-- ✓ RVA→offset исправлено и проверено
-- ✓ Полное сканирование выполнено (все EXEC-секции)
-- ✓ Independent verification выполнен (capstone, PowerShell PE parser)
-- ⚠ Трассировка до буферов частична (metadata reader найден, PCM writer нет)
-
-**Оценка**: **8/10** — все технические ошибки исправлены, hardware access полностью traced, PCM write path требует дополнительного анализа (runtime или deeper static analysis).
+**Recommendation**: option 2 (a new driver): the lowest risk, full control, proven logic.
 
 ---
 
-## Файлы отчётов
+## Final conclusions
 
-1. **VERIFICATION_SUMMARY.md** (этот файл) — краткая сводка
-2. **FINAL_REANALYSIS_REPORT.md** — полный разбор функции 0x16FF0 и MmMapIoSpaceEx
-3. **Linux_Windows_Structure_Mapping.md** — таблица соответствия Linux↔Windows, implementation strategy
-4. **BUFFER_PATH_ANALYSIS.md** — обновлённый анализ с исправлениями
-5. **Verify_RVA.ps1** — воспроизводимый скрипт проверки
-6. **disasm2.py** — независимый дизассемблер
-7. **fields.txt** — список обращений к полям +0x68/+0x70
+### What is known for certain
 
-Все отчёты обновлены с удалением противоречащих версий и опровергнутых утверждений.
+1. **T2 hardware access**: AppleAudio.sys uses MmMapIoSpaceEx to map the PCI BAR resources
+2. **BAR layout**: BAR1 (buffer memory) + BAR4+0xC000 (GPR registers)
+3. **BufferStruct protocol**: signature 0x19870423, device stride 0xBDEC, layout identical to Linux
+4. **Global object**: 0x14690 holds the mapped pointers, used from 347 locations
+5. **Metadata reading**: function 0x4700 reads the device names and buffer offsets
+6. **Message path**: IOCTL 0x222018 for T2 protocol commands (fully traced)
+
+### What is unknown (blocking)
+
+1. **PCM write function**: the function copying audio samples into BAR1 + buffer_offset
+2. **WaveSpeaker → T2 link**: how the PortCls callbacks are tied to the BufferStruct stream buffers
+3. **BufferStruct parser**: the function extracting buffer offsets from devices[].output_streams[]
+4. **Stereo bypass**: whether 6ch can be sent directly through the T2 without AppleAudio.sys
+
+### Quality of the evidence
+
+- **Hardware access mechanism**: ★★★★★ (bytes checked, disassembler confirmed, matches Linux)
+- **BufferStruct layout**: ★★★★★ (Linux source code, Windows metadata reader found)
+- **PCM write path**: ★☆☆☆☆ (hypothesis only, static analysis did not find it)
+
+### Overall assessment
+
+**Original task**: fix the RVA→offset conversion, full section scan, independent verification, trace the fields to the buffers.
+
+**Result**: 
+- ✓ RVA→offset fixed and checked
+- ✓ Full scan done (all EXEC sections)
+- ✓ Independent verification done (capstone, PowerShell PE parser)
+- ⚠ Tracing to the buffers is partial (metadata reader found, PCM writer not)
+
+**Score**: **8/10**: all technical errors fixed, hardware access fully traced; the PCM write path needs more analysis (runtime or deeper static analysis).
+
+---
+
+## Report files
+
+1. **VERIFICATION_SUMMARY.md** (this file): short summary
+2. **FINAL_REANALYSIS_REPORT.md**: full analysis of function 0x16FF0 and MmMapIoSpaceEx
+3. **Linux_Windows_Structure_Mapping.md**: the Linux↔Windows mapping table, implementation strategy
+4. **BUFFER_PATH_ANALYSIS.md**: the updated analysis with corrections
+5. **Verify_RVA.ps1**: a reproducible check script
+6. **disasm2.py**: an independent disassembler
+7. **fields.txt**: the list of accesses to fields +0x68/+0x70
+
+All reports were updated, removing contradicting versions and refuted claims.
