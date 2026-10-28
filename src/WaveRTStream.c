@@ -79,6 +79,9 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // (DSP included), in microseconds; measured at DISPATCH_LEVEL under the
     // hardware lock, so it is also how long that lock was held for the copy.
     ULONG MaxCopyUs;
+    // Frames written as silence because the headphones were plugged in
+    // (HeadphoneAutoMute), per run.
+    ULONG64 JackMutedFrames;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
     // Speaker DSP state (context->SpeakerDsp); reset with SpeakerState.
@@ -330,6 +333,17 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         T2AudioStreamFollowT2ClockLocked(instance, context, hwBufferBase,
                                          hwFrames, frame, playFrame,
                                          (ULONG64)qpc.QuadPart);
+
+        // Parameters\HeadphoneAutoMute: while the headphone jack reads plugged
+        // in (JackEvents keeps it current), the speakers get silence. The
+        // cursors keep moving, so playback resumes in sync on unplug.
+        if (context->HeadphoneAutoMute && context->HeadphoneJackPlugged != 0) {
+            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames,
+                                        frame + instance->DestOffset, remainingFrames);
+            instance->JackMutedFrames += remainingFrames;
+            frame += remainingFrames;
+            remainingFrames = 0;
+        }
 
         while (remainingFrames > 0) {
             ULONG srcOffset = 0;
@@ -748,6 +762,7 @@ T2AudioStreamSetState(
                 instance->CopyGapsOverLead = 0;
                 instance->SkipEvents = 0;
                 instance->MaxCopyUs = 0;
+                instance->JackMutedFrames = 0;
                 instance->ClockCorrections = 0;
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
                                                       (ULONG64)qpcFreq.QuadPart);
@@ -789,13 +804,14 @@ T2AudioStreamSetState(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu autoGainDb10=%I64d\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu autoGainDb10=%I64d jackMutedFrames=%I64u\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
                  instance->CopyGapsOverLead, instance->SkipEvents, instance->MaxCopyUs,
                  instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames,
                  // autogain at the end of the run, tenths of a dB (Q16 log2 * 6.02)
-                 instance->Dsp.AgcLog * 602 / 65536));
+                 instance->Dsp.AgcLog * 602 / 65536,
+                 instance->JackMutedFrames));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 
@@ -1034,7 +1050,11 @@ T2AudioStreamGetHWLatency(
         // The copy writes each frame about T2AUDIO_LEAD_FRAMES ahead of the
         // T2 read position in the hardware ring, which acts as the FIFO. The codec delay is
         // the stream + device output latency the T2 reports ('ltnc'), in
-        // 100 ns units.
+        // 100 ns units, plus the DSP limiter's lookahead on the DSP path.
+        if (instance->DeviceContext != NULL && instance->DeviceContext->SpeakerDsp != 0 &&
+            instance->Channels == 2) {
+            latencyFrames += T2DSP_LOOKAHEAD;
+        }
         Latency->FifoSize = T2AUDIO_LEAD_FRAMES * instance->BytesPerFrame;
         Latency->ChipsetDelay = 0;
         Latency->CodecDelay = (instance->SampleRate != 0)

@@ -293,6 +293,7 @@ T2AudioMapResources(
         goto Exit;
     }
 
+    Context->BufferStructDevices = numDevices;
     status = T2AudioFindSpeakerBuffer(Context->BufferStruct,
                                       Context->Bar1Size,
                                       numDevices,
@@ -417,4 +418,63 @@ T2AudioFindSpeakerBuffer(
     KdPrint(("T2Audio: FindSpeaker FAIL_L: Speaker device not found among %u devices\n",
              NumDevices));
     return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+// Parameters\ExtendedProbe: log every device of the BufferStruct table (name,
+// stream counts, the first buffers of each stream). Read-only; the device
+// count is the one MapResources validated against the mapped size, and the
+// stream/buffer counts are clamped to the table limits before indexing.
+VOID
+T2AudioLogBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG index;
+
+    PAGED_CODE();
+
+    if (Context == NULL || Context->BufferStruct == NULL || !Context->HardwareReady) {
+        return;
+    }
+    for (index = 0; index < Context->BufferStructDevices && index < T2AUDIO_MAX_DEVICES; ++index) {
+        const T2AUDIO_DEVICE_METADATA *device = &Context->BufferStruct->Devices[index];
+        CHAR name[33];
+        ULONG direction;
+        ULONG c;
+
+        for (c = 0; c < 32; c++) {
+            name[c] = device->Name[c];
+            if (name[c] == '\0') {
+                break;
+            }
+        }
+        name[(c < 32) ? c : 32] = '\0';
+        KdPrint(("T2Audio: BufferStruct device[%u] '%s' in=%u out=%u\n",
+                 index, name, device->NumInputStreams, device->NumOutputStreams));
+
+        for (direction = 0; direction < 2; direction++) {
+            const T2AUDIO_STREAM_METADATA *streams =
+                direction == 0 ? device->InputStreams : device->OutputStreams;
+            ULONG count = direction == 0 ? device->NumInputStreams : device->NumOutputStreams;
+            ULONG s;
+
+            if (count > T2AUDIO_MAX_STREAMS) {
+                count = T2AUDIO_MAX_STREAMS;
+            }
+            for (s = 0; s < count; s++) {
+                ULONG buffers = streams[s].NumBuffers;
+                ULONG b;
+
+                KdPrint(("T2Audio: BufferStruct device[%u] %s stream[%u]: %u buffer(s)\n",
+                         index, direction == 0 ? "input" : "output", s, buffers));
+                if (buffers > T2AUDIO_MAX_BUFFERS) {
+                    buffers = T2AUDIO_MAX_BUFFERS;
+                }
+                for (b = 0; b < buffers && b < 2; b++) {
+                    KdPrint(("T2Audio: BufferStruct device[%u] %s stream[%u] buffer[%u]: address=0x%I64X size=0x%I64X\n",
+                             index, direction == 0 ? "input" : "output", s, b,
+                             (ULONG64)streams[s].Buffers[b].Address,
+                             (ULONG64)streams[s].Buffers[b].Size));
+                }
+            }
+        }
+    }
 }

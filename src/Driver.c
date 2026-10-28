@@ -441,13 +441,23 @@ T2AudioStartDeviceInner(
     // Autogain in front of the DSP chain (T2AudioDsp.h, KAIT2EN "Norm");
     // 0/1, default 0 (off: the chain is unchanged).
     context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u\n",
+    // Groundwork for headphones and microphones (docs/ROADMAP.md sections 4-5),
+    // all 0/1 and off by default: ExtendedProbe logs every BCE device and the
+    // BufferStruct table (read-only); JackEvents subscribes to the headphone
+    // jack and tracks it; HeadphoneAutoMute (with JackEvents) silences the
+    // speakers while headphones are plugged in.
+    context->ExtendedProbe = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtendedProbe", 0) ? 1u : 0u;
+    context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
+    context->HeadphoneAutoMute = (context->JackEvents &&
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
              context->OutputAttenuation, context->OutputAttenuation * 6u,
              context->ClockRateTracking ? 1u : 0u,
              context->SpeakerDsp, context->DspGainDb, context->TweeterTrimDb,
-             context->WooferLimitDb, context->DspAutoGain));
+             context->WooferLimitDb, context->DspAutoGain,
+             context->ExtendedProbe, context->JackEvents, context->HeadphoneAutoMute));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the
     // driver runs purely on system memory and never touches a BAR.
@@ -614,6 +624,9 @@ T2AudioStartDeviceInner(
     // transport is left open so START_IO/STOP_IO can use it.
     if (context->DiagStage >= T2AUDIO_STAGE_BCE && context->HardwareReady) {
         (VOID)T2AudioProbeBceDevices(context);
+        if (context->ExtendedProbe) {
+            T2AudioLogBufferStruct(context);
+        }
     } else {
         KdPrint(("T2Audio: stage %u - BCE discovery skipped\n",
                  context->DiagStage));

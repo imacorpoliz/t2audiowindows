@@ -93,7 +93,23 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // and its 'jack' state at probe time (1 = plugged). Logged only; the
     // headphone output itself is not driven yet (docs/HEADPHONES.md).
     ULONG64 BceHeadphoneDeviceId;
-    ULONG HeadphoneJackPlugged;
+    volatile LONG HeadphoneJackPlugged;
+    // Jack events (Parameters\JackEvents=1): a PROPERTY_LISTENER on
+    // 'outp'/'jack' of the headphone device; each PROPERTY_CHANGED queues a
+    // PASSIVE work item that re-reads the jack (JackWorkPending coalesces).
+    // HeadphoneAutoMute (needs JackEvents) silences the speakers while the
+    // jack reads plugged in.
+    ULONG JackEvents;
+    ULONG HeadphoneAutoMute;
+    BOOLEAN JackListenerRegistered;
+    volatile LONG JackWorkPending;
+    volatile LONG JackEventCount;
+    // Parameters\ExtendedProbe=1: log every BCE device's streams, formats,
+    // latencies and jacks, and the whole BufferStruct table (read-only), as
+    // groundwork for the headphone and microphone endpoints (docs/ROADMAP.md).
+    ULONG ExtendedProbe;
+    // Device count of the BufferStruct table as validated by MapResources.
+    ULONG BufferStructDevices;
     BOOLEAN BceProbed;
     // Speaker output stream as reported by the T2 (BCE probe, stage 3+).
     // SpeakerFormatValid is set only when its 'pft ' physical format was read
@@ -307,6 +323,7 @@ NTSTATUS T2AudioFindSpeakerDeviceId(
     _Out_ PULONG64 DeviceId);
 
 NTSTATUS T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioLogBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 // IOCTL AppleUSBVHCI uses to push bridgeOS messages to the audio device:
 // CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS).

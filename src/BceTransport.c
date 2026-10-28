@@ -15,6 +15,7 @@
 // Property scope/selector values (kaiT2en modules/t2bce_audio/protocol.h).
 #define T2AUDIO_PROP_SCOPE_GLOBAL 0x676c6f62u   // 'glob'
 #define T2AUDIO_PROP_SCOPE_OUTPUT 0x6f757470u   // 'outp'
+#define T2AUDIO_PROP_SCOPE_INPUT  0x696e7074u   // 'inpt'
 #define T2AUDIO_PROP_JACK_PLUGGED 0x6a61636bu   // 'jack'
 #define T2AUDIO_PROP_UID          0x75696420u   // 'uid '
 #define T2AUDIO_PROP_LATENCY      0x6c746e63u   // 'ltnc'
@@ -567,11 +568,13 @@ T2AudioGetU32Property(
     return STATUS_SUCCESS;
 }
 
-// GET_OUTPUT_STREAM_LIST (26 -> 27). The reply has the same shape as the
-// device list (count u64, then ids), so the same parser validates it.
+// GET_OUTPUT_STREAM_LIST (26 -> 27) or GET_INPUT_STREAM_LIST (24 -> 25). The
+// reply has the same shape as the device list (count u64, then ids), so the
+// same parser validates it.
 static NTSTATUS
-T2AudioGetOutputStreamList(
+T2AudioGetStreamList(
     _In_ ULONG64 DeviceId,
+    _In_ BOOLEAN Input,
     _Out_writes_(MaxStreams) ULONG64 *StreamList,
     _In_ ULONG MaxStreams,
     _Out_ PULONG StreamCount)
@@ -593,25 +596,181 @@ T2AudioGetOutputStreamList(
     // header->Tag is stamped by T2AudioSendBceMessage.
     header->Type = T2AUDIO_MSG_TYPE_COMMAND;
     header->DeviceId = DeviceId;
-    base->Message = T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST;
+    base->Message = Input ? T2AUDIO_MSG_GET_INPUT_STREAM_LIST : T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST;
     base->Status = 0;
 
     status = T2AudioSendBceMessage(requestBuffer, (ULONG)sizeof(requestBuffer),
                                    replyBuffer, sizeof(replyBuffer), &replySize);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("T2Audio: GET_OUTPUT_STREAM_LIST send failed: 0x%08X\n", status));
+        KdPrint(("T2Audio: GET_%s_STREAM_LIST send failed: 0x%08X\n",
+                 Input ? "INPUT" : "OUTPUT", status));
         return status;
     }
 
     if (!T2AudioBceParseDeviceListResponse(replyBuffer, replySize,
-                                           T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE,
+                                           Input ? T2AUDIO_MSG_GET_INPUT_STREAM_LIST_RESPONSE
+                                                 : T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE,
                                            StreamList, MaxStreams, &outCount)) {
-        KdPrint(("T2Audio: GET_OUTPUT_STREAM_LIST reply invalid: size=%u\n", replySize));
+        KdPrint(("T2Audio: GET_%s_STREAM_LIST reply invalid: size=%u\n",
+                 Input ? "INPUT" : "OUTPUT", replySize));
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
     *StreamCount = outCount;
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+T2AudioGetOutputStreamList(
+    _In_ ULONG64 DeviceId,
+    _Out_writes_(MaxStreams) ULONG64 *StreamList,
+    _In_ ULONG MaxStreams,
+    _Out_ PULONG StreamCount)
+{
+    return T2AudioGetStreamList(DeviceId, FALSE, StreamList, MaxStreams, StreamCount);
+}
+
+// Parameters\ExtendedProbe: log one direction of a device - its stream ids,
+// each stream's physical format and latency. Read-only (GET_* only).
+static VOID
+T2AudioLogDeviceStreams(_In_ ULONG64 DeviceId, _In_ BOOLEAN Input)
+{
+    ULONG64 streams[8];
+    ULONG streamCount = 0;
+    ULONG s;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    status = T2AudioGetStreamList(DeviceId, Input, streams, ARRAYSIZE(streams), &streamCount);
+    KdPrint(("T2Audio: BCE detail: device 0x%I64X %s streams: %u (status 0x%08X)\n",
+             DeviceId, Input ? "input" : "output", streamCount, status));
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+    for (s = 0; s < streamCount; s++) {
+        UCHAR formatData[T2AUDIO_BCE_PHYS_FORMAT_SIZE];
+        ULONG formatLength = 0;
+        T2AUDIO_BCE_PHYS_FORMAT format;
+        ULONG latency = 0;
+        NTSTATUS latencyStatus;
+
+        status = T2AudioGetProperty(DeviceId, streams[s], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                    T2AUDIO_PROP_PHYS_FORMAT, formatData,
+                                    sizeof(formatData), &formatLength);
+        if (NT_SUCCESS(status) &&
+            T2AudioBceParsePhysicalFormat(formatData, formatLength, &format)) {
+            KdPrint(("T2Audio: BCE detail: device 0x%I64X %s stream 0x%I64X pft: rate=%u id=0x%08X flags=0x%X bpp=%u fpp=%u bpf=%u ch=%u bits=%u\n",
+                     DeviceId, Input ? "input" : "output", streams[s],
+                     format.SampleRate, format.FormatId, format.FormatFlags,
+                     format.BytesPerPacket, format.FramesPerPacket, format.BytesPerFrame,
+                     format.ChannelsPerFrame, format.BitsPerChannel));
+        } else {
+            KdPrint(("T2Audio: BCE detail: device 0x%I64X %s stream 0x%I64X pft unavailable (0x%08X, len=%u)\n",
+                     DeviceId, Input ? "input" : "output", streams[s], status, formatLength));
+        }
+        latencyStatus = T2AudioGetU32Property(DeviceId, streams[s], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                              T2AUDIO_PROP_LATENCY, &latency);
+        KdPrint(("T2Audio: BCE detail: device 0x%I64X %s stream 0x%I64X latency=%u (0x%08X)\n",
+                 DeviceId, Input ? "input" : "output", streams[s], latency, latencyStatus));
+    }
+}
+
+// Parameters\ExtendedProbe: everything a later headphone or microphone
+// endpoint needs to know about one device (read-only).
+static VOID
+T2AudioLogDeviceDetail(_In_ ULONG64 DeviceId)
+{
+    static const ULONG scopes[2] = { T2AUDIO_PROP_SCOPE_OUTPUT, T2AUDIO_PROP_SCOPE_INPUT };
+    static const ULONG selectors[3] = { T2AUDIO_PROP_LATENCY, T2AUDIO_PROP_SAFETY_OFFSET,
+                                        T2AUDIO_PROP_JACK_PLUGGED };
+    ULONG i, j;
+
+    PAGED_CODE();
+
+    T2AudioLogDeviceStreams(DeviceId, FALSE);
+    T2AudioLogDeviceStreams(DeviceId, TRUE);
+    for (i = 0; i < ARRAYSIZE(scopes); i++) {
+        for (j = 0; j < ARRAYSIZE(selectors); j++) {
+            ULONG value = 0;
+            NTSTATUS status = T2AudioGetU32Property(DeviceId, DeviceId, scopes[i],
+                                                    selectors[j], &value);
+
+            KdPrint(("T2Audio: BCE detail: device 0x%I64X %s %s=%u (0x%08X)\n",
+                     DeviceId, i == 0 ? "outp" : "inpt",
+                     j == 0 ? "ltnc" : (j == 1 ? "saft" : "jack"), value, status));
+        }
+    }
+}
+
+// Parameters\JackEvents: subscribe to 'outp'/'jack' on the headphone device,
+// as kaiT2en does at init (t2audio_init_dev) and AppleAudio does with msg 11
+// (0x1400042C4). bridgeOS then sends PROPERTY_CHANGED (13) notifications,
+// which AppleUSBVHCI delivers through IOCTL 0x222020.
+static NTSTATUS
+T2AudioRegisterJackListener(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    UCHAR request[T2AUDIO_BCE_PROPERTY_LISTENER_SIZE];
+    UCHAR reply[128];
+    ULONG replySize = 0;
+    ULONG64 device = Context->BceHeadphoneDeviceId;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    (VOID)T2AudioBceBuildPropertyListener(request, device, device,
+                                          T2AUDIO_PROP_SCOPE_OUTPUT,
+                                          T2AUDIO_PROP_JACK_PLUGGED);
+    status = T2AudioSendBceMessage(request, (ULONG)sizeof(request),
+                                   reply, sizeof(reply), &replySize);
+    if (NT_SUCCESS(status) &&
+        !T2AudioBceParsePropertyListenerResponse(reply, replySize, device,
+                                                 T2AUDIO_PROP_SCOPE_OUTPUT,
+                                                 T2AUDIO_PROP_JACK_PLUGGED)) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    Context->JackListenerRegistered = NT_SUCCESS(status) ? TRUE : FALSE;
+    KdPrint(("T2Audio: jack listener on device 0x%I64X: %s (0x%08X, reply %u bytes)\n",
+             device, NT_SUCCESS(status) ? "registered" : "FAILED", status, replySize));
+    return status;
+}
+
+// PASSIVE work item queued by T2AudioHandleVhciMessage for a jack
+// PROPERTY_CHANGED: re-read the jack (as kaiT2en and AppleAudio do; the
+// notification carries no value) and publish it to the copy path.
+static IO_WORKITEM_ROUTINE T2AudioJackWorkRoutine;
+
+static VOID
+T2AudioJackWorkRoutine(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID WorkContext)
+{
+    PIO_WORKITEM workItem = (PIO_WORKITEM)WorkContext;
+    PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
+    ULONG plugged = 0;
+    LONG previous;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    // Clear first: a notification arriving during the read queues another
+    // pass, so the last state always wins.
+    InterlockedExchange(&context->JackWorkPending, 0);
+    status = T2AudioGetU32Property(context->BceHeadphoneDeviceId,
+                                   context->BceHeadphoneDeviceId,
+                                   T2AUDIO_PROP_SCOPE_OUTPUT,
+                                   T2AUDIO_PROP_JACK_PLUGGED, &plugged);
+    if (NT_SUCCESS(status)) {
+        previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
+        KdPrint(("T2Audio: headphone jack %s (was %s)%s\n",
+                 plugged ? "PLUGGED" : "unplugged", previous ? "plugged" : "unplugged",
+                 (context->HeadphoneAutoMute && plugged) ? " - speakers muted" : ""));
+    } else {
+        KdPrint(("T2Audio: headphone jack re-read failed: 0x%08X\n", status));
+    }
+    if (workItem != NULL) {
+        IoFreeWorkItem(workItem);
+    }
 }
 
 // Query what the device itself says about the speaker output, as kaiT2en's
@@ -935,6 +1094,38 @@ T2AudioHandleVhciMessage(
         return;
     }
 
+    if (msg == T2AUDIO_MSG_PROPERTY_CHANGED) {
+        ULONG64 changedDevice = 0, object = 0;
+        ULONG element = 0, scope = 0, selector = 0;
+        LONG events;
+
+        if (!T2AudioBceParsePropertyChanged(Message, MessageSize, &changedDevice, &object,
+                                            &element, &scope, &selector)) {
+            KdPrint(("T2Audio: VHCI PROPERTY_CHANGED invalid (size=%u)\n", MessageSize));
+            return;
+        }
+        events = InterlockedIncrement(&Context->JackEventCount);
+        if (events <= 64) {
+            KdPrint(("T2Audio: VHCI PROPERTY_CHANGED #%d dev=0x%I64X obj=0x%I64X scope=0x%08X sel=0x%08X el=%u\n",
+                     events, changedDevice, object, scope, selector, element));
+        }
+        // Re-read the jack at PASSIVE: this handler runs while AppleUSBVHCI
+        // waits for the IRP and must not send a BCE request itself.
+        if (Context->JackEvents && Context->DeviceObject != NULL &&
+            changedDevice == Context->BceHeadphoneDeviceId && changedDevice != 0 &&
+            scope == T2AUDIO_PROP_SCOPE_OUTPUT && selector == T2AUDIO_PROP_JACK_PLUGGED &&
+            InterlockedCompareExchange(&Context->JackWorkPending, 1, 0) == 0) {
+            PIO_WORKITEM workItem = IoAllocateWorkItem(Context->DeviceObject);
+
+            if (workItem != NULL) {
+                IoQueueWorkItem(workItem, T2AudioJackWorkRoutine, DelayedWorkQueue, workItem);
+            } else {
+                InterlockedExchange(&Context->JackWorkPending, 0);
+            }
+        }
+        return;
+    }
+
     if (count <= 64) {
         KdPrint(("T2Audio: VHCI message #%d type=%u msg=%u dev=0x%I64X size=%u\n",
                  count, type, msg, deviceId, MessageSize));
@@ -993,6 +1184,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
         KdPrint(("T2Audio: BCE probe: device 0x%I64X uid=\"%.*s\" (%u bytes)\n",
                  deviceList[i], (int)uidLength, uid, uidLength));
+        if (Context->ExtendedProbe) {
+            T2AudioLogDeviceDetail(deviceList[i]);
+        }
 
         if (Context->BceSpeakerDeviceId == 0 &&
             T2AudioBceUidIsSpeaker(uid, uidLength)) {
@@ -1009,7 +1203,8 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
             jackStatus = T2AudioGetU32Property(deviceList[i], deviceList[i],
                                                T2AUDIO_PROP_SCOPE_OUTPUT,
                                                T2AUDIO_PROP_JACK_PLUGGED, &plugged);
-            Context->HeadphoneJackPlugged = NT_SUCCESS(jackStatus) ? (plugged != 0 ? 1u : 0u) : 0u;
+            InterlockedExchange(&Context->HeadphoneJackPlugged,
+                                (NT_SUCCESS(jackStatus) && plugged != 0) ? 1 : 0);
             KdPrint(("T2Audio: BCE probe: headphone jack device 0x%I64X: %s (status 0x%08X)\n",
                      deviceList[i],
                      !NT_SUCCESS(jackStatus) ? "unknown" : (plugged ? "PLUGGED" : "unplugged"),
@@ -1019,6 +1214,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     if (Context->BceSpeakerDeviceId != 0) {
         T2AudioQuerySpeakerStream(Context);
+    }
+    if (Context->JackEvents && Context->BceHeadphoneDeviceId != 0) {
+        (VOID)T2AudioRegisterJackListener(Context);
     }
 
     Context->BceProbed = TRUE;

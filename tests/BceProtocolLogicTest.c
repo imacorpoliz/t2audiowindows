@@ -430,6 +430,66 @@ static void test_tags(void)
     check("NULL reply", !T2AudioBceReplyTagMatches(0, 8, 17));
 }
 
+static void test_property_events(void)
+{
+    unsigned char m[64];
+    unsigned char r[64];
+    unsigned long long dev = 0, obj = 0;
+    unsigned long el = 1, scope = 0, sel = 0;
+    unsigned long n;
+    unsigned long i;
+
+    printf("Property listener / PROPERTY_CHANGED\n");
+    // PROPERTY_CHANGED for 'outp'/'jack' on device 0x25 (a NOTIFICATION).
+    for (i = 0; i < sizeof(m); i++) m[i] = 0;
+    m[4] = 3;
+    T2AudioBceWriteU64(m + 5, 0x25);
+    T2AudioBceWriteU32(m + 13, T2AUDIO_MSG_PROPERTY_CHANGED);
+    T2AudioBceWriteU64(m + 21, 0x25);
+    T2AudioBceWriteU32(m + 29, 0);
+    T2AudioBceWriteU32(m + 33, 0x6f757470u);
+    T2AudioBceWriteU32(m + 37, 0x6a61636bu);
+    check("PROPERTY_CHANGED parsed",
+          T2AudioBceParsePropertyChanged(m, 41, &dev, &obj, &el, &scope, &sel) &&
+          dev == 0x25 && obj == 0x25 && el == 0 &&
+          scope == 0x6f757470u && sel == 0x6a61636bu);
+    check("scope at message offset 0x21 (as AppleAudio reads it)",
+          T2AudioBceReadU32(m + 0x21) == 0x6f757470u);
+    check("PROPERTY_CHANGED truncated -> fail",
+          !T2AudioBceParsePropertyChanged(m, 40, &dev, &obj, &el, &scope, &sel));
+    T2AudioBceWriteU32(m + 13, T2AUDIO_MSG_UPDATE_TIMESTAMP);
+    check("other message id -> fail",
+          !T2AudioBceParsePropertyChanged(m, 41, &dev, &obj, &el, &scope, &sel));
+    check("NULL output -> fail",
+          !T2AudioBceParsePropertyChanged(m, 41, 0, &obj, &el, &scope, &sel));
+
+    n = T2AudioBceBuildPropertyListener(m, 0x25, 0x25, 0x6f757470u, 0x6a61636bu);
+    check("listener size 41", n == 41 && T2AUDIO_BCE_PROPERTY_LISTENER_SIZE == 41u);
+    check("listener layout: type 1, dev, msg 11, obj, element 0, scope, selector",
+          m[4] == 1 && T2AudioBceReadU64(m + 5) == 0x25 &&
+          T2AudioBceReadU32(m + 13) == 11 && T2AudioBceReadU32(m + 17) == 0 &&
+          T2AudioBceReadU64(m + 21) == 0x25 && T2AudioBceReadU32(m + 29) == 0 &&
+          T2AudioBceReadU32(m + 33) == 0x6f757470u && T2AudioBceReadU32(m + 37) == 0x6a61636bu &&
+          T2AudioBceReadU32(m) == 0);
+    check("listener NULL buffer -> 0", T2AudioBceBuildPropertyListener(0, 1, 1, 1, 1) == 0);
+
+    for (i = 0; i < sizeof(r); i++) r[i] = 0;
+    r[4] = 2;
+    T2AudioBceWriteU32(r + 13, T2AUDIO_MSG_PROPERTY_LISTENER_RESPONSE);
+    T2AudioBceWriteU64(r + 21, 0x25);
+    T2AudioBceWriteU32(r + 33, 0x6f757470u);
+    T2AudioBceWriteU32(r + 37, 0x6a61636bu);
+    check("listener reply ok",
+          T2AudioBceParsePropertyListenerResponse(r, 41, 0x25, 0x6f757470u, 0x6a61636bu));
+    check("listener reply wrong selector -> fail",
+          !T2AudioBceParsePropertyListenerResponse(r, 41, 0x25, 0x6f757470u, 0x75696420u));
+    check("listener reply short -> fail",
+          !T2AudioBceParsePropertyListenerResponse(r, 40, 0x25, 0x6f757470u, 0x6a61636bu));
+    T2AudioBceWriteU32(r + 17, 5);
+    check("listener reply status != 0 -> fail",
+          !T2AudioBceParsePropertyListenerResponse(r, 41, 0x25, 0x6f757470u, 0x6a61636bu));
+}
+
 int main(void)
 {
     test_scalar_roundtrip();
@@ -442,6 +502,7 @@ int main(void)
     test_physical_format();
     test_incoming();
     test_tags();
+    test_property_events();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

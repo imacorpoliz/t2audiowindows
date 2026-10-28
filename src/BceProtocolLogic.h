@@ -23,6 +23,10 @@
 #define T2AUDIO_MSG_START_IO_RESPONSE         1u
 #define T2AUDIO_MSG_UPDATE_TIMESTAMP          4u
 #define T2AUDIO_MSG_PROPERTY_CHANGED          13u
+#define T2AUDIO_MSG_PROPERTY_LISTENER         11u
+#define T2AUDIO_MSG_PROPERTY_LISTENER_RESPONSE 12u
+#define T2AUDIO_MSG_GET_INPUT_STREAM_LIST     24u
+#define T2AUDIO_MSG_GET_INPUT_STREAM_LIST_RESPONSE 25u
 #define T2AUDIO_MSG_STOP_IO                   2u
 #define T2AUDIO_MSG_STOP_IO_RESPONSE          3u
 #define T2AUDIO_MSG_GET_PROPERTY              7u
@@ -519,6 +523,95 @@ T2AudioBceParseUpdateTimestamp(const unsigned char *Message,
     *OutUpdateSeed = T2AudioBceReadU64(Message + base + 8);
     *OutSampleTimeBits = T2AudioBceReadU64(Message + base + 16);
     return 1;
+}
+
+// Property address carried by PROPERTY_CHANGED (13, a NOTIFICATION) and by
+// the PROPERTY_LISTENER (11 -> 12) request/reply: obj u64, element u32,
+// scope u32, selector u32 right after the base (kaiT2en protocol.c
+// t2audio_msg_read_property_changed; AppleAudio reads the scope at message
+// offset 0x21 = 33, RE_appleaudio_protocol.md section 4).
+#define T2AUDIO_BCE_PROP_ADDR_SIZE 20u
+
+// Parse an incoming PROPERTY_CHANGED: the device id from the header and the
+// property address. Returns 1 on success.
+static __inline int
+T2AudioBceParsePropertyChanged(const unsigned char *Message,
+                               unsigned long long MessageSize,
+                               unsigned long long *OutDeviceId,
+                               unsigned long long *OutObject,
+                               unsigned long *OutElement,
+                               unsigned long *OutScope,
+                               unsigned long *OutSelector)
+{
+    unsigned long long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+
+    if (Message == 0 || OutDeviceId == 0 || OutObject == 0 || OutElement == 0 ||
+        OutScope == 0 || OutSelector == 0 ||
+        MessageSize < base + T2AUDIO_BCE_PROP_ADDR_SIZE ||
+        T2AudioBceReadU32(Message + T2AUDIO_BCE_HEADER_SIZE) !=
+            T2AUDIO_MSG_PROPERTY_CHANGED) {
+        return 0;
+    }
+    *OutDeviceId = T2AudioBceReadU64(Message + 5);
+    *OutObject = T2AudioBceReadU64(Message + base);
+    *OutElement = T2AudioBceReadU32(Message + base + 8);
+    *OutScope = T2AudioBceReadU32(Message + base + 12);
+    *OutSelector = T2AudioBceReadU32(Message + base + 16);
+    return 1;
+}
+
+// Build a PROPERTY_LISTENER command for (Object, Scope, Selector, element 0)
+// on DeviceId. The tag is left zero for the transport to stamp. Buffer must
+// hold T2AUDIO_BCE_PROPERTY_LISTENER_SIZE bytes; returns the message size.
+#define T2AUDIO_BCE_PROPERTY_LISTENER_SIZE \
+    (T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE + T2AUDIO_BCE_PROP_ADDR_SIZE)
+
+static __inline unsigned long
+T2AudioBceBuildPropertyListener(unsigned char *Buffer,
+                                unsigned long long DeviceId,
+                                unsigned long long Object,
+                                unsigned long Scope,
+                                unsigned long Selector)
+{
+    unsigned long i;
+    unsigned long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+
+    if (Buffer == 0) {
+        return 0;
+    }
+    for (i = 0; i < T2AUDIO_BCE_PROPERTY_LISTENER_SIZE; i++) {
+        Buffer[i] = 0;
+    }
+    Buffer[T2AUDIO_BCE_TYPE_OFFSET] = (unsigned char)T2AUDIO_BCE_MSG_COMMAND;
+    T2AudioBceWriteU64(Buffer + 5, DeviceId);
+    T2AudioBceWriteU32(Buffer + T2AUDIO_BCE_HEADER_SIZE, T2AUDIO_MSG_PROPERTY_LISTENER);
+    T2AudioBceWriteU64(Buffer + base, Object);
+    T2AudioBceWriteU32(Buffer + base + 8, 0);          // element
+    T2AudioBceWriteU32(Buffer + base + 12, Scope);
+    T2AudioBceWriteU32(Buffer + base + 16, Selector);
+    return T2AUDIO_BCE_PROPERTY_LISTENER_SIZE;
+}
+
+// Validate the PROPERTY_LISTENER reply: msg 12, status 0, and the echo of the
+// registered object and address. Returns 1 on success.
+static __inline int
+T2AudioBceParsePropertyListenerResponse(const unsigned char *Reply,
+                                        unsigned long long ReplySize,
+                                        unsigned long long Object,
+                                        unsigned long Scope,
+                                        unsigned long Selector)
+{
+    unsigned long long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+
+    if (!T2AudioBceParseCommandResponse(Reply, ReplySize,
+                                        T2AUDIO_MSG_PROPERTY_LISTENER_RESPONSE) ||
+        ReplySize < base + T2AUDIO_BCE_PROP_ADDR_SIZE) {
+        return 0;
+    }
+    return T2AudioBceReadU64(Reply + base) == Object &&
+           T2AudioBceReadU32(Reply + base + 8) == 0 &&
+           T2AudioBceReadU32(Reply + base + 12) == Scope &&
+           T2AudioBceReadU32(Reply + base + 16) == Selector;
 }
 
 // Decode a nonnegative, integral IEEE-754 double (raw bits) up to 2^53 into a
