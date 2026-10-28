@@ -25,9 +25,9 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 ```
 1. CI «Build» на этом коммите зелёный.
 2. Сборка и подпись по §2: `DriverVer` = сегодня, `1.0.10.0`, SHA256 в `$h`.
-3. Установка по §3 B1. В `Parameters` удали старые `OutputAttenuation`, `ClockRateTracking`, `SpeakerDsp`.
+3. Установка по §3 B1. В `Parameters` удали старые `OutputAttenuation`, `ClockRateTracking`, `SpeakerDsp`, `DspGainDb`.
 
-**Шаг 2. Stage 1:** `.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h`. PASS: `mode parameters: … OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=0`.
+**Шаг 2. Stage 1:** `.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h`. PASS: `mode parameters: … OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=0 DspGainDb=6`.
 
 **Шаг 3. Проверка динамиков: работают ли вуферы (НЧ), середина и твитеры (ВЧ).** Владелец слушает сам, агент ведёт по шагам.
 
@@ -75,7 +75,7 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 1. `docs/logs/EXCERPT_<дата>_<время>.md`: содержимое `speakercheck.txt` (3a и 3b), таблица раскладки, оценки по уровням DSP, строки лога.
 2. Датированная запись в `docs/CURRENT_STATE.md`.
 3. PR в `diagnostics`.
-4. В конце AppleAudio (`Started`, `CM_PROB_NONE`), значения в `Parameters` удалены.
+4. В конце AppleAudio (`Started`, `CM_PROB_NONE`), значения в `Parameters` (`OutputAttenuation`, `ClockRateTracking`, `SpeakerDsp`, `DspGainDb`, `TweeterMode`) удалены.
 
 **Если что-то не работает:** `-Mode Recover`, логи, запись в `CURRENT_STATE.md`, сообщить владельцу. Драйвер наугад не чинить.
 

@@ -25,6 +25,6 @@
 - Неприятный звук — Mute, Enter (в -Listen), -Mode Recover. Твитеры режут слух — Parameters\TweeterMode=0 (только для SpeakerDsp=0).
 - BSOD — стоп, минидамп, отчёт.
 - Не убирай гейт TestSession, не включай автозапуск, не усыпляй Mac во время прогона.
-- В конце: устройство на AppleAudio (Started, CM_PROB_NONE), значения OutputAttenuation/ClockRateTracking/SpeakerDsp в Parameters удалены.
+- В конце: устройство на AppleAudio (Started, CM_PROB_NONE), значения OutputAttenuation/ClockRateTracking/SpeakerDsp/DspGainDb/TweeterMode в Parameters удалены.
 - В отчётах различай «проверено на железе (хэш …)», «проверено тестами» и «гипотеза». В diagnostics напрямую не пушь, только PR.
 ```
