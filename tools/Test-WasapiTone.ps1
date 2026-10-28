@@ -12,6 +12,10 @@
 # mutes it again with volume 0 when the tone ends (also on errors). Without
 # -EndpointVolume the endpoint volume and mute are left as they are.
 #
+# -SweepTo F sweeps logarithmically from -Frequency to F over -Seconds.
+# Every tone fades in and out over 20 ms and the buffer is drained before
+# Stop, so a tone never starts or ends with a click.
+#
 # -Channel N plays the tone on channel N only (the others get silence). On
 # the stereo endpoint 0 = left, 1 = right. On the raw 6-channel endpoint
 # (-RawChannels in the agent) 0/1 and 3/4 are the woofers and 2/5 the
@@ -27,7 +31,8 @@ param(
     [double]$Frequency = 440.0,
     [double]$Amplitude = 0.25,
     [double]$EndpointVolume = -1.0,
-    [int]$Channel = -1
+    [int]$Channel = -1,
+    [double]$SweepTo = 0.0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -161,7 +166,7 @@ public static class Tone {
     // Raw 6-channel ring: channels 2 and 5 are the unprotected tweeters.
     public const double MinTweeterFrequency = 1000.0;
 
-    public static string Run(string targetId, double seconds, double frequency, double amplitude, double endpointVolume, int channel) {
+    public static string Run(string targetId, double seconds, double frequency, double amplitude, double endpointVolume, int channel, double sweepTo) {
         var sb = new StringBuilder();
         bool lowVolume = endpointVolume >= 0.0;
         if (lowVolume) {
@@ -204,14 +209,14 @@ public static class Tone {
             sb.AppendLine("T2 endpoint at low volume " + endpointVolume + ".");
         }
         try {
-            Play(device, seconds, frequency, amplitude, channel, sb);
+            Play(device, seconds, frequency, amplitude, channel, sweepTo, sb);
         } finally {
             if (vol != null) Silence(vol, sb);
         }
         return sb.ToString();
     }
 
-    static void Play(IMMDevice device, double seconds, double frequency, double amplitude, int channel, StringBuilder sb) {
+    static void Play(IMMDevice device, double seconds, double frequency, double amplitude, int channel, double sweepTo, StringBuilder sb) {
         Guid iid = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         object o;
         int hr = device.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o);
@@ -231,10 +236,12 @@ public static class Tone {
         if (!isFloat && bits != 16 && bits != 32) { sb.AppendLine("unsupported PCM container: " + bits + " bits"); return; }
         sb.AppendLine("MixFormat: ch=" + ch + " rate=" + rate + " bits=" + fmt.Format.wBitsPerSample + " float=" + isFloat);
         if (channel >= ch) { sb.AppendLine("CHANNEL REFUSED: channel " + channel + " >= " + ch + " channels"); return; }
-        if (ch == 6 && frequency < MinTweeterFrequency && (channel == 2 || channel == 5 || channel < 0)) {
-            sb.AppendLine("TWEETER REFUSED: " + frequency + " Hz on a raw 6-channel tweeter (needs >= " + MinTweeterFrequency + " Hz)");
+        double lowest = (sweepTo > 0.0 && sweepTo < frequency) ? sweepTo : frequency;
+        if (ch == 6 && lowest < MinTweeterFrequency && (channel == 2 || channel == 5 || channel < 0)) {
+            sb.AppendLine("TWEETER REFUSED: " + lowest + " Hz on a raw 6-channel tweeter (needs >= " + MinTweeterFrequency + " Hz)");
             return;
         }
+        if (sweepTo > 0.0) sb.AppendLine("sweep " + frequency + " -> " + sweepTo + " Hz");
         sb.AppendLine("channel = " + (channel < 0 ? "all" : channel.ToString()));
 
         hr = client.Initialize(0, 0, 10000000, 0, pfmt, IntPtr.Zero);
@@ -256,46 +263,62 @@ public static class Tone {
         sb.AppendLine("Start hr=" + H(hr));
         if (hr != 0) return;
 
+        // 20 ms raised-cosine fade in/out (an abrupt start or stop is heard
+        // as a click, which is easy to mistake for a speaker fault), an
+        // optional logarithmic sweep frequency -> sweepTo, and a drain of the
+        // buffered audio before Stop so the end of the tone is not cut off.
         double phase = 0.0;
-        double step = 2.0 * Math.PI * frequency / rate;
         int totalFrames = (int)(seconds * rate);
+        int fade = Math.Min(rate / 50, totalFrames / 2);
+        bool sweep = sweepTo > 0.0 && sweepTo != frequency;
+        double logRatio = sweep ? Math.Log(sweepTo / frequency) : 0.0;
         int written = 0;
         int iterations = 0;
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        long budgetMs = (long)(seconds * 1000.0) + 2000;
+        long budgetMs = (long)(seconds * 1000.0) + 3000;
 
         while (written < totalFrames && sw.ElapsedMilliseconds < budgetMs) {
             uint padding;
             if (client.GetCurrentPadding(out padding) != 0) break;
             uint avail = frames - padding;
+            if (avail > (uint)(totalFrames - written)) avail = (uint)(totalFrames - written);
             if (avail == 0) { Thread.Sleep(2); continue; }
 
             IntPtr p;
             hr = render.GetBuffer(avail, out p);
             if (hr != 0) { sb.AppendLine("GetBuffer hr=" + H(hr)); break; }
 
+            double[] v = new double[avail];
+            for (int f = 0; f < avail; f++) {
+                int n = written + f;
+                double env = 1.0;
+                if (n < fade) env = 0.5 - 0.5 * Math.Cos(Math.PI * n / fade);
+                else if (n >= totalFrames - fade) env = 0.5 - 0.5 * Math.Cos(Math.PI * (totalFrames - 1 - n) / fade);
+                double hz = sweep ? frequency * Math.Exp(logRatio * n / totalFrames) : frequency;
+                v[f] = amplitude * env * Math.Sin(phase);
+                phase += 2.0 * Math.PI * hz / rate;
+                if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
+            }
+
             if (isFloat) {
                 float[] buf = new float[avail * ch];
                 for (int f = 0; f < avail; f++) {
-                    float s = (float)(amplitude * Math.Sin(phase));
-                    phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
+                    float s = (float)v[f];
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : 0.0f;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
             } else if (bits == 32) {
                 // 32-bit container, MSB-aligned (24-in-32 included).
                 int[] buf = new int[avail * ch];
                 for (int f = 0; f < avail; f++) {
-                    int s = (int)(amplitude * 2147483647.0 * Math.Sin(phase));
-                    phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
+                    int s = (int)(v[f] * 2147483647.0);
+                    for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : 0;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
             } else {
                 short[] buf = new short[avail * ch];
                 for (int f = 0; f < avail; f++) {
-                    short s = (short)(amplitude * 32767.0 * Math.Sin(phase));
-                    phase += step; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI;
+                    short s = (short)(v[f] * 32767.0);
                     for (int c = 0; c < ch; c++) buf[f * ch + c] = (channel < 0 || c == channel) ? s : (short)0;
                 }
                 Marshal.Copy(buf, 0, p, buf.Length);
@@ -305,6 +328,15 @@ public static class Tone {
             written += (int)avail;
             iterations++;
             Thread.Sleep(2);
+        }
+
+        // Let the engine play what is still buffered (up to the buffer length).
+        {
+            var drain = System.Diagnostics.Stopwatch.StartNew();
+            uint left;
+            while (client.GetCurrentPadding(out left) == 0 && left > 0 && drain.ElapsedMilliseconds < 2000) {
+                Thread.Sleep(5);
+            }
         }
 
         sb.AppendLine("wrote frames=" + written + " iterations=" + iterations);
@@ -319,4 +351,4 @@ if (-not ('T2WasapiTone.Tone' -as [type])) {
     Add-Type -TypeDefinition $code
 }
 
-[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude, $EndpointVolume, $Channel)
+[T2WasapiTone.Tone]::Run($DeviceId, $Seconds, $Frequency, $Amplitude, $EndpointVolume, $Channel, $SweepTo)

@@ -15,7 +15,7 @@
 
 Порядок:
 1. Сборка **1.0.10.0** с актуальной `diagnostics`.
-2. Быстрая проверка раскладки двумя тонами — закрывает гипотезу A.
+2. Проверка динамиков по шагам (`-SpeakerCheck`): работают ли вуферы, середина и твитеры. Это закрывает вопрос «работает ли НЧ-динамик» и гипотезу A.
 3. Сравнение DSP на слух.
 
 **Шаг 1. Ветка, CI, сборка.**
@@ -29,30 +29,30 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 
 **Шаг 2. Stage 1:** `.\tools\T2Audio-TestAgent.ps1 -Mode Test -Stage 1 -ExpectedSysHash $h`. PASS: `mode parameters: … OutputAttenuation=1 (-6 dB) ClockRateTracking=0 SpeakerDsp=0`.
 
-**Шаг 3. Раскладка двумя тонами** (сырые каналы; низкий тон только на 0/1/3/4, на 2/5 агент его не пустит):
-```powershell
-$base = @{ Mode='Test'; Mmio=$true; BceIo=$true; OwnerApprovedBceIo=$true; RawChannels=$true;
-          AudibleVolume=0.1; OwnerApprovedAudible=$true; ToneSeconds=3; ExpectedSysHash=$h; Force=$true }
-foreach ($c in 0,1,3,4) {
-  foreach ($f in 150, 6000) {
-    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f
-    & .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-    Read-Host "Канал ${c}, $f Гц: слышно? откуда? (запиши)"
-  }
-}
-foreach ($c in 2,5) {
-  foreach ($f in 1500, 6000) {
-    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f
-    & .\tools\T2Audio-TestAgent.ps1 -Mode Recover
-    Read-Host "Канал ${c}, $f Гц: слышно? откуда? (запиши)"
-  }
-}
-```
-Как читать результат:
-* **Вуфер:** 150 Гц слышно отчётливо (гул), 6 кГц глухо.
-* **Твитер:** 150 Гц почти не слышно или щелчок, 6 кГц звонко.
+**Шаг 3. Проверка динамиков: работают ли вуферы (НЧ), середина и твитеры (ВЧ).** Владелец слушает сам, агент ведёт по шагам.
 
-Ожидается: 0/1/3/4 — вуферы, 2/5 — твитеры, 0–2 слева, 3–5 справа. Если не так — стоп, запиши таблицу. Код не правь, это для Claude.
+3a. Каждый динамик отдельно (сырые 6 каналов):
+```powershell
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -SpeakerCheck -OwnerApprovedAudible -RawChannels -ExpectedSysHash $h
+.\tools\T2Audio-TestAgent.ps1 -Mode Recover
+```
+Что играет:
+* вуферы 0, 1, 3, 4: 100 Гц, 1 кГц, свип 50→500 Гц;
+* твитеры 2, 5: 2 кГц, 8 кГц, свип 1→16 кГц.
+
+Перед каждым шагом агент ждёт Enter. После шага спрашивает, что было слышно, и записывает ответ в `speakercheck.txt`. Ответ `r` — повторить шаг, `q` — закончить. Тоны с плавным нарастанием, без щелчков. Громкость точки 0.1; если тихо, повтори с `-AudibleVolume 0.2`.
+
+Как читать:
+* **Вуфер исправен:** 100 Гц слышно отчётливо (гул), в свипе звук появляется примерно со 100–150 Гц.
+* **Твитер:** 8 кГц звонко.
+
+Ожидается: 0/1/3/4 — вуферы, 2/5 — твитеры, 0–2 слева, 3–5 справа. Если какой-то канал молчит или звучит не тем динамиком — стоп, запиши таблицу для Claude, код не правь.
+
+3b. Через обычную стерео-точку, то есть то, что слышит Windows. После 3a Windows может помнить 6-канальный формат точки. Тогда в логе будет `Validate: 6 channels not offered`, а поток не стартует. Лечение — §3 B1: «Звук → Свойства → Дополнительно → 2 канала, 32 бит, 48000 Гц». Сам тест: левая сторона, потом правая, на каждой 100 Гц, 1 кГц, 8 кГц и свип 40 Гц → 16 кГц. Сделай дважды: с `SpeakerDsp` удалённым (0) и с `SpeakerDsp=3`:
+```powershell
+.\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -SpeakerCheck -OwnerApprovedAudible -ExpectedSysHash $h
+.\tools\T2Audio-TestAgent.ps1 -Mode Recover
+```
 
 **Шаг 4. Сравнение DSP** (`-Listen`, как в прошлый раз). Четыре прослушивания на одних и тех же треках и одной громкости Windows: `SpeakerDsp` = 0, 1, 2, 3 (dword в `Parameters`; перед каждым прослушиванием новое значение):
 ```powershell
@@ -69,7 +69,7 @@ foreach ($c in 2,5) {
 **Шаг 5 (если останется время).** Лучший уровень `SpeakerDsp` плюс `ClockRateTracking=1`, 10 минут. Строки `T2 clock: rate=…`: drift около +10 000 ppb, lead около 1000.
 
 **Шаг 6. Отчёт:**
-1. `docs/logs/EXCERPT_<дата>_<время>.md`: таблица раскладки, оценки по уровням DSP, строки лога.
+1. `docs/logs/EXCERPT_<дата>_<время>.md`: содержимое `speakercheck.txt` (3a и 3b), таблица раскладки, оценки по уровням DSP, строки лога.
 2. Датированная запись в `docs/CURRENT_STATE.md`.
 3. PR в `diagnostics`.
 4. В конце AppleAudio (`Started`, `CM_PROB_NONE`), значения в `Parameters` удалены.
@@ -89,8 +89,8 @@ foreach ($c in 2,5) {
 * **Ещё не проверено на железе:** что T2 читает наше кольцо (то есть сам звук), питание (сон/D3), переполнение hostTime на большом аптайме.
 * **Новое после прогона D (только исходники, на железе не проверено):**
   * `Parameters\OutputAttenuation`: защитное ослабление каждого сэмпла шагами по 6 дБ. По умолчанию 3, то есть −18 дБ; 0 выключает, максимум 16. Значение видно в логе: `mode parameters: … OutputAttenuation=3 (-18 dB)`.
-  * `tools/Test-WasapiTone.ps1 -EndpointVolume 0.01..0.05`: тихий тон только на явно указанной точке, после тона Mute и громкость 0 возвращаются. Исправлена запись 32-битного PCM: раньше в 32-битный буфер писались 16-битные сэмплы.
-  * `tools/T2Audio-TestAgent.ps1 -AudibleVolume <0.01..0.05> -OwnerApprovedAudible`: этап E. Сначала идёт беззвучная проба, только потом тон.
+  * `tools/Test-WasapiTone.ps1 -EndpointVolume` (сейчас до 0.25): тихий тон только на явно указанной точке, после тона Mute и громкость 0 возвращаются. Исправлена запись 32-битного PCM: раньше в 32-битный буфер писались 16-битные сэмплы.
+  * `tools/T2Audio-TestAgent.ps1 -AudibleVolume <до 0.25> -OwnerApprovedAudible`: этап E. Сначала идёт беззвучная проба, только потом тон.
   * `Parameters\ClockRateTracking` (по умолчанию 0): подстройка скорости под часы T2 против скачков при дрейфе. Найдено симуляцией `tests/T2AudioPipelineTest.c`, см. §7 E2/E3.
   * Уборка: старые документы перенесены в `docs/archive/`. `.sys` и `.cat` больше не коммитятся (§2 A3). Пути к DbgViewCLI: `$env:T2AUDIO_DBGVIEW` или `..\DebugView\`.
   * CI компилирует C# из `Test-WasapiTone.ps1` и `Test-WasapiRender.ps1`, гоняет pipeline-тест. PSScriptAnalyzer, InfVerif и анализ кода работают в режиме «только отчёт».
@@ -115,7 +115,7 @@ foreach ($c in 2,5) {
 6. Не пиши «исправлено» / «работает» в документации и коммитах без доказательства с железа (лог, дамп, хэш бинарника).
 7. Не коммить сертификаты, `.pfx`, приватные ключи, полные логи ядра (`docs/logs/capture_*/` в `.gitignore`), бинарники Apple и проекты REA/Ghidra. В репозиторий кладутся только выдержки; бинарники и большие листинги — в приватный `imacorpoliz/mbp`.
 8. В `diagnostics` напрямую не пушь. Работай в своей ветке от `diagnostics` (например, `gemini/hw-stage3`) и открывай PR в `diagnostics`.
-9. `-RawChannels` (6 сырых каналов, **твитеры без защиты**) — только для проверки раскладки и только со звуком, разрешённым владельцем (§6.2).
+9. `-RawChannels` (6 сырых каналов, **твитеры без защиты**) — только для проверки раскладки и динамиков и только со звуком, разрешённым владельцем. На каналы 2/5 (твитеры) не ниже 1 кГц — это проверяют и агент, и скрипт тона.
 
 ---
 
@@ -353,7 +353,7 @@ after run: endpoint mute=True volume=0
 
 ### 6.2 Раскладка (по одному каналу)
 
-Только с `-RawChannels` (**твитеры без защиты**): тихий тон **1 кГц и выше**, по одному каналу 0…5. Агент пускает `-AudibleVolume` вместе с `-RawChannels` только с `-ToneChannel 0..5` и `-ToneFrequency >= 1000`. Сам скрипт тона тоже отказывает (`TWEETER REFUSED`), если ниже 1 кГц идёт на каналы 2/5 или на все каналы.
+Только с `-RawChannels` (**твитеры без защиты**): тихий тон **1 кГц и выше**, по одному каналу 0…5. Агент пускает `-AudibleVolume` вместе с `-RawChannels` только с `-ToneChannel 0..5`, а на каналы 2/5 только с `-ToneFrequency >= 1000`. Удобнее — `-SpeakerCheck -RawChannels` (см. блок «▶ СЛЕДУЮЩИЙ ЗАПУСК»). Сам скрипт тона тоже отказывает (`TWEETER REFUSED`), если ниже 1 кГц идёт на каналы 2/5 или на все каналы.
 
 ```powershell
 foreach ($c in 0..5) {

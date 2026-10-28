@@ -41,6 +41,8 @@
 #       -AudibleVolume 0.03 -OwnerApprovedAudible        # Stage E: quiet tone (owner only)
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
 #       -Listen -OwnerApprovedAudible                     # driver stays on until Enter (owner listens)
+#   .\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo `
+#       -SpeakerCheck -OwnerApprovedAudible [-RawChannels] # LF / MF / HF per speaker, step by step
 #   .\T2Audio-TestAgent.ps1 -Mode Test -Stage 5 -Mmio   # + BAR1 writes (risky)
 #   .\T2Audio-TestAgent.ps1 -Mode Recover
 
@@ -82,6 +84,16 @@ param(
 
     # The machine owner's explicit approval for -AudibleVolume and -Listen.
     [switch]$OwnerApprovedAudible,
+
+    # Speaker check: after the muted probe, play a fixed sequence of
+    # low / mid / high tones and sweeps, one speaker (or side) at a time,
+    # pausing for Enter between steps so the owner can tell whether each
+    # speaker works. With -RawChannels each of the 6 drivers is addressed on
+    # its own (woofers 0/1/3/4: LF, MF, sweep 50-500 Hz; tweeters 2/5: MF-HF,
+    # HF, sweep 1-16 kHz); without it the stereo endpoint is used (left, then
+    # right: 100 Hz, 1 kHz, 8 kHz, sweep 40 Hz - 16 kHz) so the driver's own
+    # crossover / SpeakerDsp is heard. Endpoint volume: -AudibleVolume, or 0.1.
+    [switch]$SpeakerCheck,
 
     # Listening session: start the driver (needs -Mmio -BceIo and both owner
     # approvals), skip the probe and the tone, and keep the device running
@@ -304,6 +316,61 @@ function Get-DbgViewCli {
     return $null
 }
 
+# Speaker check sequence (see -SpeakerCheck). Each step: channel, start
+# frequency, sweep end (0 = steady tone), seconds, description.
+function Get-SpeakerCheckSteps {
+    if ($RawChannels) {
+        $steps = @()
+        foreach ($w in @(@(0, 'left woofer A'), @(1, 'left woofer B'), @(3, 'right woofer A'), @(4, 'right woofer B'))) {
+            $steps += ,@($w[0], 100, 0, 3, "$($w[1]): LF 100 Hz (must be clearly audible as a hum)")
+            $steps += ,@($w[0], 1000, 0, 3, "$($w[1]): MF 1 kHz")
+            $steps += ,@($w[0], 50, 500, 6, "$($w[1]): sweep 50 -> 500 Hz (note where it becomes audible)")
+        }
+        foreach ($t in @(@(2, 'left tweeter'), @(5, 'right tweeter'))) {
+            $steps += ,@($t[0], 2000, 0, 3, "$($t[1]): MF-HF 2 kHz")
+            $steps += ,@($t[0], 8000, 0, 3, "$($t[1]): HF 8 kHz")
+            $steps += ,@($t[0], 1000, 16000, 6, "$($t[1]): sweep 1 -> 16 kHz")
+        }
+        return $steps
+    }
+    $steps = @()
+    foreach ($s in @(@(0, 'LEFT'), @(1, 'RIGHT'))) {
+        $steps += ,@($s[0], 100, 0, 3, "$($s[1]) side: LF 100 Hz (woofers)")
+        $steps += ,@($s[0], 1000, 0, 3, "$($s[1]) side: MF 1 kHz")
+        $steps += ,@($s[0], 8000, 0, 3, "$($s[1]) side: HF 8 kHz (tweeter)")
+        $steps += ,@($s[0], 40, 16000, 8, "$($s[1]) side: sweep 40 Hz -> 16 kHz")
+    }
+    return $steps
+}
+
+function Invoke-SpeakerCheck {
+    param([string]$Endpoint, [string]$CaptureDir)
+    $log = Join-Path $CaptureDir 'speakercheck.txt'
+    $steps = Get-SpeakerCheckSteps
+    $mode = if ($RawChannels) { 'raw 6 channels (each driver alone)' } else { 'stereo endpoint (driver crossover / SpeakerDsp)' }
+    Write-Host ''
+    Write-Host "  SPEAKER CHECK - $mode, endpoint volume $AudibleVolume" -ForegroundColor Cyan
+    Write-Host '  Each step plays once. Enter = play / next, r = repeat, q = stop.' -ForegroundColor Cyan
+    "speaker check: $mode, endpoint volume $AudibleVolume, amplitude $ToneAmplitude" | Out-File $log -Encoding utf8
+    $i = 0
+    while ($i -lt $steps.Count) {
+        $st = $steps[$i]
+        Write-Host ("  [{0}/{1}] ch {2}: {3}" -f ($i + 1), $steps.Count, $st[0], $st[4]) -ForegroundColor Yellow
+        $answer = Read-Host '    Enter = play, q = stop'
+        if ($answer -eq 'q') { 'stopped by user' | Out-File $log -Append -Encoding utf8; break }
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ToneScript `
+            -DeviceId $Endpoint -EndpointVolume $AudibleVolume -Amplitude $ToneAmplitude `
+            -Frequency $st[1] -SweepTo $st[2] -Seconds $st[3] -Channel $st[0] 2>&1 | Out-String
+        $heard = Read-Host '    What did you hear? (text; r = repeat)'
+        "---- step $($i + 1): ch $($st[0]) $($st[4])`n$out`nOWNER: $heard" | Out-File $log -Append -Encoding utf8
+        if ($out -match 'REFUSED|NOT CONFIRMED|NOT FOUND') {
+            Write-Fail '    Tone refused (see speakercheck.txt).'
+        }
+        if ($heard -ne 'r') { $i++ }
+    }
+    Write-Ok "Speaker check done; answers in $log"
+}
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
@@ -439,7 +506,15 @@ function Invoke-Test {
         $CaptureSeconds = 86400
         Write-Warn 'Listening session: the T2 driver stays enabled until you press Enter.'
     }
-    $audible = ($AudibleVolume -ge 0.0)
+    if ($SpeakerCheck) {
+        if (-not ($BceIo -and $Mmio -and $OwnerApprovedAudible) -or $Listen) {
+            Write-Fail '-SpeakerCheck needs -Mmio -BceIo -OwnerApprovedBceIo -OwnerApprovedAudible (and no -Listen).'
+            exit 1
+        }
+        if ($AudibleVolume -lt 0.0) { $AudibleVolume = 0.1 }
+        $CaptureSeconds = 86400
+    }
+    $audible = ($AudibleVolume -ge 0.0) -and -not $SpeakerCheck
     if ($audible) {
         if (-not ($BceIo -and $Mmio)) {
             Write-Fail '-AudibleVolume needs -BceIo -Mmio (the tone must reach the ring).'
@@ -578,6 +653,11 @@ function Invoke-Test {
                 } elseif ($audible) {
                     Write-Fail 'Stage E tone skipped: the muted probe did not pass.'
                 }
+                if ($SpeakerCheck -and $muted) {
+                    Invoke-SpeakerCheck -Endpoint $endpoint -CaptureDir $captureDir
+                } elseif ($SpeakerCheck) {
+                    Write-Fail 'Speaker check skipped: the muted probe did not pass.'
+                }
             } catch {
                 Write-Warn "Probe error: $_"
             }
@@ -592,8 +672,9 @@ function Invoke-Test {
         $disableCode = Set-DeviceStateBounded -InstanceId $instanceId -Action 'disable'
 
         if ($proc) {
-            if ($Listen) {
-                # Give DbgView a moment to flush the teardown lines, then stop it.
+            if ($Listen -or $SpeakerCheck) {
+                # Open-ended capture: give DbgView a moment to flush the
+                # teardown lines, then stop it.
                 Start-Sleep -Seconds 3
                 if (-not $proc.HasExited) { $proc.Kill() }
             }
