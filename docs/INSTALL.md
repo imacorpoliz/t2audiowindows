@@ -60,6 +60,14 @@ listening. `macos-precise`, `bass`, `voice`, `movie` and `night` use the
 parameters added in 1.0.12.0 (`BassDb`, `TrebleDb`, `ClarityDb`, `CompStyle`);
 a 1.0.11.0 driver ignores them.
 
+### One side quieter than the other
+
+`.\tools\T2Audio-Setup.ps1 -Action Status` shows the T2 endpoint's per-channel
+levels (`L=… R=…`) and warns if they differ. `-Action Balance -Volume 0.3`
+sets both channels equal (Windows keeps a balance per device, under Sound
+settings → device properties → Levels → Balance, even across reinstalls).
+`-Action Install` does the same at the end.
+
 ### Tone on top of a preset
 
 `-Action Tune` (menu item 5) changes only the tone values and keeps the rest

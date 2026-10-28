@@ -5,6 +5,7 @@
 #   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # установить, постоянный режим
 #   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # сменить пресет звука
 #   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # тембр поверх пресета
+#   .\T2Audio-Setup.ps1 -Action Balance -Volume 0.3      # выровнять баланс L/R
 #   .\T2Audio-Setup.ps1 -Action Status
 #   .\T2Audio-Setup.ps1 -Action ResetGuard               # сбросить защиту от падений
 #   .\T2Audio-Setup.ps1 -Action Uninstall                # вернуть AppleAudio
@@ -21,7 +22,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
@@ -235,8 +236,39 @@ public interface IAudioEndpointVolume {
     [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
 }
 public static class Volume {
-    // Un-mute the endpoint and set its volume; returns "mute=.. volume=..".
+    // Per-channel levels ("L=0.30 R=0.12"): Windows keeps a balance per
+    // endpoint (Sound settings, Levels, Balance) across driver reinstalls.
+    static string Channels(IAudioEndpointVolume v) {
+        uint n; if (v.GetChannelCount(out n) != 0) return "channels=?";
+        var parts = new System.Collections.Generic.List<string>();
+        for (uint c = 0; c < n; c++) {
+            float l; v.GetChannelVolumeLevelScalar(c, out l);
+            parts.Add((n == 2 ? (c == 0 ? "L" : "R") : ("ch" + c)) + "=" + l.ToString("0.00"));
+        }
+        return string.Join(" ", parts.ToArray());
+    }
+    static IAudioEndpointVolume Open(string id) {
+        var en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(MMDeviceEnumerator));
+        IMMDevice dev;
+        if (en.GetDevice(id, out dev) != 0 || dev == null) return null;
+        Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        object o;
+        if (dev.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o) != 0 || o == null) return null;
+        return (IAudioEndpointVolume)o;
+    }
+    public static string Get(string id) {
+        var v = Open(id);
+        if (v == null) return "no endpoint volume";
+        bool m; float l;
+        v.GetMute(out m);
+        v.GetMasterVolumeLevelScalar(out l);
+        return "mute=" + m + " volume=" + l.ToString("0.00") + " " + Channels(v);
+    }
+    // Un-mute the endpoint, set its volume and an even L/R balance;
+    // returns the channel levels before and after.
     public static string Set(string id, float level) {
+        var bal = Open(id);
+        string before = bal == null ? "?" : Channels(bal);
         var en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(MMDeviceEnumerator));
         IMMDevice dev;
         if (en.GetDevice(id, out dev) != 0 || dev == null) return "device not found";
@@ -246,11 +278,15 @@ public static class Volume {
         if (dev.Activate(ref iid, CLSCTX.ALL, IntPtr.Zero, out o) != 0 || o == null) return "no endpoint volume";
         var v = (IAudioEndpointVolume)o;
         v.SetMasterVolumeLevelScalar(level, ref ctx);
+        uint n;
+        if (v.GetChannelCount(out n) == 0) {
+            for (uint c = 0; c < n; c++) v.SetChannelVolumeLevelScalar(c, level, ref ctx);
+        }
         v.SetMute(false, ref ctx);
         bool m; float l;
         v.GetMute(out m);
         v.GetMasterVolumeLevelScalar(out l);
-        return "mute=" + m + " volume=" + l.ToString("0.00");
+        return "mute=" + m + " volume=" + l.ToString("0.00") + "; balance before: " + before + ", now: " + Channels(v);
     }
 }
 }
@@ -279,7 +315,7 @@ function Set-T2Volume([double]$level) {
     try {
         if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
         $r = [T2Setup.Volume]::Set($ep, [float]$level)
-        Write-Ok "Динамики T2: Mute снят, громкость $([int]($level * 100)) % ($r)"
+        Write-Ok "Динамики T2: Mute снят, громкость $([int]($level * 100)) %, баланс L/R выровнен ($r)"
     } catch {
         Write-Warn "Не удалось выставить громкость: $_"
     }
@@ -378,6 +414,18 @@ function Invoke-Status {
         Write-Warn "Прошлая сессия завершилась нештатно (обрывов подряд: $strikes)."
     } else {
         Write-Host '   Защита от падений: в порядке' -ForegroundColor White
+    }
+    $ep = Get-T2Endpoint
+    if ($ep) {
+        try {
+            if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
+            $vol = [T2Setup.Volume]::Get($ep)
+            Write-Host ("   Громкость T2:   {0}" -f $vol) -ForegroundColor White
+            if ($vol -match 'L=([\d.,]+) R=([\d.,]+)') {
+                $l = [double]($Matches[1] -replace ',', '.'); $r = [double]($Matches[2] -replace ',', '.')
+                if ([math]::Abs($l - $r) -gt 0.02) { Write-Warn 'Баланс L/R неравный (Параметры звука, Уровни, Баланс). Выровнять: .\T2Audio-Setup.ps1 -Action Balance' }
+            }
+        } catch { }
     }
     $ts = if (Test-TestSigning) { 'включён' } else { 'ВЫКЛЮЧЕН' }
     Write-Host ("   testsigning:    {0}" -f $ts) -ForegroundColor White
@@ -558,6 +606,7 @@ switch ($Action) {
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
+    'Balance'    { Write-Banner; Write-Section 'Баланс'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
     'Uninstall'  { Write-Banner; Invoke-Uninstall }
