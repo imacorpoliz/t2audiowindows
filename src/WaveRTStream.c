@@ -361,8 +361,9 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // compose, so the raw path adds it to the sample shift). Frames
             // are 4-byte aligned in both rings.
             if (instance->Channels == 2 && context->SpeakerDsp) {
-                // KAIT2EN 16_1 chain + limiter (T2AudioDsp.h); level 2 adds
-                // the virtual bass.
+                // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
+                // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
+                // the autogain in front.
                 T2DspRenderStereoToSpeakers(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
                     (const unsigned int *)(sourceBase + srcOffset),
@@ -374,6 +375,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                     context->DspGainDb,
                     context->TweeterTrimDb,
                     context->WooferLimitDb,
+                    context->DspAutoGain,
                     &instance->Dsp);
             } else if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(
@@ -787,11 +789,13 @@ T2AudioStreamSetState(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu autoGainDb10=%I64d\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
                  instance->CopyGapsOverLead, instance->SkipEvents, instance->MaxCopyUs,
-                 instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames));
+                 instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames,
+                 // autogain at the end of the run, tenths of a dB (Q16 log2 * 6.02)
+                 instance->Dsp.AgcLog * 602 / 65536));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 

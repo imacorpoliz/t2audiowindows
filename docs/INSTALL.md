@@ -43,6 +43,7 @@ PowerShell **от имени администратора**, из корня р�
 | `bright` | как `macos` + `TweeterTrimDb=3` | Больше «воздуха», если звук кажется глуховатым |
 | `loud` | `SpeakerDsp=4`, `DspGainDb=9`, `WooferLimitDb=3` | Громче; защита вуферов от дребезга |
 | `maxvolume` | `SpeakerDsp=4`, `DspGainDb=6`, `WooferLimitDb=6` | Громкая музыка с басом без гула |
+| `even` | как `macos` + `DspAutoGain=1` | Ровная громкость: тихие записи до +6 дБ громче, громкие до −12 дБ тише |
 | `warm` | `SpeakerDsp=2` | Без компрессора: больше динамики, чуть тише |
 | `natural` | `SpeakerDsp=1` | Только эквалайзер и кроссовер Apple |
 | `raw` | `SpeakerDsp=0` | Без обработки — для сравнения (плоско, без баса) |

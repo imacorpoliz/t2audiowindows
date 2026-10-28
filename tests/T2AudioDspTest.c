@@ -11,6 +11,7 @@
 #include <math.h>
 #include <time.h>
 #include <string.h>
+#include <stdlib.h>
 #include "../src/T2AudioDsp.h"
 
 static int g_failures = 0;
@@ -238,7 +239,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
         double l = amp * sin(ph), r = amp * sin(ph + rphase);
         src[0] = host_word(l);
         src[1] = host_word(r);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
         ref_frame(&ref, l, r, out);
         if (n >= 48000) {
             double a = fabs(ring_value(dst[ch]));
@@ -319,7 +320,7 @@ static void test_stability(void)
     printf("Stability\n");
     T2DspReset(&st);
     for (n = 0; n < 48000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
         if (dst[0] | dst[2] | dst[3] | dst[5]) nonzero++;
     }
     check("silence in -> exact silence out", nonzero == 0);
@@ -327,10 +328,10 @@ static void test_stability(void)
     // Impulse, then 2 s of silence: the output must decay to (near) zero.
     T2DspReset(&st);
     src[0] = src[1] = 0x7FFFFF00u;
-    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
     src[0] = src[1] = 0;
     for (n = 0; n < 96000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
         if (n > 95000) {
             int c;
             for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > tail) tail = fabs(ring_value(dst[c]));
@@ -354,7 +355,7 @@ static void test_headroom_and_limiter(void)
         double s = 0.999 * sin(2.0 * 3.14159265358979323846 * 100.0 * n / 48000.0);
         int c;
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     printf("  full-scale 100 Hz: output peak %.4f, limited frames %lu\n", peak, st.LimitedFrames);
@@ -374,7 +375,7 @@ static void test_headroom_and_limiter(void)
         unsigned int v = ((n / 300) & 1) ? 0x80000000u : 0x7FFFFFFFu;
         int c;
         src[0] = src[1] = v;
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     check("full-scale square: output bounded by the threshold", peak <= 0.8912509 + 2.0 / 8388608.0);
@@ -384,7 +385,7 @@ static void test_headroom_and_limiter(void)
     for (n = 0; n < 48000; n++) {
         double s = 0.05 * sin(2.0 * 3.14159265358979323846 * 440.0 * n / 48000.0);
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
     }
     check("limiter idle at -26 dBFS", st.LimitedFrames == 0);
 
@@ -399,7 +400,7 @@ static void test_headroom_and_limiter(void)
             for (n = 0; n < 57600; n++) {
                 double s = 0.1 * sin(2.0 * 3.14159265358979323846 * 1000.0 * n / 48000.0);
                 src[0] = src[1] = host_word(s);
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, g_level, 0, 0, 0, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, g_level, 0, 0, 0, 0, &st);
                 if (n >= 48000 && fabs(ring_value(dst[0])) > pf) pf = fabs(ring_value(dst[0]));
             }
             a1 = 20.0 * log10(pf / 0.1);
@@ -419,7 +420,7 @@ static void test_cost(void)
     T2DspReset(&st);
     for (i = 0; i < 96 * 2; i++) src[i] = host_word(0.1 * sin(i * 0.1));
     t0 = clock();
-    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, 0, 0, 0, &st);
+    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, 0, 0, 0, 0, &st);
     t1 = clock();
     us = (double)(t1 - t0) / CLOCKS_PER_SEC * 1e6 / 5000.0;
     printf("Cost: %.1f us per 2 ms DPC tick (96 frames) on this host\n", us);
@@ -448,7 +449,7 @@ static double tone_band_energy(double hz, double amp, double lo, double hi, int 
             double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0);
             src[0] = src[1] = host_word(s);
             if (fixed) {
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, 0, 0, 0, 0, &st);
                 y[n] = ring_value(dst[T2AUDIO_SPK_LEFT_WOOFER_A]);
             } else {
                 ref_frame(&ref, s, s, out);
@@ -578,7 +579,7 @@ static double tweeter_8k_peak(unsigned int gainDb, double amp)
     for (n = 0; n < 24000; n++) {
         double s = amp * sin(2.0 * 3.14159265358979323846 * 8000.0 * n / 48000.0);
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, gainDb, 0, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, gainDb, 0, 0, 0, &st);
         if (n > 12000 && fabs(ring_value(dst[T2AUDIO_SPK_LEFT_TWEETER])) > pk) pk = fabs(ring_value(dst[T2AUDIO_SPK_LEFT_TWEETER]));
     }
     return pk;
@@ -604,8 +605,8 @@ static void test_makeup_gain(void)
             double s = 0.05 * (sin(2.0 * 3.14159265358979323846 * 8000.0 * n / 48000.0) +
                                sin(2.0 * 3.14159265358979323846 * 150.0 * n / 48000.0));
             src[0] = src[1] = host_word(s);
-            T2DspRenderStereoToSpeakers(da, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, &a);
-            T2DspRenderStereoToSpeakers(db, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 6, 0, &b);
+            T2DspRenderStereoToSpeakers(da, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, 0, &a);
+            T2DspRenderStereoToSpeakers(db, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 6, 0, 0, &b);
             if (n > 12000) {
                 ta = fmax(ta, fabs(ring_value(da[T2AUDIO_SPK_LEFT_TWEETER])));
                 tb = fmax(tb, fabs(ring_value(db[T2AUDIO_SPK_LEFT_TWEETER])));
@@ -629,7 +630,7 @@ static void test_makeup_gain(void)
             for (n = 0; n < 24000; n++) {
                 src[0] = src[1] = ((n / 3) & 1) ? 0x80000000u : 0x7FFFFFFFu;   // 8 kHz square
                 if (n > 12000) src[1] = ((n / 200) & 1) ? 0x80000000u : 0x7FFFFFFFu;
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, lvl, 12, 12, 0, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, lvl, 12, 12, 0, 0, &st);
                 for (c = 0; c < 6; c++) pk = fmax(pk, fabs(ring_value(dst[c])));
             }
         }
@@ -645,7 +646,7 @@ static void test_makeup_gain(void)
         T2DspReset(&st);
         for (n = 0; n < 48000; n++) {
             src[0] = src[1] = host_word(0.999 * sin(2.0 * 3.14159265358979323846 * 100.0 * n / 48000.0));
-            T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 6, &st);
+            T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 6, 0, &st);
             if (n > 24000) wpk = fmax(wpk, fabs(ring_value(dst[T2AUDIO_SPK_LEFT_WOOFER_A])));
         }
         printf("  WooferLimitDb 6: woofer peak %.4f (ceiling %.4f), woofer-limited frames %lu\n",
@@ -697,6 +698,125 @@ static void test_compressor(void)
     check("at 0 dBFS the band is compressed by > 4 dB vs quiet", gLow - gHigh > 4.0);
 }
 
+// Lookahead limiter alone (full scale 2^31): the delay, a ramp instead of a
+// jump in front of a peak, and the ceiling.
+static void test_lookahead(void)
+{
+    static T2DSP_STATE st;
+    const long long thr = T2DSP_LIMIT_THRESHOLD;
+    unsigned long limited = 0;
+    long long y[600];
+    int n, ok = 1, mono = 1;
+    long long maxOut = 0;
+
+    printf("Lookahead limiter\n");
+    T2DspReset(&st);
+    for (n = 0; n < 600; n++) {
+        long long x = (n < 300) ? thr / 2 : thr * 2;   // step up to +6 dB over
+        long long v[1];
+        v[0] = x;
+        T2DspLimit(&st.Limiter[0], v, 1, thr, &limited);
+        y[n] = v[0];
+        if (v[0] > maxOut) maxOut = v[0];
+    }
+    // Below the threshold the signal passes unchanged, T2DSP_LOOKAHEAD late.
+    for (n = 0; n < (int)T2DSP_LOOKAHEAD; n++) if (y[n] != 0) ok = 0;
+    for (n = (int)T2DSP_LOOKAHEAD; n < 300 - 1; n++) {
+        if (n < 300 - 2 * (int)T2DSP_LOOKAHEAD && y[n] != thr / 2) ok = 0;
+    }
+    check("delay is T2DSP_LOOKAHEAD frames, signal below the threshold untouched", ok);
+    // The gain ramps down over the lookahead before the step leaves.
+    for (n = 300; n < 300 + (int)T2DSP_LOOKAHEAD; n++) if (y[n] > y[n - 1]) mono = 0;
+    printf("  step: out before %.4f, mid-ramp %.4f, at the step %.4f, peak %.4f (thr %.4f)\n",
+           (double)y[299] / 2147483648.0, (double)y[312] / 2147483648.0,
+           (double)y[324] / 2147483648.0, (double)maxOut / 2147483648.0, (double)thr / 2147483648.0);
+    check("gain ramps down monotonically in front of the step", mono && y[312] < y[299] && y[312] > thr / 4);
+    check("step held at the threshold (never above)", maxOut <= thr && y[324] > thr - thr / 100);
+    check("frames over the threshold counted", limited == 300);
+
+    // One-sample spike of +12 dB over the threshold in a quiet signal: held
+    // to the threshold, the dip lasts the ramp plus the release.
+    T2DspReset(&st);
+    limited = 0;
+    maxOut = 0;
+    {
+        long long g200 = 0;
+        for (n = 0; n < 6000; n++) {
+            long long v[2];
+            v[0] = (n == 100) ? thr * 4 : thr / 4;
+            v[1] = -v[0];
+            T2DspLimit(&st.Limiter[2], v, 2, thr, &limited);
+            if (v[0] > maxOut) maxOut = v[0];
+            if (-v[1] > maxOut) maxOut = -v[1];
+            if (n == 200) g200 = st.Limiter[2].Gain;
+        }
+        check("spike held at the threshold on both linked channels", maxOut <= thr);
+        check("gain recovers after a spike (> 0.99 after 0.12 s)",
+              st.Limiter[2].Gain > (T2DSP_GAIN_ONE / 100) * 99 && g200 < T2DSP_GAIN_ONE);
+    }
+}
+
+// Autogain (DspAutoGain=1) through the whole linear chain: steady-state woofer
+// peak at 500 Hz with and without it.
+static double agc_gain_db(double amp, long long *agcLog)
+{
+    static T2DSP_STATE a, b;
+    unsigned int src[2], da[6], db[6];
+    double pa = 0, pb = 0;
+    int n;
+
+    T2DspReset(&a);
+    T2DspReset(&b);
+    for (n = 0; n < 96000; n++) {
+        double s = amp * sin(2.0 * 3.14159265358979323846 * 500.0 * n / 48000.0);
+        src[0] = src[1] = host_word(s);
+        T2DspRenderStereoToSpeakers(da, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, 0, &a);
+        T2DspRenderStereoToSpeakers(db, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, 1, &b);
+        if (n > 72000) {
+            pa = fmax(pa, fabs(ring_value(da[T2AUDIO_SPK_LEFT_WOOFER_A])));
+            pb = fmax(pb, fabs(ring_value(db[T2AUDIO_SPK_LEFT_WOOFER_A])));
+        }
+    }
+    *agcLog = b.AgcLog;
+    return 20.0 * log10(pb / pa);
+}
+
+static void test_autogain(void)
+{
+    long long lg;
+    double g;
+
+    printf("Autogain (DspAutoGain=1, target -12 dBFS RMS, +6/-12 dB)\n");
+    g = agc_gain_db(0.01, &lg);
+    printf("  -40 dBFS sine: %+.2f dB\n", g);
+    check("quiet signal raised by the maximum +6 dB (+-0.1)", fabs(g - 6.0) < 0.1);
+    g = agc_gain_db(0.5, &lg);
+    printf("  -6 dBFS sine (RMS -9 dBFS): %+.2f dB\n", g);
+    check("RMS -9 dBFS brought to -12 dBFS (-3.0 dB +-0.2)", fabs(g + 3.01) < 0.2);
+    g = agc_gain_db(0.0003, &lg);
+    printf("  -70 dBFS sine: %+.2f dB (gain state %lld)\n", g, lg);
+    check("below the -60 dBFS gate the gain holds at 0 dB", lg == 0 && fabs(g) < 0.01);
+    {
+        // Full-scale square at every level, +12 dB make-up and trim, autogain
+        // on: bounded by the limiter, autogain at its -12 dB floor.
+        static T2DSP_STATE st;
+        unsigned int src[2], dst[6], lvl;
+        double pk = 0;
+        int n, c;
+        for (lvl = 1; lvl <= T2DSP_LEVEL_MAX; lvl++) {
+            T2DspReset(&st);
+            for (n = 0; n < 96000; n++) {
+                src[0] = src[1] = ((n / 200) & 1) ? 0x80000000u : 0x7FFFFFFFu;
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, lvl, 12, 12, 0, 1, &st);
+                for (c = 0; c < 6; c++) pk = fmax(pk, fabs(ring_value(dst[c])));
+            }
+        }
+        printf("  full-scale square: autogain %.2f dB, output peak %.4f\n", (double)st.AgcLog / 65536.0 * 6.0206, pk);
+        check("full-scale square: autogain at -12 dB (+-0.1), output held at -1 dBFS",
+              llabs(st.AgcLog - T2DSP_AGC_MAX_CUT) < 1100 && pk <= 0.8912509 + 2.0 / 8388608.0);
+    }
+}
+
 int main(void)
 {
     test_match_reference();
@@ -708,6 +828,8 @@ int main(void)
     test_log_exp();
     test_compressor();
     test_buzz();
+    test_lookahead();
+    test_autogain();
     g_level = T2DSP_LEVEL_BUZZ;
     printf("--- level 4 (virtual bass + compressor + woofer buzz compressor) ---\n");
     test_match_reference();

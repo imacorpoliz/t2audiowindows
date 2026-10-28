@@ -14,7 +14,7 @@
 2) установка: T2Audio-Setup.ps1 -Action Install -Preset macos;
 3) обычная перезагрузка: драйвер стартует сам, CrashGuardStrikes остаётся 0 (главный тест);
 4) строка разъёма наушников в логе — вставлены и вынуты;
-5) пресеты bright / loud / maxvolume / macos;
+5) пресеты bright / loud / maxvolume / even / macos (even = автоусиление: ровнее ли громкость между тихой и громкой записью, нет ли «качания»; autoGainDb10 из run summary);
 6) сон (только с разрешения);
 7) T2Audio-Setup.ps1 -Action Uninstall — возврат AppleAudio.
 

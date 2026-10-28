@@ -438,13 +438,16 @@ T2AudioStartDeviceInner(
     if (context->WooferLimitDb > 12) {
         context->WooferLimitDb = 12;
     }
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u\n",
+    // Autogain in front of the DSP chain (T2AudioDsp.h, KAIT2EN "Norm");
+    // 0/1, default 0 (off: the chain is unchanged).
+    context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
              context->OutputAttenuation, context->OutputAttenuation * 6u,
              context->ClockRateTracking ? 1u : 0u,
              context->SpeakerDsp, context->DspGainDb, context->TweeterTrimDb,
-             context->WooferLimitDb));
+             context->WooferLimitDb, context->DspAutoGain));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the
     // driver runs purely on system memory and never touches a BAR.

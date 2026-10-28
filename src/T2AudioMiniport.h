@@ -158,6 +158,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // woofers' limiter ceiling below -1 dBFS in the DSP path (overload /
     // rattle at full volume with heavy bass).
     ULONG WooferLimitDb;
+    // DspAutoGain (Parameters\DspAutoGain, default 0, 0/1): slow autogain
+    // toward -12 dBFS RMS (+6/-12 dB) in front of the DSP chain.
+    ULONG DspAutoGain;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

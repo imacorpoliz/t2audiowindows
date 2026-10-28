@@ -19,10 +19,12 @@
 //        ──► per side: woofer chain (crossover + EQ) [level 4: + buzz
 //                      compressor 110-145 Hz] -> ring 0/1 (L), 3/4 (R)
 //                      tweeter chain (crossover + EQ) -> ring 2 (L), 5 (R)
-//        ──► limiter (linked: left woofers, right woofers, both tweeters)
+//        ──► lookahead limiter (linked: left woofers, right woofers, both
+//            tweeters; 0.5 ms lookahead like KAIT2EN's ControlFreak)
 //
-// Not reproduced (nonlinear in the graph): autogain; KAIT2EN's limiters are
-// replaced by the simple peak limiter below. The woofer "Buzz" compressor
+// Optional (Parameters\DspAutoGain=1, any level): a slow autogain in front of
+// the chain (approximation of the graph's "Norm" node, see T2DspAutoGain).
+// KAIT2EN's lsp limiters are approximated by the lookahead limiter below. The woofer "Buzz" compressor
 // (level 4) is one LR4-split band with the graph's setting. The multiband compressor is an approximation of lsp's (hard knee,
 // peak envelope linked over L/R, gain updated every 16 frames and ramped).
 //
@@ -43,16 +45,39 @@
 
 #define T2DSP_FULL_SCALE      (1ll << 31)
 #define T2DSP_INTERNAL_SHIFT  4     // chain runs 24 dB below full scale
-// Limiter: threshold -1 dBFS (KAIT2EN ControlFreak "th" 0.891), instant
-// attack, release with a time constant of 2^10 samples (~21 ms at 48 kHz).
+// Limiter: threshold -1 dBFS (KAIT2EN ControlFreak "th" 0.891), lookahead
+// 24 frames (0.5 ms, ControlFreak "lk"): the gain ramps down linearly before
+// a peak instead of jumping on it, then releases with a time constant of
+// 2^10 samples (~21 ms at 48 kHz). The output is delayed by the lookahead.
 #define T2DSP_LIMIT_THRESHOLD 1913946815ll   // 0.8912509 * 2^31
 #define T2DSP_GAIN_ONE        (1ll << 30)    // limiter gain, Q30
 #define T2DSP_RELEASE_SHIFT   10
+#define T2DSP_LOOKAHEAD       24u
+// 2^30 / k for k = 1..T2DSP_LOOKAHEAD + 1 (ramp slopes without a division).
+static const long long g_T2DspRecipQ30[T2DSP_LOOKAHEAD + 2] = { 0,
+    1073741824, 536870912, 357913941, 268435456, 214748364, 178956970, 153391689, 134217728,
+    119304647, 107374182, 97612893, 89478485, 82595524, 76695844, 71582788, 67108864,
+    63161283, 59652323, 56512727, 53687091, 51130563, 48806446, 46684427, 44739242, 42949672 };
+
+// Autogain (Parameters\DspAutoGain): RMS of the input (linked L/R, one-pole
+// mean square with a 2^14-frame time constant, ~341 ms) is brought toward
+// -12 dBFS (KAIT2EN Norm: -12 LUFS, unweighted here), by at most +6 dB and
+// -12 dB; below -60 dBFS the gain holds (silence and fades are not pumped).
+// The gain moves in the log2 domain every 16 frames: down with a time
+// constant of 16 updates (~5 ms on top of the envelope), up with 128
+// (~43 ms), and is ramped per frame in between. Log2 values are Q16.
+#define T2DSP_AGC_TARGET      (-130624ll)   // -12 dB
+#define T2DSP_AGC_MAX_BOOST   65312ll       // +6 dB
+#define T2DSP_AGC_MAX_CUT     (-130624ll)   // -12 dB
+#define T2DSP_AGC_GATE        (-653117ll)   // -60 dB
+#define T2DSP_AGC_ENV_SHIFT   14u
+#define T2DSP_AGC_DOWN_SHIFT  4u
+#define T2DSP_AGC_UP_SHIFT    7u
 
 // Make-up gain after the DSP (Parameters\DspGainDb, 0..12 dB, default 6),
 // applied in front of the limiter. The KAIT2EN chain is ~5-9 dB quieter
 // than the plain path on music-like signals (it relies on an autogain stage
-// that is not ported), so without it every DSP level loses an A/B on
+// that is optional here: DspAutoGain), so without it every DSP level loses an A/B on
 // loudness alone; the limiter still caps the output at -1 dBFS.
 #define T2DSP_GAIN_DB_DEFAULT  6u
 #define T2DSP_GAIN_DB_MAX      12u
@@ -78,6 +103,16 @@ typedef struct _T2DSP_BQ_STATE {
     long long E;    // truncation remainder fed back into the next sample
 } T2DSP_BQ_STATE;
 
+// Lookahead limiter for up to 2 linked samples: a ring of the last
+// T2DSP_LOOKAHEAD + 1 frames with the gain each one needs (Q30).
+typedef struct _T2DSP_LIMITER {
+    long long Delay[T2DSP_LOOKAHEAD + 1][2];
+    long long Need[T2DSP_LOOKAHEAD + 1];
+    unsigned int Pos;        // slot of the newest frame
+    unsigned int Pending;    // frames in the ring that need gain < 1
+    long long Gain;          // gain applied to the frame leaving now, Q30
+} T2DSP_LIMITER;
+
 typedef struct _T2DSP_STATE {
     T2DSP_BQ_STATE VirtBass[2][4];
     T2DSP_BQ_STATE Tone1[2][T2DSP_TONE1_STAGES];
@@ -102,8 +137,15 @@ typedef struct _T2DSP_STATE {
     long long Side[T2DSP_XTC_TAPS];
     unsigned int MidPos;
     unsigned int SidePos;
-    // Limiter gains (Q30): left woofers, right woofers, tweeters.
-    long long Gain[3];
+    // Lookahead limiters: left woofers, right woofers, tweeters.
+    T2DSP_LIMITER Limiter[3];
+    // Autogain: mean square of the input, current log2 gain (Q16), the
+    // linear gain (Q30) with its per-frame ramp, frames to the next update.
+    long long AgcEnv;
+    long long AgcLog;
+    long long AgcGain;
+    long long AgcStep;
+    unsigned int AgcCount;
     // Diagnostics: frames where a limiter reduced the gain (all limiters),
     // and those of the woofer limiters alone.
     unsigned long LimitedFrames;
@@ -122,9 +164,15 @@ T2DspReset(T2DSP_STATE *S)
     for (i = 0; i < sizeof(*S); i++) {
         p[i] = 0;
     }
-    S->Gain[0] = T2DSP_GAIN_ONE;
-    S->Gain[1] = T2DSP_GAIN_ONE;
-    S->Gain[2] = T2DSP_GAIN_ONE;
+    for (i = 0; i < 3; i++) {
+        unsigned int k;
+
+        S->Limiter[i].Gain = T2DSP_GAIN_ONE;
+        for (k = 0; k <= T2DSP_LOOKAHEAD; k++) {
+            S->Limiter[i].Need[k] = T2DSP_GAIN_ONE;
+        }
+    }
+    S->AgcGain = T2DSP_GAIN_ONE;
     for (i = 0; i < 4; i++) {
         S->CompGain[i] = T2DSP_GAIN_ONE;
     }
@@ -401,15 +449,23 @@ T2DspXtc(T2DSP_STATE *S, long long *L, long long *R)
     *R = T2DspSat(midDelayed - side);
 }
 
-// Peak limiter on Count linked samples (full scale 2^31, |x| < 2^40): scales
-// them by the shared gain (Q30) kept in *Gain.
+// Lookahead peak limiter on Count (1 or 2) linked samples (full scale 2^31,
+// |x| < 2^40), in place: the samples come out T2DSP_LOOKAHEAD frames later,
+// scaled so that they stay at or below Threshold. Each new frame records the
+// gain it needs; the applied gain moves down along the steepest straight line
+// that reaches every recorded need by the time that frame leaves, so a peak
+// is met by a ramp of up to 0.5 ms instead of a jump. With nothing pending it
+// releases toward 1 (or toward the lowest need in the window). *Limited
+// counts frames that exceeded the threshold on entry.
 static __inline void
-T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, long long Threshold,
+T2DspLimit(T2DSP_LIMITER *Lim, long long *Samples, unsigned int Count, long long Threshold,
            unsigned long *Limited)
 {
+    const unsigned int n = T2DSP_LOOKAHEAD + 1;
     long long peak = 0;
-    long long g = *Gain;
-    unsigned int i;
+    long long need = T2DSP_GAIN_ONE;
+    long long g = Lim->Gain;
+    unsigned int i, pos, age;
 
     for (i = 0; i < Count; i++) {
         long long a = Samples[i] < 0 ? -Samples[i] : Samples[i];
@@ -417,17 +473,110 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, long long Th
             peak = a;
         }
     }
-    // Release toward unity, then attack instantly if needed.
-    g += (T2DSP_GAIN_ONE - g) >> T2DSP_RELEASE_SHIFT;
-    if (peak > 0 && T2DspSar(peak * (g >> 8), 22) > Threshold) {
-        // g = threshold / peak in Q30 (peak < 2^40, threshold < 2^31).
-        g = (Threshold << 30) / peak;
+    if (peak > Threshold) {
+        // need = threshold / peak in Q30 (peak < 2^40, threshold < 2^31).
+        need = (Threshold << 30) / peak;
         (*Limited)++;
     }
-    *Gain = g;
-    for (i = 0; i < Count; i++) {
-        Samples[i] = T2DspSat(T2DspSar(Samples[i] * (g >> 8), 22));
+
+    // The newest frame replaces the one that left last time.
+    pos = (Lim->Pos + 1u) % n;
+    if (Lim->Need[pos] < T2DSP_GAIN_ONE) {
+        Lim->Pending--;
     }
+    Lim->Need[pos] = need;
+    Lim->Delay[pos][0] = Samples[0];
+    Lim->Delay[pos][1] = (Count > 1) ? Samples[1] : 0;
+    if (need < T2DSP_GAIN_ONE) {
+        Lim->Pending++;
+    }
+    Lim->Pos = pos;
+
+    // Frame of age a (0 = leaving now, T2DSP_LOOKAHEAD = newest) sits at
+    // slot (pos + 1 + a) % n and must be met within a + 1 gain steps.
+    if (Lim->Pending == 0) {
+        g += (T2DSP_GAIN_ONE - g) >> T2DSP_RELEASE_SHIFT;
+    } else {
+        long long step = T2DSP_GAIN_ONE;
+        long long lowest = T2DSP_GAIN_ONE;
+
+        for (age = 0; age < n; age++) {
+            long long v = Lim->Need[(pos + 1u + age) % n];
+            long long s = T2DspSar((v - g) * g_T2DspRecipQ30[age + 1u], 30);
+
+            if (s < step) {
+                step = s;
+            }
+            if (v < lowest) {
+                lowest = v;
+            }
+        }
+        if (step < 0) {
+            g += step;
+        } else {
+            // Every need is above g: release, never past the lowest one.
+            g += (lowest - g) >> T2DSP_RELEASE_SHIFT;
+        }
+    }
+    if (g < 1) {
+        g = 1;
+    }
+    Lim->Gain = g;
+
+    pos = (pos + 1u) % n;   // the oldest frame, leaving now
+    for (i = 0; i < Count; i++) {
+        long long y = T2DspSar(Lim->Delay[pos][i] * (g >> 8), 22);
+
+        // Rounding of the ramp can leave an LSB over the threshold.
+        if (y > Threshold) {
+            y = Threshold;
+        } else if (y < -Threshold) {
+            y = -Threshold;
+        }
+        Samples[i] = T2DspSat(y);
+    }
+}
+
+// Autogain on one stereo frame at the input of the chain (internal scale,
+// full scale 2^27), in place; see T2DSP_AGC_*. The level is measured on the
+// input before the gain (feed-forward), so it cannot oscillate.
+static __inline void
+T2DspAutoGain(T2DSP_STATE *S, long long *L, long long *R)
+{
+    long long a = T2DspSar(*L, 8);   // |a| < 2^23 after saturation
+    long long b = T2DspSar(*R, 8);
+    long long p = (a * a + b * b) >> 1;
+
+    S->AgcEnv += T2DspSar(p - S->AgcEnv, T2DSP_AGC_ENV_SHIFT);
+    if (S->AgcCount == 0) {
+        // RMS in log2 relative to a full-scale square (power 2^38 at 2^19).
+        long long level = T2DspSar(T2DspLog2Q16(S->AgcEnv) - (38ll << 16), 1);
+        long long target = S->AgcLog;
+        long long lin;
+
+        if (level > T2DSP_AGC_GATE) {
+            target = T2DSP_AGC_TARGET - level;
+            if (target > T2DSP_AGC_MAX_BOOST) {
+                target = T2DSP_AGC_MAX_BOOST;
+            } else if (target < T2DSP_AGC_MAX_CUT) {
+                target = T2DSP_AGC_MAX_CUT;
+            }
+        }
+        S->AgcLog += T2DspSar(target - S->AgcLog,
+                              target < S->AgcLog ? T2DSP_AGC_DOWN_SHIFT : T2DSP_AGC_UP_SHIFT);
+        if (S->AgcLog <= 0) {
+            lin = T2DspExp2Q30(S->AgcLog);
+        } else {
+            lin = T2DspExp2Q30(S->AgcLog - 65536) << 1;
+        }
+        S->AgcCount = T2DSP_COMP_BLOCK;
+        S->AgcStep = T2DspSar(lin - S->AgcGain, 4);   // T2DSP_COMP_BLOCK = 16
+    }
+    S->AgcCount--;
+    // |x| < 2^31, gain < 2^31: the products stay below 2^62.
+    *L = T2DspSat(T2DspSar(*L * S->AgcGain, 30));
+    *R = T2DspSat(T2DspSar(*R * S->AgcGain, 30));
+    S->AgcGain += S->AgcStep;
 }
 
 // Render Frames stereo frames (MSB-aligned 32-bit host samples, L then R)
@@ -438,7 +587,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, long long Th
 // lifts the tweeters only; WooferLimitDb (0..12 dB) lowers the woofers'
 // limiter ceiling below -1 dBFS. AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
-// S24_LE).
+// S24_LE). AutoGain (0/1) enables T2DspAutoGain in front of the chain.
+// The output lags the input by T2DSP_LOOKAHEAD frames (limiter).
 static __inline void
 T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             const unsigned int *Source,
@@ -449,6 +599,7 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             unsigned int GainDb,
                             unsigned int TweeterTrimDb,
                             unsigned int WooferLimitDb,
+                            unsigned int AutoGain,
                             T2DSP_STATE *S)
 {
     unsigned long f;
@@ -475,6 +626,11 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                 x = (long long)host;
             }
             in[side] = T2DspSar(x, T2DSP_INTERNAL_SHIFT);
+        }
+        if (AutoGain != 0) {
+            T2DspAutoGain(S, &in[0], &in[1]);
+        }
+        for (side = 0; side < 2; side++) {
             if (Level >= T2DSP_LEVEL_VIRTBASS) {
                 in[side] = T2DspVirtBass(S->VirtBass[side], in[side]);
             }
@@ -519,9 +675,9 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
         {
             unsigned long woofersBefore = S->WooferLimitedFrames;
 
-            T2DspLimit(&S->Gain[0], lw, 1, wooferThreshold, &S->WooferLimitedFrames);
-            T2DspLimit(&S->Gain[1], rw, 1, wooferThreshold, &S->WooferLimitedFrames);
-            T2DspLimit(&S->Gain[2], tw, 2, T2DSP_LIMIT_THRESHOLD, &S->LimitedFrames);
+            T2DspLimit(&S->Limiter[0], lw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Limiter[1], rw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Limiter[2], tw, 2, T2DSP_LIMIT_THRESHOLD, &S->LimitedFrames);
             S->LimitedFrames += S->WooferLimitedFrames - woofersBefore;
         }
 

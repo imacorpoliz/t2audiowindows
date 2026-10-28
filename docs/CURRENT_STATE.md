@@ -5,6 +5,24 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): lookahead limiter on every DSP level; optional autogain `DspAutoGain` (source only, not hardware-tested)
+
+The owner asked whether all KAIT2EN post-processing is ported. Not quite: the graph's ControlFreak limiters (lsp, 0.5 ms lookahead) had been replaced by an instant-attack peak limiter, and the `Norm` autogain was left out. Both are now covered:
+- **Lookahead limiter** (`T2DspLimit` in `src/T2AudioDsp.h`), replacing the old limiter at every level 1–4, same groups (left woofers, right woofers, both tweeters linked) and ceilings (−1 dBFS, `WooferLimitDb` for the woofers).
+  - Each frame waits 24 frames (0.5 ms, ControlFreak `lk`) in a delay line. Each new frame records the gain it needs. The applied gain descends along the steepest straight line that reaches every recorded need before that frame leaves. A peak therefore meets a ramp of up to 0.5 ms instead of an instant gain jump, which was a source of clicks and harsh distortion on loud bass at full volume.
+  - Release is unchanged (time constant 1024 frames, ~21 ms). A final clamp to the threshold catches ramp rounding.
+  - **Cost of the change:** the speaker output is 0.5 ms later (not reported to Windows; well below anything audible for A/V sync). Host DSP cost per 2 ms tick: level 1 ~34 µs, 2 ~38 µs, 3 ~73 µs, 4 ~57 µs on this container (same order as before).
+  - Tests: signal below the threshold passes bit-exact, exactly 24 frames late; a +6 dB step is preceded by a monotonic ramp and held exactly at the threshold; a one-sample +12 dB spike on linked channels is held and recovers; all earlier limiter and headroom tests still pass (including +12/+12 dB worst case).
+- **Autogain** `Parameters\DspAutoGain` (0/1, **default 0** = chain unchanged), in front of the chain at any level ≥ 1. It approximates KAIT2EN `Norm` (lsp autogain, −12 LUFS):
+  - linked L/R RMS (one-pole, ~341 ms) is brought toward −12 dBFS RMS, by at most +6 dB and −12 dB;
+  - below −60 dBFS the gain holds, so silence and fade-outs are not pulled up;
+  - the gain moves in log2 every 16 frames (down ~5 ms, up ~43 ms, on top of the envelope) and is ramped per frame;
+  - no K-weighting and no fast surge path (the limiter catches peaks); `weight` is unused.
+  - Tests: −40 dBFS → +6.0 dB; a −6 dBFS sine (−9 dBFS RMS) → −3.0 dB; −70 dBFS → gain held at 0 dB; full-scale square at every level with +12/+12 dB → autogain −12 dB and output held at −1 dBFS. All under gcc, clang and gcc UBSan+ASan.
+- Driver: reads `DspAutoGain`, logs it in `mode parameters`; `run summary` gains `autoGainDb10=` (gain at the end of the run, tenths of a dB).
+- Installer: new preset `even` (= `macos` + `DspAutoGain=1`); every preset now writes `DspAutoGain` (0 elsewhere). Preset detection treats a missing value as the driver default, so an existing `macos` install is still recognised.
+- What to listen for (GEMINI.md next run, step 5): `maxvolume`/`loud` at 100 % with heavy bass, less harshness on peaks; `even`, quiet vs loud recordings closer in level, no audible pumping.
+
 ### 2026-10-28 (Claude): daily use: persistent mode with crash guard, installer with sound presets, headphone jack read (source only, not hardware-tested)
 
 - **Persistent mode** (`Parameters\EnableProduction=1`). Without a TestSession the driver starts on every boot in the hardware-verified configuration (stage 5, MMIO copy, BCE I/O, stereo endpoint).

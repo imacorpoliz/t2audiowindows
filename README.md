@@ -40,6 +40,7 @@ The 16-inch MacBook Pro is renowned for class-leading laptop acoustics, achieved
 ### 3. Speaker Protection & Dynamic Range Control (DRC / Peak Limiter)
 * **Why It Is Essential:** At volumes above ~30%, bass frequencies would push miniature woofer cones beyond their maximum physical excursion ($X_{\max}$), and high-frequency peaks could thermally overload delicate tweeters. macOS uses a lookahead peak limiter to prevent mechanical and thermal damage.
 * **The Solution:** A lightweight lookahead limiter / compressor before writing into BAR0, preventing digital clipping and hardware distortion when Windows master volume is set to 100%.
+* **Status (2026-10-28):** in the driver (`src/T2AudioDsp.h`): 0.5 ms lookahead limiter on every DSP level, multiband compressor (`SpeakerDsp=3`, owner-approved), woofer buzz compressor (`SpeakerDsp=4`), optional autogain (`DspAutoGain=1`). The lookahead limiter and autogain are not yet hardware-tested.
 
 ### 4. Spatial Soundstage (Crosstalk Cancellation / XTC)
 * **macOS Signature Staging:** Apple's wide spatial soundstage (where audio appears to emanate from beyond the physical laptop display) is created using inter-aural crosstalk cancellation (XTC).

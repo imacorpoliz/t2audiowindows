@@ -23,7 +23,7 @@ param(
     [ValidateSet('Menu', 'Install', 'Preset', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
-    [ValidateSet('macos', 'bright', 'loud', 'maxvolume', 'warm', 'natural', 'raw')]
+    [ValidateSet('macos', 'bright', 'loud', 'maxvolume', 'even', 'warm', 'natural', 'raw')]
     [string]$Preset = 'macos',
 
     # Громкость точки T2 после установки (0..1); -1 = не трогать.
@@ -54,27 +54,32 @@ $CatPath      = Join-Path $PackageDir 't2audiominiport.cat'
 $Presets = [ordered]@{
     'macos'     = @{ Title = 'Как на Mac (рекомендуется)';
                      Text  = 'Эквалайзер Apple для 6 динамиков, виртуальный бас, многополосный компрессор.';
-                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0 }; Verified = $true }
+                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $true }
     'bright'    = @{ Title = 'Ярче';
                      Text  = 'Как на Mac, но твитеры на 3 дБ громче: больше «воздуха» и деталей.';
-                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 3; WooferLimitDb = 0 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 3; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
     'loud'      = @{ Title = 'Громче';
                      Text  = 'Сильнее компенсация громкости и защита вуферов от дребезга; лимитер держит пики.';
-                     Values = @{ SpeakerDsp = 4; DspGainDb = 9; TweeterTrimDb = 0; WooferLimitDb = 3 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 4; DspGainDb = 9; TweeterTrimDb = 0; WooferLimitDb = 3; DspAutoGain = 0 }; Verified = $false }
     'maxvolume' = @{ Title = 'Максимальная громкость без гула';
                      Text  = 'Для громкой музыки с басом: вуферы ограничены на 6 дБ ниже, защита от дребезга.';
-                     Values = @{ SpeakerDsp = 4; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 6 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 4; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 6; DspAutoGain = 0 }; Verified = $false }
+    'even'      = @{ Title = 'Ровная громкость';
+                     Text  = 'Как на Mac плюс автоусиление: тихие записи до +6 дБ громче, громкие до -12 дБ тише (медленно, без «качания»).';
+                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 1 }; Verified = $false }
     'warm'      = @{ Title = 'Мягкий';
                      Text  = 'Эквалайзер Mac и виртуальный бас, без компрессора: больше динамики, чуть тише.';
-                     Values = @{ SpeakerDsp = 2; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 2; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
     'natural'   = @{ Title = 'Естественный';
                      Text  = 'Только эквалайзер и разделение на динамики Mac, без виртуального баса и компрессора.';
-                     Values = @{ SpeakerDsp = 1; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 1; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
     'raw'       = @{ Title = 'Без обработки (для сравнения)';
                      Text  = 'Сырой путь: вуферы на полном диапазоне, твитеры через ФВЧ 3 кГц. Звучит плоско, баса мало.';
-                     Values = @{ SpeakerDsp = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0 }; Verified = $false }
+                     Values = @{ SpeakerDsp = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
 }
-$PresetValueNames = @('SpeakerDsp', 'DspGainDb', 'TweeterTrimDb', 'WooferLimitDb')
+$PresetValueNames = @('SpeakerDsp', 'DspGainDb', 'TweeterTrimDb', 'WooferLimitDb', 'DspAutoGain')
+# Значения драйвера по умолчанию (если в реестре значения нет).
+$ParamDefaults = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }
 
 # ---------------------------------------------------------------------------
 # Вывод
@@ -275,7 +280,8 @@ function Get-CurrentPresetName {
         $match = $true
         foreach ($n in $PresetValueNames) {
             $v = Get-Param $n
-            if ($null -eq $v -or [int]$v -ne [int]$Presets[$k].Values[$n]) { $match = $false; break }
+            if ($null -eq $v) { $v = $ParamDefaults[$n] }
+            if ([int]$v -ne [int]$Presets[$k].Values[$n]) { $match = $false; break }
         }
         if ($match) { return $k }
     }
