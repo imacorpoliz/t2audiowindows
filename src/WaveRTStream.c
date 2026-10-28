@@ -55,6 +55,15 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // belong to the previous run.
     ULONG64 RunStartNs;
     ULONG ClockCorrections;
+    // Rate tracking (context->ClockRateTracking): the source cursor runs at
+    // QPC * (1 + RatePpb / 1e9). The drift baseline is this run's first
+    // accepted T2 anchor. All 0 / FALSE when tracking is off, which leaves
+    // the cursor exactly as without tracking. Protected by StreamLock.
+    LONG64 RatePpb;
+    BOOLEAN DriftBaseValid;
+    ULONG64 DriftBaseFrames;
+    ULONG64 DriftBaseNs;
+    ULONG RateUpdates;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
     KTIMER CopyTimer;
@@ -112,6 +121,7 @@ T2AudioStreamFollowT2ClockLocked(
     _In_ PUCHAR HwBufferBase,
     _In_ ULONG HwFrames,
     _In_ ULONG64 NextFrame,
+    _In_ ULONG64 PlayFrame,
     _In_ ULONG64 NowQpc)
 {
     LARGE_INTEGER qpcFreq;
@@ -150,20 +160,44 @@ T2AudioStreamFollowT2ClockLocked(
                                           (ULONG64)qpcFreq.QuadPart);
     }
 
-    if (!T2AudioClockCorrection(NextFrame, instance->DestOffset, readFrame,
-                                HwFrames, &newOffset, &jump)) {
-        return;
+    if (T2AudioClockCorrection(NextFrame, instance->DestOffset, readFrame,
+                               HwFrames, &newOffset, &jump)) {
+        if (jump > 0) {
+            T2AudioStreamZeroRingLocked(HwBufferBase, HwFrames,
+                                        NextFrame + instance->DestOffset, (ULONG64)jump);
+        }
+        instance->ClockCorrections++;
+        if (instance->ClockCorrections <= 8 || (instance->ClockCorrections % 100) == 0) {
+            KdPrint(("T2Audio: T2 clock: re-aimed lead by %I64d frames (#%u, read=%I64u next=%I64u)\n",
+                     jump, instance->ClockCorrections, readFrame, NextFrame));
+        }
+        instance->DestOffset = newOffset;
     }
-    if (jump > 0) {
-        T2AudioStreamZeroRingLocked(HwBufferBase, HwFrames,
-                                    NextFrame + instance->DestOffset, (ULONG64)jump);
+
+    // Rate tracking: rebase the source cursor at the current rate (PlayFrame
+    // was computed at NowQpc with it), then follow the T2's rate.
+    if (context->ClockRateTracking) {
+        ULONG64 anchorHostNs = T2AudioQpcToNs(anchorQpc, (ULONG64)qpcFreq.QuadPart);
+        LONGLONG lead = T2AudioRingDistance(NextFrame + instance->DestOffset,
+                                            readFrame, HwFrames);
+        LONGLONG drift;
+
+        if (!instance->DriftBaseValid) {
+            instance->DriftBaseFrames = anchorFrames;
+            instance->DriftBaseNs = anchorHostNs;
+            instance->DriftBaseValid = TRUE;
+        }
+        drift = T2AudioClockDriftPpb(instance->DriftBaseFrames, instance->DriftBaseNs,
+                                     anchorFrames, anchorHostNs, instance->SampleRate);
+        instance->AnchorFrames = PlayFrame;
+        instance->AnchorQpc = NowQpc;
+        instance->RatePpb = T2AudioClockRatePpb(drift, lead);
+        instance->RateUpdates++;
+        if (instance->RateUpdates <= 8 || (instance->RateUpdates % 1000) == 0) {
+            KdPrint(("T2Audio: T2 clock: rate=%I64d ppb drift=%I64d ppb lead=%I64d (#%u)\n",
+                     instance->RatePpb, drift, lead, instance->RateUpdates));
+        }
     }
-    instance->ClockCorrections++;
-    if (instance->ClockCorrections <= 8 || (instance->ClockCorrections % 100) == 0) {
-        KdPrint(("T2Audio: T2 clock: re-aimed lead by %I64d frames (#%u, read=%I64u next=%I64u)\n",
-                 jump, instance->ClockCorrections, readFrame, NextFrame));
-    }
-    instance->DestOffset = newOffset;
 }
 
 // Advance the consumed-frame cursor to "now" and mirror the newly consumed
@@ -198,9 +232,12 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     qpc = KeQueryPerformanceCounter(&qpcFreq);
     playFrame = instance->AnchorFrames;
     if ((ULONG64)qpc.QuadPart > instance->AnchorQpc && qpcFreq.QuadPart > 0) {
-        playFrame += T2AudioTicksToFrames((ULONG64)qpc.QuadPart - instance->AnchorQpc,
-                                          instance->SampleRate,
-                                          (ULONG64)qpcFreq.QuadPart);
+        // RatePpb is 0 unless rate tracking is on; then this is exactly
+        // T2AudioTicksToFrames.
+        playFrame += T2AudioTicksToFramesPpb((ULONG64)qpc.QuadPart - instance->AnchorQpc,
+                                             instance->SampleRate,
+                                             (ULONG64)qpcFreq.QuadPart,
+                                             instance->RatePpb);
     }
 
     frame = instance->LastCopiedFrame;
@@ -253,7 +290,8 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // A new T2 clock anchor arrived: re-check the lead of the next write
         // against the T2's read position and re-aim it if it drifted.
         T2AudioStreamFollowT2ClockLocked(instance, context, hwBufferBase,
-                                         hwFrames, frame, (ULONG64)qpc.QuadPart);
+                                         hwFrames, frame, playFrame,
+                                         (ULONG64)qpc.QuadPart);
 
         while (remainingFrames > 0) {
             ULONG srcOffset = 0;
@@ -632,6 +670,9 @@ T2AudioStreamSetState(
                        (ULONG)(instance->LastCopiedFrame % hwFrames)) % hwFrames
                     : T2AUDIO_LEAD_FRAMES;
                 instance->ClockGenerationSeen = generation;
+                // START_IO restarts the T2: measure its rate afresh.
+                instance->RatePpb = 0;
+                instance->DriftBaseValid = FALSE;
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
                                                       (ULONG64)qpcFreq.QuadPart);
                 if (instance->LastCopiedFrame == 0) {

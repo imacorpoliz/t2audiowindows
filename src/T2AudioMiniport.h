@@ -128,8 +128,12 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // OutputAttenuation (Parameters\OutputAttenuation, 6 dB steps, default
     // T2AUDIO_ATTENUATION_DEFAULT, clamped to T2AUDIO_ATTENUATION_MAX) is a
     // safety cut applied to every sample before it reaches the ring.
+    // ClockRateTracking (Parameters\ClockRateTracking, default 0 = off): run
+    // the source cursor at the T2's rate instead of re-aiming on drift only
+    // (T2AudioClockRatePpb; tests/T2AudioPipelineTest.c). Not hardware-tested.
     ULONG TweeterMode;
     ULONG OutputAttenuation;
+    BOOLEAN ClockRateTracking;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

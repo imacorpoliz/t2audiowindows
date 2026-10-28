@@ -230,7 +230,7 @@ Adapter (PcAddAdapterDevice, extension = PortCls + T2AUDIO_DEVICE_CONTEXT)
 | `HardwareLock`, `HardwareReady` | защита MMIO от teardown (§7) |
 | `BceSpeakerDeviceId`, `SpeakerDeviceId` | найденный / «подключённый» speaker (второе — только на стадии ≥ 4) |
 | `SpeakerStreamId`, `SpeakerFormatValid`, `SpeakerSampleShift`, `SpeakerLatencyFrames`, `SpeakerSafetyOffsetFrames` | результат запроса потока (§5.3) |
-| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode`, `OutputAttenuation` | гейты и параметры (§8) |
+| `TestModeEnabled`, `DiagStage`, `MmioCopyEnabled`, `BceIoEnabled`, `RawSpeakerChannels`, `ForceSystemBuffer`, `MdlVariant`, `TweeterMode`, `OutputAttenuation`, `ClockRateTracking` | гейты и параметры (§8) |
 | `ClockLock`, `ClockGeneration`, `ClockAnchorFrames/Qpc` | якорь часов T2 из `UPDATE_TIMESTAMP` (§6.3) |
 
 ### 4.3 Формат на пине
@@ -440,6 +440,7 @@ LastCopiedFrame = playFrame
 | `MdlVariant` | эксперименты с MDL на BAR (`Phase4.c`). Текущий тракт всегда использует системный буфер, так что практически не используется. |
 | `TweeterMode` | стерео-путь: 1 (по умолчанию) = твитеры через ФВЧ 4-го порядка 3 кГц, 0 = твитеры молчат (звук только из вуферов) |
 | `OutputAttenuation` | защитное ослабление каждого сэмпла перед записью в кольцо, шаг 6 дБ (арифметический сдвиг вправо). По умолчанию 3 (−18 дБ), 0 = выключено, больше 16 обрезается до 16. Действует и на стерео, и на raw-путь. Пока драйвер экспериментальный, по умолчанию оно включено. |
+| `ClockRateTracking` | 0 (по умолчанию) — поведение, проверенное на этапе D: курсор источника идёт по QPC, при дрейфе опережение исправляется скачком (`re-aimed`). 1 — курсор источника идёт со скоростью T2: `rate = drift + 1 ppm × (1000 − lead)`, дрейф меряется от первой метки прогона. Скачок остаётся аварийным путём. В логе появляется `T2 clock: rate=… ppb drift=… ppb lead=…`. **На железе не проверено.** Обоснование и симуляция — `tests/T2AudioPipelineTest.c`. |
 
 ### 8.4 Почему нет «нормального режима»
 

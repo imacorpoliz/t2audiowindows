@@ -5,12 +5,13 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
-### 2026-10-28 (late): clock-drift defect found by simulation; rate tracking prepared (host tests only, driver unchanged)
+### 2026-10-28 (late): clock-drift defect found by simulation; rate tracking prepared (host tests; driver path behind a default-off flag)
 
 - **New test `tests/T2AudioPipelineTest.c`:** host simulation of the whole path (client ring -> 2 ms copy DPC -> 16,640-frame BAR0 ring -> T2 reader on its own clock, one `UPDATE_TIMESTAMP` per lap, 2 ms delivery). It mirrors `T2AudioStreamAdvanceLocked` / `T2AudioStreamFollowT2ClockLocked` and must be kept in sync with `src/WaveRTStream.c`. Runs in CI (gcc, clang, MSVC).
 - **Finding (simulation, not yet seen on hardware):** the source cursor runs on QPC while the T2 reads on its own crystal. With a realistic ±80 ppm difference the current driver re-aims the lead 5 times in 10 minutes, giving 5–9 audible discontinuities (a jump or a short silence roughly every 1–2 minutes). The ~1 s Stage D runs could not show this. At 0 ppm the path is continuous after the initial re-aim.
 - **Prepared fix (in `src/T2AudioSpeakerLogic.h`, NOT called by the driver yet):** `T2AudioTicksToFramesPpb`, `T2AudioClockDriftPpb`, `T2AudioClockRatePpb`. In the simulation with tracking: 1 re-aim at the start only, lead held at 960–1040 frames for ±80 ppm, also with ±300 ppm and with a wrapped hostTime.
-- **Plan:** wire it into `WaveRTStream.c` behind `Parameters\ClockRateTracking` (default 0 = current, hardware-verified behavior), then hardware-test after Stage E (`GEMINI.md` §7).
+- **Wired into the driver (later the same day, source only, not hardware-tested):** `Parameters\ClockRateTracking` (default **0** = unchanged, hardware-verified behavior). With 1, `T2AudioStreamFollowT2ClockLocked` rebases the source cursor on each new anchor and sets `RatePpb = T2AudioClockRatePpb(drift, lead)`; `T2AudioStreamAdvanceLocked` uses `T2AudioTicksToFramesPpb` (identical to `T2AudioTicksToFrames` at 0 ppb, asserted by the test). Rate resets on every RUN. Log line: `T2 clock: rate=... ppb drift=... ppb lead=...`. Hardware test: `GEMINI.md` §7 E2/E3.
+- Known limit: the floor at each rebase costs up to 1 frame per lap, so the lead settles ~40 frames off target at ±80 ppm (well inside ±500).
 
 ### 2026-10-28 (evening): Stage E preparation - output attenuation, low-volume tone tooling (source only, not hardware-tested)
 
