@@ -215,6 +215,21 @@ T2AudioReadDwordParameter(
     return value;
 }
 
+// A registry DWORD that holds a signed dB value, clamped to -12..+12.
+static LONG
+T2AudioClampSignedDb(_In_ ULONG Raw)
+{
+    LONG v = (LONG)Raw;
+
+    if (v > 12) {
+        return 12;
+    }
+    if (v < -12) {
+        return -12;
+    }
+    return v;
+}
+
 // Writes a DWORD to HKLM\SYSTEM\CurrentControlSet\Services\<SubKey>\<ValueName>.
 static NTSTATUS
 T2AudioWriteDwordParameter(
@@ -441,6 +456,13 @@ T2AudioStartDeviceInner(
     // Autogain in front of the DSP chain (T2AudioDsp.h, KAIT2EN "Norm");
     // 0/1, default 0 (off: the chain is unchanged).
     context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
+    // Tone controls: a DWORD holding a signed dB value (PowerShell writes -3
+    // as 0xFFFFFFFD), clamped to +-12; and the compressor detector style.
+    context->BassDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"BassDb", 0));
+    context->TrebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
+    context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
+    context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
+
     // Groundwork for headphones and microphones (docs/ROADMAP.md sections 4-5),
     // all 0/1 and off by default: ExtendedProbe logs every BCE device and the
     // BufferStruct table (read-only); JackEvents subscribes to the headphone
@@ -450,13 +472,14 @@ T2AudioStartDeviceInner(
     context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
-    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
+    KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
              context->OutputAttenuation, context->OutputAttenuation * 6u,
              context->ClockRateTracking ? 1u : 0u,
              context->SpeakerDsp, context->DspGainDb, context->TweeterTrimDb,
              context->WooferLimitDb, context->DspAutoGain,
+             context->BassDb, context->TrebleDb, context->ClarityDb, context->CompStyle,
              context->ExtendedProbe, context->JackEvents, context->HeadphoneAutoMute));
 
     // Stage 2 and up map the BARs and locate the speaker buffer. Below that the

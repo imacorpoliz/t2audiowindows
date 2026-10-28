@@ -17,13 +17,14 @@
 * **installer with presets** `tools/T2Audio-Setup.ps1` (`docs/INSTALL.md`);
 * **headphone jack read** at probe time (`docs/HEADPHONES.md`, step 1);
 * **lookahead limiter** on every DSP level (instead of the instant one; sound is delayed by 0.5 ms) and **autogain** `DspAutoGain` (preset `even`);
-* **groundwork for headphones and microphones** (commit 40c1d6d), all off by default: `ExtendedProbe` (a detailed read-only log of every T2 audio device), `JackEvents` (headphone plug/unplug events), `HeadphoneAutoMute` (speakers go silent while headphones are plugged in).
+* **groundwork for headphones and microphones** (commit 40c1d6d), all off by default: `ExtendedProbe` (a detailed read-only log of every T2 audio device), `JackEvents` (headphone plug/unplug events), `HeadphoneAutoMute` (speakers go silent while headphones are plugged in);
+* **closer lsp post-processing and tone controls** (the commit after 08182f6), all off or flat by default, so `macos` sounds exactly as approved: `CompStyle=1` (compressors with RMS detection and a soft knee, as in lsp `mb_compressor`), K-weighted (LUFS) autogain for `DspAutoGain=1`, `BassDb`/`TrebleDb`/`ClarityDb` (−12…+12 dB), five new installer presets (`macos-precise`, `bass`, `voice`, `movie`, `night`) and `-Action Tune`.
 
 Verifying all of this is the goal of the session. The agent `T2Audio-TestAgent.ps1` is not needed for the install; capture the kernel log with DbgView (`tools/Capture-T2AudioLog.ps1` or DbgViewCLI by hand) from the very start of each step.
 
 The installer's UI is in Russian. The strings quoted below are what it prints; the English meaning is given in brackets.
 
-**Step 1. Build 1.0.12.0** from the current `diagnostics` (at least commit 40c1d6d).
+**Step 1. Build 1.0.12.0** from the current `diagnostics` (the latest commit, with the tone controls; CI step "Parse tools and check installer presets" green).
 1. CI is green.
 2. Build and sign as in §2. Put `.sys`, `.cat` and `.inf` with `DriverVer` 1.0.12.0 into `packaging\`, record the SHA256.
 3. Before installing, the device is on AppleAudio and `Parameters` is empty.
@@ -90,7 +91,23 @@ Set-ItemProperty $p ExtendedProbe 0 -Type DWord
 
 **Step 5. Presets.** `-Action Preset -Preset bright`, then `loud`, `maxvolume`, `even`, `macos`. After each one the log line `mode parameters` shows the expected values (`even` has `DspAutoGain=1`). The owner gives a short verdict by ear:
 * `maxvolume` and `loud`: a bass-heavy track at 100 %. Is there hum, or harshness on peaks? (The limiter now looks ahead, so harshness on peaks should be lower.)
-* `even`: first a quiet recording (old, classical, a podcast), then a loud one (modern pop/rock). Is the level between them more even? Any "pumping" (volume noticeably drifting up and down in pauses and after hits)? Record `autoGainDb10=` from `run summary` (tenths of a dB; e.g. `-45` = −4.5 dB).
+* `even`: first a quiet recording (old, classical, a podcast), then a loud one (modern pop/rock). Is the level between them more even? Any "pumping" (volume noticeably drifting up and down in pauses and after hits)? Record `autoGainDb10=` from `run summary` (tenths of a dB; e.g. `-45` = −4.5 dB). The autogain now measures LUFS (K-weighted), so bass-heavy tracks should no longer be turned down more than vocal ones.
+
+**Step 5a. New presets and tone** (sound allowed; same log capture). For each preset, after `-Action Preset -Preset <name>` the `mode parameters` line must show exactly the values from the table in `docs/INSTALL.md` (`BassDb=-3` etc. are printed signed). Owner verdict by ear, one line each:
+1. **`macos-precise` vs `macos`** (A/B, the same track, 30 s each, same volume): is there a difference? Which one is closer to macOS? Softer peaks, steadier bass? This decides whether `CompStyle=1` becomes the default (ROADMAP §7.2).
+2. **`bass`**: a bass-heavy track at 50 % and at 100 %. More bass than `macos`? Any rattle or hum at 100 %?
+3. **`voice`**: a podcast or a video call recording. Is speech clearer than with `macos`? Too sharp?
+4. **`movie`**: a film scene with quiet dialogue and loud effects. Dialogue understandable without turning the volume up for it?
+5. **`night`**: the same film scene at a low volume. Even, no booming?
+6. **`-Action Tune`**: from `macos`, run `.\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 6 -TrebleDb -6`. `-Action Status` must show «Тембр: бас +6 дБ, высокие -6 дБ, разборчивость 0 дБ, компрессор быстрый» [tone: bass +6 dB, treble −6 dB, clarity 0 dB, compressor fast] and the log `BassDb=6 TrebleDb=-6`. The sound must get audibly darker. Then `-Action Tune -BassDb 0 -TrebleDb 0`: back to the `macos` sound, `Status` shows the preset «Как на Mac» again. Also check the menu (no parameters, item 5) once: Enter on every question changes nothing.
+7. **CPU check, everything on:**
+   ```powershell
+   .\tools\T2Audio-Setup.ps1 -Action Preset -Preset night        # SpeakerDsp 4, autogain, CompStyle 1
+   .\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 12 -TrebleDb 12 -ClarityDb 12
+   ```
+   Play music 1 minute **at a low volume** (+12 dB on everything is loud and harsh, this is a load test, not a preset). Record `maxCopyUs` from `run summary` (host estimate ~65 µs per tick; must stay well under 100 µs on the Mac, otherwise report it), and that there were no dropouts. Then `-Action Preset -Preset macos`.
+
+If anything sounds broken (crackle, silence, distortion at moderate volume) in 5a: `-Action Preset -Preset macos`, note which preset, continue with step 6. Do not change code.
 
 **Step 6. Sleep** (only if the owner agrees to this step):
 1. Play music, put the Mac to sleep for 1–2 minutes, wake it.
@@ -106,7 +123,7 @@ On a BSOD, after the reboot `-Action Status` shows a strike; add the minidump to
 PASS: «Устройство снова на AppleAudio» [device is back on AppleAudio], `Status` shows AppleAudio.
 
 **Step 8. Report:**
-1. `docs/logs/EXCERPT_*.md`: installer output at every step, log lines (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` with `maxCopyUs` and `jackMutedFrames`, **all `BCE detail` and `BufferStruct device` lines from 4b**, `jack listener` and `PROPERTY_CHANGED` lines from 4c), the owner's words (verbatim, with a translation).
+1. `docs/logs/EXCERPT_*.md`: installer output at every step, log lines (`persistent mode`, `crash guard`, `headphone jack`, `mode parameters`, `run summary` with `maxCopyUs` (also from 5a.7), `autoGainDb10` and `jackMutedFrames`, the `mode parameters` line of each preset in 5/5a, **all `BCE detail` and `BufferStruct device` lines from 4b**, `jack listener` and `PROPERTY_CHANGED` lines from 4c), the owner's words (verbatim, with a translation).
 2. An entry in `docs/CURRENT_STATE.md`.
 3. A PR into `diagnostics`.
 

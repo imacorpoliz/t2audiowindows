@@ -16,6 +16,7 @@
 
 static int g_failures = 0;
 static unsigned int g_level = T2DSP_LEVEL_LINEAR;   // DSP level under test
+static unsigned int g_style = 0;                     // compressor detector under test
 
 static void check(const char *name, int condition)
 {
@@ -32,17 +33,31 @@ static double ring_value(unsigned int word)
     return (double)v / 8388608.0;
 }
 
+// Magnitude (dB) of a cascade of double biquads at hz (48 kHz).
+static double rmag_db(const double (*c)[5], unsigned int n, double hz)
+{
+    double w = 2.0 * 3.14159265358979323846 * hz / 48000.0, db = 0;
+    unsigned int i;
+    for (i = 0; i < n; i++) {
+        double cr = cos(w), sr = sin(w), c2 = cos(2 * w), s2 = sin(2 * w);
+        double nr = c[i][0] + c[i][1] * cr + c[i][2] * c2, ni = -(c[i][1] * sr + c[i][2] * s2);
+        double dr = 1.0 + c[i][3] * cr + c[i][4] * c2, di = -(c[i][3] * sr + c[i][4] * s2);
+        db += 10.0 * log10((nr * nr + ni * ni) / (dr * dr + di * di));
+    }
+    return db;
+}
+
 // ---- double-precision reference of the same chain ---------------------
 typedef struct { double x1, x2, y1, y2; } RBQ;
 typedef struct {
     RBQ xo[2][14];
-    double env[4], g[4], step[4];
+    double env[4], g[4], step[4], ms[4];
     unsigned int count;
 } RCOMP;
 
 typedef struct {
     RBQ xo[2][9];
-    double env[2], g[2], step[2];
+    double env[2], g[2], step[2], ms[2];
     unsigned int count;
 } RBUZZ;
 
@@ -68,6 +83,18 @@ static double rcas(const double (*c)[5], RBQ *s, unsigned int n, double x)
     unsigned int i;
     for (i = 0; i < n; i++) x = rbq(c[i], &s[i], x);
     return x;
+}
+
+// Style 1 helpers: RMS of x (mean square one-pole 2^-9), block envelope
+// step 1 - (1 - c)^16, gain with a +-6 dB quadratic knee.
+static double rblock(double c) { return 1.0 - pow(1.0 - c, 16.0); }
+static double rknee_target(const double *band, double env)
+{
+    double over = env > 0 ? log2(env / band[0]) : -100.0, red = 0;
+    double r = 1.0 - 1.0 / band[1];
+    if (over >= 1.0) red = r * over;
+    else if (over > -1.0) red = r * (over + 1.0) * (over + 1.0) / 4.0;
+    return pow(2.0, -red) * band[2];
 }
 
 static void rcomp_reset(RCOMP *c)
@@ -96,19 +123,31 @@ static void rcomp(RCOMP *c, double *L, double *R)
         band[s][3] = rbq(g_T2DspRefCompXover[7], &x[13], rbq(g_T2DspRefCompXover[7], &x[12], hi));
     }
     for (k = 0; k < 4; k++) {
-        double p = fmax(fabs(band[0][k]), fabs(band[1][k]));
-        double coef = p > c->env[k] ? g_T2DspRefCompBand[k][3] : g_T2DspRefCompBand[k][4];
-        c->env[k] += (p - c->env[k]) * coef;
+        if (g_style == 0) {
+            double p = fmax(fabs(band[0][k]), fabs(band[1][k]));
+            double coef = p > c->env[k] ? g_T2DspRefCompBand[k][3] : g_T2DspRefCompBand[k][4];
+            c->env[k] += (p - c->env[k]) * coef;
+        } else {
+            double m = 0.5 * (band[0][k] + band[1][k]);
+            c->ms[k] += (m * m - c->ms[k]) / 512.0;
+        }
     }
     if (c->count == 0) {
         c->count = T2DSP_COMP_BLOCK;
         for (k = 0; k < 4; k++) {
             double t = 1.0;
-            if (c->env[k] > g_T2DspRefCompBand[k][0]) {
-                double over = log2(c->env[k] / g_T2DspRefCompBand[k][0]);
-                t = pow(2.0, -over * (1.0 - 1.0 / g_T2DspRefCompBand[k][1]));
+            if (g_style == 0) {
+                if (c->env[k] > g_T2DspRefCompBand[k][0]) {
+                    double over = log2(c->env[k] / g_T2DspRefCompBand[k][0]);
+                    t = pow(2.0, -over * (1.0 - 1.0 / g_T2DspRefCompBand[k][1]));
+                }
+                t *= g_T2DspRefCompBand[k][2];
+            } else {
+                double rms = sqrt(c->ms[k]);
+                double coef = rms > c->env[k] ? g_T2DspRefCompBand[k][3] : g_T2DspRefCompBand[k][4];
+                c->env[k] += (rms - c->env[k]) * rblock(coef);
+                t = rknee_target(g_T2DspRefCompBand[k], c->env[k]);
             }
-            t *= g_T2DspRefCompBand[k][2];
             c->step[k] = (t - c->g[k]) / T2DSP_COMP_BLOCK;
         }
     }
@@ -150,13 +189,28 @@ static void rbuzz(RBUZZ *b, double *w)
         hi = rbq(g_T2DspRefBuzzXover[2], &x[4], hi);
         band[s] = rbq(g_T2DspRefBuzzXover[4], &x[8], rbq(g_T2DspRefBuzzXover[4], &x[7], lo));
         rest[s] = hi + rbq(g_T2DspRefBuzzXover[3], &x[6], rbq(g_T2DspRefBuzzXover[3], &x[5], lo));
-        a = fabs(band[s]);
-        coef = a > b->env[s] ? g_T2DspRefBuzzBand[3] : g_T2DspRefBuzzBand[4];
-        b->env[s] += (a - b->env[s]) * coef;
+        if (g_style == 0) {
+            a = fabs(band[s]);
+            coef = a > b->env[s] ? g_T2DspRefBuzzBand[3] : g_T2DspRefBuzzBand[4];
+            b->env[s] += (a - b->env[s]) * coef;
+        } else {
+            b->ms[s] += (band[s] * band[s] - b->ms[s]) / 512.0;
+        }
     }
     if (b->count == 0) {
         b->count = T2DSP_COMP_BLOCK;
-        for (s = 0; s < 2; s++) b->step[s] = (rbuzz_target(b->env[s]) - b->g[s]) / T2DSP_COMP_BLOCK;
+        for (s = 0; s < 2; s++) {
+            double t;
+            if (g_style == 0) {
+                t = rbuzz_target(b->env[s]);
+            } else {
+                double rms = sqrt(b->ms[s]);
+                double coef = rms > b->env[s] ? g_T2DspRefBuzzBand[3] : g_T2DspRefBuzzBand[4];
+                b->env[s] += (rms - b->env[s]) * rblock(coef);
+                t = rknee_target(g_T2DspRefBuzzBand, b->env[s]);
+            }
+            b->step[s] = (t - b->g[s]) / T2DSP_COMP_BLOCK;
+        }
     }
     b->count--;
     for (s = 0; s < 2; s++) {
@@ -231,6 +285,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
     int n, total = 48000 + 9600;
 
     T2DspReset(&st);
+    T2DspSetTuning(&st, 0, 0, 0, g_style);
     memset(&ref, 0, sizeof(ref));
     rcomp_reset(&ref.comp);
     rbuzz_reset(&ref.buzz);
@@ -426,6 +481,23 @@ static void test_cost(void)
     printf("Cost: %.1f us per 2 ms DPC tick (96 frames) on this host\n", us);
 }
 
+static void test_cost_all(void)
+{
+    static T2DSP_STATE st;
+    static unsigned int src[96 * 2], dst[96 * 6];
+    clock_t t0, t1;
+    int i;
+
+    T2DspReset(&st);
+    T2DspSetTuning(&st, 3, 3, 3, 1);
+    for (i = 0; i < 96 * 2; i++) src[i] = host_word(0.1 * sin(i * 0.1));
+    t0 = clock();
+    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, 6, 0, 0, 1, &st);
+    t1 = clock();
+    printf("Cost: %.1f us per 2 ms DPC tick (96 frames), everything on\n",
+           (double)(t1 - t0) / CLOCKS_PER_SEC * 1e6 / 5000.0);
+}
+
 // Level 2: the fixed-point virtual bass matches the double reference, adds
 // harmonics of a 60 Hz tone in the 200-450 Hz band, and leaves a 1 kHz
 // tone alone. Harmonic content is measured on the woofer output.
@@ -439,6 +511,7 @@ static double tone_band_energy(double hz, double amp, double lo, double hi, int 
     double bin;
 
     T2DspReset(&st);
+    T2DspSetTuning(&st, 0, 0, 0, g_style);
     memset(&ref, 0, sizeof(ref));
     rcomp_reset(&ref.comp);
     rbuzz_reset(&ref.buzz);
@@ -498,6 +571,7 @@ static double comp_level(double amp, double hz, int fixed)
     int n;
 
     T2DspReset(&st);
+    T2DspSetTuning(&st, 0, 0, 0, g_style);
     rcomp_reset(&rc);
     for (n = 0; n < 48000; n++) {
         double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0);
@@ -525,6 +599,7 @@ static double buzz_level(double amp, double hz, int fixed)
     int n;
 
     T2DspReset(&st);
+    T2DspSetTuning(&st, 0, 0, 0, g_style);
     rbuzz_reset(&rb);
     for (n = 0; n < 48000; n++) {
         double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0), y;
@@ -786,16 +861,22 @@ static void test_autogain(void)
     long long lg;
     double g;
 
-    printf("Autogain (DspAutoGain=1, target -12 dBFS RMS, +6/-12 dB)\n");
+    double lufs, expect;
+
+    printf("Autogain (DspAutoGain=1, target -12 LUFS, K-weighted, +6/-12 dB)\n");
     g = agc_gain_db(0.01, &lg);
     printf("  -40 dBFS sine: %+.2f dB\n", g);
     check("quiet signal raised by the maximum +6 dB (+-0.1)", fabs(g - 6.0) < 0.1);
+    // BS.1770 loudness of a 500 Hz sine of amplitude 0.5 on both channels:
+    // channel mean squares summed, -0.691 dB, plus the K-weighting gain.
+    lufs = 10.0 * log10(2.0 * 0.125) - 0.691 + rmag_db(g_T2DspRefKWeight, 2, 500.0);
+    expect = -12.0 - lufs;
     g = agc_gain_db(0.5, &lg);
-    printf("  -6 dBFS sine (RMS -9 dBFS): %+.2f dB\n", g);
-    check("RMS -9 dBFS brought to -12 dBFS (-3.0 dB +-0.2)", fabs(g + 3.01) < 0.2);
-    g = agc_gain_db(0.0003, &lg);
-    printf("  -70 dBFS sine: %+.2f dB (gain state %lld)\n", g, lg);
-    check("below the -60 dBFS gate the gain holds at 0 dB", lg == 0 && fabs(g) < 0.01);
+    printf("  -6 dBFS sine (%.2f LUFS): %+.2f dB, expected %+.2f dB\n", lufs, g, expect);
+    check("-6 dBFS sine brought to -12 LUFS (+-0.2 dB)", fabs(g - expect) < 0.2);
+    g = agc_gain_db(0.0001, &lg);
+    printf("  -80 dBFS sine: %+.2f dB (gain state %lld)\n", g, lg);
+    check("below the -72 LUFS gate the gain holds at 0 dB", lg == 0 && fabs(g) < 0.01);
     {
         // Full-scale square at every level, +12 dB make-up and trim, autogain
         // on: bounded by the limiter, autogain at its -12 dB floor.
@@ -817,6 +898,135 @@ static void test_autogain(void)
     }
 }
 
+// Tone controls: each table row measured through T2DspBiquad against its
+// analytical response; and through the whole chain, the woofer/tweeter level
+// change equals the control's response.
+static double fixed_bq_gain_db(const int *c, double hz)
+{
+    // RMS over exactly one second (an integer number of cycles): a sampled
+    // peak would miss the crest at e.g. 6 kHz (8 samples per cycle).
+    T2DSP_BQ_STATE s;
+    double e = 0, amp = 0.1;
+    int n;
+    memset(&s, 0, sizeof(s));
+    for (n = 0; n < 96000; n++) {
+        long long x = (long long)floor(amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0) * 134217728.0 + 0.5);
+        double y = (double)T2DspBiquad(c, &s, x);
+        if (n >= 48000) e += y * y;
+    }
+    return 10.0 * log10(e / 48000.0 / (0.5 * amp * amp * 134217728.0 * 134217728.0));
+}
+
+static double chain_peak(int bass, int treble, int clarity, double hz, int ch)
+{
+    static T2DSP_STATE st;
+    unsigned int src[2], dst[6];
+    double pk = 0;
+    int n;
+    T2DspReset(&st);
+    T2DspSetTuning(&st, bass, treble, clarity, 0);
+    for (n = 0; n < 57600; n++) {
+        src[0] = src[1] = host_word(0.05 * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0));
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, 0, &st);
+        if (n >= 48000 && fabs(ring_value(dst[ch])) > pk) pk = fabs(ring_value(dst[ch]));
+    }
+    return pk;
+}
+
+static void test_tone_controls(void)
+{
+    static const double freqs[] = { 50, 150, 500, 1000, 2500, 6000, 10000 };
+    int db, ok = 1;
+    unsigned int i;
+    double worst = 0;
+
+    printf("Tone controls (BassDb / TrebleDb / ClarityDb)\n");
+    for (db = -12; db <= 12; db += 4) {
+        for (i = 0; i < sizeof(freqs) / sizeof(freqs[0]); i++) {
+            double e;
+            e = fabs(fixed_bq_gain_db(g_T2DspBassShelf[db + 12], freqs[i]) - rmag_db(&g_T2DspRefBassShelf[db + 12], 1, freqs[i]));
+            if (e > worst) worst = e;
+            e = fabs(fixed_bq_gain_db(g_T2DspTrebleShelf[db + 12], freqs[i]) - rmag_db(&g_T2DspRefTrebleShelf[db + 12], 1, freqs[i]));
+            if (e > worst) worst = e;
+            e = fabs(fixed_bq_gain_db(g_T2DspClarityPeak[db + 12], freqs[i]) - rmag_db(&g_T2DspRefClarityPeak[db + 12], 1, freqs[i]));
+            if (e > worst) worst = e;
+        }
+    }
+    printf("  fixed vs analytical, worst %.3f dB\n", worst);
+    check("tone tables match their analytical response (0.02 dB)", worst < 0.02);
+    check("row 12 (0 dB) is flat (numerator == denominator)",
+          g_T2DspBassShelf[12][0] == (1 << 28) && g_T2DspBassShelf[12][1] == g_T2DspBassShelf[12][3] &&
+          g_T2DspBassShelf[12][2] == g_T2DspBassShelf[12][4] &&
+          g_T2DspTrebleShelf[12][1] == g_T2DspTrebleShelf[12][3] &&
+          g_T2DspClarityPeak[12][1] == g_T2DspClarityPeak[12][3]);
+    {
+        double w0 = chain_peak(0, 0, 0, 120, T2AUDIO_SPK_LEFT_WOOFER_A);
+        double w6 = chain_peak(6, 0, 0, 120, T2AUDIO_SPK_LEFT_WOOFER_A);
+        double t0 = chain_peak(0, 0, 0, 10000, T2AUDIO_SPK_LEFT_TWEETER);
+        double t6 = chain_peak(0, 6, 0, 10000, T2AUDIO_SPK_LEFT_TWEETER);
+        double c0 = chain_peak(0, 0, 0, 2500, T2AUDIO_SPK_LEFT_TWEETER);
+        double c6 = chain_peak(0, 0, 6, 2500, T2AUDIO_SPK_LEFT_TWEETER);
+        double eb = 20 * log10(w6 / w0) - rmag_db(&g_T2DspRefBassShelf[18], 1, 120);
+        double et = 20 * log10(t6 / t0) - rmag_db(&g_T2DspRefTrebleShelf[18], 1, 10000);
+        double ec = 20 * log10(c6 / c0) - rmag_db(&g_T2DspRefClarityPeak[18], 1, 2500);
+        printf("  through the chain: bass +6 @120 Hz %+.2f dB, treble +6 @10 kHz %+.2f dB, clarity +6 @2.5 kHz %+.2f dB (errors %.3f %.3f %.3f)\n",
+               20 * log10(w6 / w0), 20 * log10(t6 / t0), 20 * log10(c6 / c0), eb, et, ec);
+        ok = fabs(eb) < 0.05 && fabs(et) < 0.05 && fabs(ec) < 0.05;
+        check("each control changes the chain output by its own response (0.05 dB)", ok);
+        check("all controls at 0: bit-exact with no tuning call", chain_peak(0, 0, 0, 1000, 0) == chain_peak(0, 0, 0, 1000, 0));
+    }
+    {
+        // Worst case: every control at +12 dB, every level, full-scale square
+        // with +12/+12 make-up/trim and autogain: no overflow, limiter holds.
+        static T2DSP_STATE st;
+        unsigned int src[2], dst[6], lvl, style;
+        double pk = 0;
+        int n, c;
+        for (style = 0; style < 2; style++) {
+            for (lvl = 1; lvl <= T2DSP_LEVEL_MAX; lvl++) {
+                T2DspReset(&st);
+                for (n = 0; n < 24000; n++) {
+                    T2DspSetTuning(&st, 12, 12, 12, style);
+                    src[0] = src[1] = ((n / 300) & 1) ? 0x80000000u : 0x7FFFFFFFu;
+                    if (n > 12000) src[1] = ((n / 3) & 1) ? 0x80000000u : 0x7FFFFFFFu;
+                    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, lvl, 12, 12, 0, 1, &st);
+                    for (c = 0; c < 6; c++) pk = fmax(pk, fabs(ring_value(dst[c])));
+                }
+            }
+        }
+        check("+12 dB on every control, worst-case input: output held at -1 dBFS", pk <= 0.8912509 + 2.0 / 8388608.0);
+    }
+}
+
+// Compressor detector style 1 (lsp defaults: RMS of mid, soft knee).
+static void test_comp_style(void)
+{
+    double lv[] = { -40, -30, -20, -15, -12, -10, -6, -3, 0 };
+    unsigned int i;
+    int ok = 1, okb = 1;
+    double g0, g1;
+
+    printf("Compressor style 1 (RMS 10.7 ms of mid, +-6 dB soft knee), 730 Hz\n");
+    g_style = 1;
+    for (i = 0; i < sizeof(lv) / sizeof(lv[0]); i++) {
+        double amp = pow(10.0, lv[i] / 20.0);
+        double f = comp_level(amp, 730, 1), r = comp_level(amp, 730, 0);
+        printf("  in %5.1f dBFS: gain fixed %6.2f dB, model %6.2f dB\n", lv[i], f, r);
+        if (fabs(f - r) > 0.1) ok = 0;
+    }
+    check("fixed point matches the double model (0.1 dB)", ok);
+    for (i = 0; i < 5; i++) {
+        double amp = pow(10.0, (-30.0 + 7.5 * i) / 20.0);
+        if (fabs(buzz_level(amp, 125.5, 1) - buzz_level(amp, 125.5, 0)) > 0.1) okb = 0;
+    }
+    check("buzz compressor style 1 matches the model (0.1 dB)", okb);
+    g1 = comp_level(pow(10.0, -10 / 20.0), 730, 1);
+    g_style = 0;
+    g0 = comp_level(pow(10.0, -10 / 20.0), 730, 1);
+    printf("  -10 dBFS: style 0 %.2f dB, style 1 %.2f dB\n", g0, g1);
+    check("RMS detector compresses a sine less than the peak detector near the threshold", g1 > g0);
+}
+
 int main(void)
 {
     test_match_reference();
@@ -830,6 +1040,8 @@ int main(void)
     test_buzz();
     test_lookahead();
     test_autogain();
+    test_tone_controls();
+    test_comp_style();
     g_level = T2DSP_LEVEL_BUZZ;
     printf("--- level 4 (virtual bass + compressor + woofer buzz compressor) ---\n");
     test_match_reference();
@@ -850,6 +1062,16 @@ int main(void)
     test_cost();
     g_level = T2DSP_LEVEL_LINEAR;
     test_cost();
+    g_level = T2DSP_LEVEL_COMP;
+    g_style = 1;
+    printf("--- level 3, compressor style 1 (lsp defaults) ---\n");
+    test_match_reference();
+    test_stability();
+    test_headroom_and_limiter();
+    g_level = T2DSP_LEVEL_BUZZ;
+    printf("--- level 4, style 1, autogain, tone controls +3/+3/+3: cost ---\n");
+    test_cost_all();
+    g_style = 0;
     if (g_failures != 0) {
         printf("%d FAILURE(S)\n", g_failures);
         return 1;

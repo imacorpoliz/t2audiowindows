@@ -377,7 +377,9 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             if (instance->Channels == 2 && context->SpeakerDsp) {
                 // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
                 // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
-                // the autogain in front.
+                // the autogain in front, then the tone controls.
+                T2DspSetTuning(&instance->Dsp, (int)context->BassDb, (int)context->TrebleDb,
+                               (int)context->ClarityDb, context->CompStyle);
                 T2DspRenderStereoToSpeakers(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
                     (const unsigned int *)(sourceBase + srcOffset),

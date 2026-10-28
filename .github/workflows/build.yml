@@ -105,6 +105,45 @@ jobs:
             Write-Host "compiled: $f"
           }
 
+      # Parse every tool script (syntax errors fail the build) and check the
+      # installer's preset table: it is evaluated on its own, every -Preset
+      # name must exist, 'macos' must equal the driver defaults, and every
+      # value must be inside the range the driver accepts.
+      - name: Parse tools and check installer presets
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bad = 0
+          foreach ($f in Get-ChildItem tools -Recurse -Filter *.ps1) {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($e in $errors) { Write-Host "$($f.Name):$($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
+          }
+          if ($bad) { throw "$bad parse error(s)" }
+          $text = Get-Content -Raw -Encoding UTF8 tools\T2Audio-Setup.ps1
+          $start = $text.IndexOf('$PresetValueNames = ')
+          $end = $text.IndexOf('$Presets = [ordered]')
+          $end = $text.IndexOf("`n}", $end) + 2
+          Invoke-Expression $text.Substring($start, $end - $start)
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+          $names = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Preset' } |
+            ForEach-Object { $_.Attributes } | Where-Object { $_.TypeName.Name -eq 'ValidateSet' } |
+            ForEach-Object { $_.PositionalArguments.Value }
+          if (@($names).Count -ne $Presets.Count) { throw "ValidateSet has $(@($names).Count) names, table has $($Presets.Count)" }
+          $ranges = @{ SpeakerDsp = 0, 4; DspGainDb = 0, 12; TweeterTrimDb = 0, 12; WooferLimitDb = 0, 12; DspAutoGain = 0, 1;
+                       BassDb = -12, 12; TrebleDb = -12, 12; ClarityDb = -12, 12; CompStyle = 0, 1 }
+          foreach ($n in $names) {
+            if (-not $Presets.Contains($n)) { throw "preset '$n' missing from the table" }
+            foreach ($k in $PresetValueNames) {
+              $v = $Presets[$n].Values[$k]
+              if ($null -eq $v -or $v -lt $ranges[$k][0] -or $v -gt $ranges[$k][1]) { throw "preset '$n': $k=$v out of range" }
+            }
+            Write-Host ("{0,-14} {1}" -f $n, (($PresetValueNames | ForEach-Object { "$_=$($Presets[$n].Values[$_])" }) -join ' '))
+          }
+          foreach ($k in $PresetValueNames) {
+            if ($Presets['macos'].Values[$k] -ne $ParamDefaults[$k]) { throw "macos preset differs from the driver default in $k" }
+          }
+
       # Report-only for now (continue-on-error): findings are listed in the log
       # and turned into blocking checks once the existing ones are fixed.
       - name: PSScriptAnalyzer (report only)

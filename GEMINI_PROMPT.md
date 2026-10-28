@@ -7,20 +7,21 @@ You work in the repository imacorpoliz/t2audiowindows on a Windows machine with 
 
 OWNER PERMISSIONS FOR THIS SESSION: sound is allowed; installing the driver in persistent mode with the installer tools\T2Audio-Setup.ps1 is allowed; restarting Windows is allowed. Mac sleep (step 6) only if the owner separately says "I allow sleep" («разрешаю сон»).
 
-Read: the "▶ NEXT RUN" block in GEMINI.md (steps 1–8 in order), docs/INSTALL.md, §1 "Hard rules", the first entry in docs/CURRENT_STATE.md.
+Read: the "▶ NEXT RUN" block in GEMINI.md (steps 1–8 with 5a, in order), docs/INSTALL.md, §1 "Hard rules", the first entry in docs/CURRENT_STATE.md.
 
 Goal: verify on hardware what Claude built for daily use:
-1) build 1.0.12.0 from diagnostics (at least commit 40c1d6d) into packaging\ (signed .sys/.cat/.inf);
+1) build 1.0.12.0 from the latest diagnostics into packaging\ (signed .sys/.cat/.inf);
 2) install: T2Audio-Setup.ps1 -Action Install -Preset macos;
 3) ordinary reboot: the driver starts by itself, CrashGuardStrikes stays 0 (the main test);
 4) headphones/mics groundwork (GEMINI.md step 4): jack line at probe; ExtendedProbe=1 (copy every 'BCE detail' and 'BufferStruct device' line into the report); JackEvents=1 (plug/unplug without restart -> PROPERTY_CHANGED + 'headphone jack PLUGGED/unplugged'); HeadphoneAutoMute=1 (speakers go silent while plugged, return on unplug); then all three back to 0;
-5) presets bright / loud / maxvolume / even / macos (even = autogain: is the level more even between a quiet and a loud recording, any "pumping"? autoGainDb10 from run summary);
+5) presets bright / loud / maxvolume / even / macos (even = autogain, now K-weighted LUFS: is the level more even between a quiet and a loud recording, any "pumping"? autoGainDb10 from run summary);
+5a) new presets and tone (GEMINI.md step 5a): macos-precise vs macos A/B (does the RMS soft-knee compressor sound closer to macOS?), bass, voice, movie, night (owner verdict each), -Action Tune -BassDb 6 -TrebleDb -6 and back, everything-on CPU check (maxCopyUs at low volume);
 6) sleep (only with permission);
 7) T2Audio-Setup.ps1 -Action Uninstall: back to AppleAudio.
 
 The installer's UI is in Russian; GEMINI.md gives the English meaning of the strings to check.
 
-Capture the kernel log with DbgView from the start of every step. Report: docs/logs/EXCERPT_*.md (installer output; log lines: persistent mode, crash guard, headphone jack, mode parameters, run summary with maxCopyUs; the owner's words verbatim with an English translation), an entry in docs/CURRENT_STATE.md, a PR into diagnostics. All documentation in English. "Proven" means verified only.
+Capture the kernel log with DbgView from the start of every step. Report: docs/logs/EXCERPT_*.md (installer output; log lines: persistent mode, crash guard, headphone jack, mode parameters for every preset, run summary with maxCopyUs and autoGainDb10; the owner's words verbatim with an English translation), an entry in docs/CURRENT_STATE.md, a PR into diagnostics. All documentation in English. "Proven" means verified only.
 
 Rules:
 - A failure or BSOD: stop. After the reboot run T2Audio-Setup.ps1 -Action Status (it shows the crash-guard strike), take the minidump from C:\Windows\Minidump, write the report, ask the owner. Do not fix code.

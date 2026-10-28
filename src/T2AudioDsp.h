@@ -9,7 +9,8 @@
 // T2AudioDspProfile16_1.h). Level 1 = linear chain; level 2 adds the virtual
 // bass in front of it:
 //
-//   L, R ──► [level 2] virtual bass (bankstown): harmonics of 40-150 Hz,
+//   L, R ──► [DspAutoGain] autogain ──► [BassDb/ClarityDb/TrebleDb] tone controls
+//        ──► [level 2] virtual bass (bankstown): harmonics of 40-150 Hz,
 //                 band-limited to 200-450 Hz, added to the dry signal
 //        ──► Tone1 (12th-order high-pass, woofer excursion protection)
 //        ──► XTC: mid = (L+R)/2 delayed, side = (L-R)/2 through the FIR,
@@ -42,6 +43,7 @@
 
 #include "T2AudioSpeakerLogic.h"
 #include "T2AudioDspProfile16_1.h"
+#include "T2AudioDspUserEq.h"
 
 #define T2DSP_FULL_SCALE      (1ll << 31)
 #define T2DSP_INTERNAL_SHIFT  4     // chain runs 24 dB below full scale
@@ -59,17 +61,19 @@ static const long long g_T2DspRecipQ30[T2DSP_LOOKAHEAD + 2] = { 0,
     119304647, 107374182, 97612893, 89478485, 82595524, 76695844, 71582788, 67108864,
     63161283, 59652323, 56512727, 53687091, 51130563, 48806446, 46684427, 44739242, 42949672 };
 
-// Autogain (Parameters\DspAutoGain): RMS of the input (linked L/R, one-pole
-// mean square with a 2^14-frame time constant, ~341 ms) is brought toward
-// -12 dBFS (KAIT2EN Norm: -12 LUFS, unweighted here), by at most +6 dB and
-// -12 dB; below -60 dBFS the gain holds (silence and fades are not pumped).
+// Autogain (Parameters\DspAutoGain): the input loudness (BS.1770: both
+// channels K-weighted, their mean squares summed, -0.691 dB; one-pole with a
+// 2^14-frame time constant, ~341 ms, lsp autogain's long period is 400 ms) is
+// brought toward -12 LUFS (KAIT2EN Norm), by at most +6 dB and -12 dB; below
+// -72 LUFS the gain holds (silence and fades are not pumped).
 // The gain moves in the log2 domain every 16 frames: down with a time
 // constant of 16 updates (~5 ms on top of the envelope), up with 128
 // (~43 ms), and is ramped per frame in between. Log2 values are Q16.
-#define T2DSP_AGC_TARGET      (-130624ll)   // -12 dB
+#define T2DSP_AGC_TARGET      (-130624ll)   // -12 dB (LUFS with K-weighting)
 #define T2DSP_AGC_MAX_BOOST   65312ll       // +6 dB
 #define T2DSP_AGC_MAX_CUT     (-130624ll)   // -12 dB
-#define T2DSP_AGC_GATE        (-653117ll)   // -60 dB
+#define T2DSP_AGC_GATE        (-783740ll)   // -72 LUFS (lsp autogain "silence")
+#define T2DSP_AGC_LUFS_OFFSET 7523ll        // BS.1770 -0.691 dB, in log2 Q16
 #define T2DSP_AGC_ENV_SHIFT   14u
 #define T2DSP_AGC_DOWN_SHIFT  4u
 #define T2DSP_AGC_UP_SHIFT    7u
@@ -137,6 +141,19 @@ typedef struct _T2DSP_STATE {
     long long Side[T2DSP_XTC_TAPS];
     unsigned int MidPos;
     unsigned int SidePos;
+    // User tone controls (T2DspSetTuning): per side bass shelf, treble shelf,
+    // clarity peak; KWeight is the autogain loudness meter's filter.
+    T2DSP_BQ_STATE UserEq[2][3];
+    T2DSP_BQ_STATE KWeight[2][2];
+    int BassDb;
+    int TrebleDb;
+    int ClarityDb;
+    // Compressor detector (T2DspSetTuning): 0 = peak, linked max(|L|,|R|),
+    // hard knee (the level 3 the owner approved); 1 = as lsp's defaults: RMS
+    // of the mid signal (10.7 ms), soft knee of +-6 dB around the threshold.
+    unsigned int CompStyle;
+    long long CompMs[4];
+    long long BuzzMs[2];
     // Lookahead limiters: left woofers, right woofers, tweeters.
     T2DSP_LIMITER Limiter[3];
     // Autogain: mean square of the input, current log2 gain (Q16), the
@@ -317,6 +334,104 @@ T2DspExp2Q30(long long e)
     return v >> (unsigned int)(-ip);
 }
 
+// User settings that are not render arguments; T2DspReset leaves them flat
+// (0 dB) and in the peak detector. Called before every render; changing a
+// value takes effect on the next frame.
+static __inline void
+T2DspSetTuning(T2DSP_STATE *S, int BassDb, int TrebleDb, int ClarityDb, unsigned int CompStyle)
+{
+    if (S == 0) {
+        return;
+    }
+    if (BassDb > T2DSP_USER_EQ_MAX_DB) BassDb = T2DSP_USER_EQ_MAX_DB;
+    if (BassDb < -T2DSP_USER_EQ_MAX_DB) BassDb = -T2DSP_USER_EQ_MAX_DB;
+    if (TrebleDb > T2DSP_USER_EQ_MAX_DB) TrebleDb = T2DSP_USER_EQ_MAX_DB;
+    if (TrebleDb < -T2DSP_USER_EQ_MAX_DB) TrebleDb = -T2DSP_USER_EQ_MAX_DB;
+    if (ClarityDb > T2DSP_USER_EQ_MAX_DB) ClarityDb = T2DSP_USER_EQ_MAX_DB;
+    if (ClarityDb < -T2DSP_USER_EQ_MAX_DB) ClarityDb = -T2DSP_USER_EQ_MAX_DB;
+    S->BassDb = BassDb;
+    S->TrebleDb = TrebleDb;
+    S->ClarityDb = ClarityDb;
+    S->CompStyle = CompStyle ? 1u : 0u;
+}
+
+// Tone controls on one side's sample (internal scale); a flat control is
+// skipped, so the default chain is bit-exact with the one before.
+static __inline long long
+T2DspUserEq(T2DSP_STATE *S, unsigned int Side, long long x)
+{
+    if (S->BassDb != 0) {
+        x = T2DspBiquad(g_T2DspBassShelf[S->BassDb + T2DSP_USER_EQ_MAX_DB], &S->UserEq[Side][0], x);
+    }
+    if (S->ClarityDb != 0) {
+        x = T2DspBiquad(g_T2DspClarityPeak[S->ClarityDb + T2DSP_USER_EQ_MAX_DB], &S->UserEq[Side][1], x);
+    }
+    if (S->TrebleDb != 0) {
+        x = T2DspBiquad(g_T2DspTrebleShelf[S->TrebleDb + T2DSP_USER_EQ_MAX_DB], &S->UserEq[Side][2], x);
+    }
+    return x;
+}
+
+// RMS detector (CompStyle 1): one-pole mean square of x/16 with a 2^9-frame
+// time constant (10.7 ms; lsp's default reactivity is 10 ms).
+#define T2DSP_RMS_SHIFT 9u
+static __inline void
+T2DspMsUpdate(long long *Ms, long long x)
+{
+    long long m = T2DspSar(x, 4);   // |m| < 2^27, m*m < 2^54
+
+    *Ms += T2DspSar(m * m - *Ms, T2DSP_RMS_SHIFT);
+}
+
+// sqrt of a mean square of x/16, back in the internal scale (< 2^31).
+static __inline long long
+T2DspRmsFromMs(long long Ms)
+{
+    long long half;
+
+    if (Ms <= 0) {
+        return 0;
+    }
+    half = T2DspSar(T2DspLog2Q16(Ms), 1) + (4ll << 16);   // log2 of the RMS, Q16
+    if (half >= (31ll << 16)) {
+        return T2DSP_FULL_SCALE - 1;
+    }
+    return T2DspExp2Q30(half - (31ll << 16)) << 1;
+}
+
+// One-pole coefficient (Q30) applied once per T2DSP_COMP_BLOCK frames:
+// 1 - (1 - c)^16, so a block step equals 16 per-frame steps.
+static __inline long long
+T2DspBlockCoef(long long C)
+{
+    long long r = T2DSP_GAIN_ONE - C;
+    unsigned int i;
+
+    for (i = 0; i < 4; i++) {
+        r = T2DspSar(r * r, 30);
+    }
+    return T2DSP_GAIN_ONE - r;
+}
+
+// Gain (Q30, with makeup) with a quadratic soft knee of +-1 octave of level
+// (+-6 dB, lsp's default knee 0.5) around the threshold.
+static __inline long long
+T2DspCompTargetKnee(const long long *Band, long long Env)
+{
+    const long long w = 65536;
+    long long over = T2DspLog2Q16(Env) - (27ll << 16) - Band[0];
+    long long reduction = 0;
+
+    if (over >= w) {
+        reduction = T2DspSar(over * Band[1], 16);
+    } else if (over > -w) {
+        long long u = over + w;   // 0 .. 2w
+
+        reduction = T2DspSar(T2DspSar(u * u, 16) * Band[1], 18);   // r * u^2 / (4w)
+    }
+    return T2DspSar(T2DspExp2Q30(-reduction) * Band[2], T2DSP_Q);
+}
+
 // Gain (Q30, with makeup) of a downward compressor for an envelope, from a
 // band row {log2 threshold Q16, 1 - 1/ratio Q16, makeup Q28, ...}.
 static __inline long long
@@ -355,20 +470,38 @@ T2DspComp(T2DSP_STATE *S, long long *L, long long *R)
         band[side][3] = T2DspBiquad(g_T2DspCompXover[7], &x[13], T2DspBiquad(g_T2DspCompXover[7], &x[12], hi));
     }
 
-    for (k = 0; k < 4; k++) {
-        long long a = band[0][k] < 0 ? -band[0][k] : band[0][k];
-        long long b = band[1][k] < 0 ? -band[1][k] : band[1][k];
-        long long peak = a > b ? a : b;
-        long long coef = (peak > S->CompEnv[k]) ? g_T2DspCompBand[k][3] : g_T2DspCompBand[k][4];
+    if (S->CompStyle == 0) {
+        for (k = 0; k < 4; k++) {
+            long long a = band[0][k] < 0 ? -band[0][k] : band[0][k];
+            long long b = band[1][k] < 0 ? -band[1][k] : band[1][k];
+            long long peak = a > b ? a : b;
+            long long coef = (peak > S->CompEnv[k]) ? g_T2DspCompBand[k][3] : g_T2DspCompBand[k][4];
 
-        S->CompEnv[k] += T2DspSar((peak - S->CompEnv[k]) * coef, 30);
+            S->CompEnv[k] += T2DspSar((peak - S->CompEnv[k]) * coef, 30);
+        }
+    } else {
+        // lsp sidechain: RMS of the middle signal (L+R)/2.
+        for (k = 0; k < 4; k++) {
+            T2DspMsUpdate(&S->CompMs[k], T2DspSar(band[0][k] + band[1][k], 1));
+        }
     }
 
     if (S->CompCount == 0) {
         S->CompCount = T2DSP_COMP_BLOCK;
         for (k = 0; k < 4; k++) {
-            S->CompStep[k] = (T2DspCompTarget(g_T2DspCompBand[k], S->CompEnv[k]) - S->CompGain[k]) /
-                             (long long)T2DSP_COMP_BLOCK;
+            long long target;
+
+            if (S->CompStyle == 0) {
+                target = T2DspCompTarget(g_T2DspCompBand[k], S->CompEnv[k]);
+            } else {
+                long long rms = T2DspRmsFromMs(S->CompMs[k]);
+                long long coef = T2DspBlockCoef(rms > S->CompEnv[k] ? g_T2DspCompBand[k][3]
+                                                                    : g_T2DspCompBand[k][4]);
+
+                S->CompEnv[k] += T2DspSar((rms - S->CompEnv[k]) * coef, 30);
+                target = T2DspCompTargetKnee(g_T2DspCompBand[k], S->CompEnv[k]);
+            }
+            S->CompStep[k] = (target - S->CompGain[k]) / (long long)T2DSP_COMP_BLOCK;
         }
     }
     S->CompCount--;
@@ -406,15 +539,31 @@ T2DspBuzz(T2DSP_STATE *S, long long *W)
         band[side] = T2DspBiquad(g_T2DspBuzzXover[4], &x[8], T2DspBiquad(g_T2DspBuzzXover[4], &x[7], lo));
         rest[side] = hi + T2DspBiquad(g_T2DspBuzzXover[3], &x[6], T2DspBiquad(g_T2DspBuzzXover[3], &x[5], lo));
 
-        a = band[side] < 0 ? -band[side] : band[side];
-        coef = (a > S->BuzzEnv[side]) ? g_T2DspBuzzBand[3] : g_T2DspBuzzBand[4];
-        S->BuzzEnv[side] += T2DspSar((a - S->BuzzEnv[side]) * coef, 30);
+        if (S->CompStyle == 0) {
+            a = band[side] < 0 ? -band[side] : band[side];
+            coef = (a > S->BuzzEnv[side]) ? g_T2DspBuzzBand[3] : g_T2DspBuzzBand[4];
+            S->BuzzEnv[side] += T2DspSar((a - S->BuzzEnv[side]) * coef, 30);
+        } else {
+            // Both woofers of a pair carry the same signal: its own RMS.
+            T2DspMsUpdate(&S->BuzzMs[side], band[side]);
+        }
     }
     if (S->BuzzCount == 0) {
         S->BuzzCount = T2DSP_COMP_BLOCK;
         for (side = 0; side < 2; side++) {
-            S->BuzzStep[side] = (T2DspCompTarget(g_T2DspBuzzBand, S->BuzzEnv[side]) - S->BuzzGain[side]) /
-                                (long long)T2DSP_COMP_BLOCK;
+            long long target;
+
+            if (S->CompStyle == 0) {
+                target = T2DspCompTarget(g_T2DspBuzzBand, S->BuzzEnv[side]);
+            } else {
+                long long rms = T2DspRmsFromMs(S->BuzzMs[side]);
+                long long c = T2DspBlockCoef(rms > S->BuzzEnv[side] ? g_T2DspBuzzBand[3]
+                                                                     : g_T2DspBuzzBand[4]);
+
+                S->BuzzEnv[side] += T2DspSar((rms - S->BuzzEnv[side]) * c, 30);
+                target = T2DspCompTargetKnee(g_T2DspBuzzBand, S->BuzzEnv[side]);
+            }
+            S->BuzzStep[side] = (target - S->BuzzGain[side]) / (long long)T2DSP_COMP_BLOCK;
         }
     }
     S->BuzzCount--;
@@ -543,14 +692,19 @@ T2DspLimit(T2DSP_LIMITER *Lim, long long *Samples, unsigned int Count, long long
 static __inline void
 T2DspAutoGain(T2DSP_STATE *S, long long *L, long long *R)
 {
-    long long a = T2DspSar(*L, 8);   // |a| < 2^23 after saturation
-    long long b = T2DspSar(*R, 8);
-    long long p = (a * a + b * b) >> 1;
+    long long a = T2DspSar(T2DspBiquad(g_T2DspKWeight[1], &S->KWeight[0][1],
+                               T2DspBiquad(g_T2DspKWeight[0], &S->KWeight[0][0], *L)), 4);
+    long long b = T2DspSar(T2DspBiquad(g_T2DspKWeight[1], &S->KWeight[1][1],
+                               T2DspBiquad(g_T2DspKWeight[0], &S->KWeight[1][0], *R)), 4);
+    // |a|,|b| < 2^27: p < 2^55. The >> 4 (not more) keeps quiet signals well
+    // above the one-pole's 2^14 quantisation step.
+    long long p = a * a + b * b;
 
     S->AgcEnv += T2DspSar(p - S->AgcEnv, T2DSP_AGC_ENV_SHIFT);
     if (S->AgcCount == 0) {
-        // RMS in log2 relative to a full-scale square (power 2^38 at 2^19).
-        long long level = T2DspSar(T2DspLog2Q16(S->AgcEnv) - (38ll << 16), 1);
+        // Loudness in log2 units (LUFS / 6.02): channel powers summed,
+        // relative to 2^46 (full scale 2^23 after the >> 4), -0.691 dB.
+        long long level = T2DspSar(T2DspLog2Q16(S->AgcEnv) - (46ll << 16), 1) - T2DSP_AGC_LUFS_OFFSET;
         long long target = S->AgcLog;
         long long lin;
 
@@ -631,6 +785,9 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
             T2DspAutoGain(S, &in[0], &in[1]);
         }
         for (side = 0; side < 2; side++) {
+            // Tone controls first: a bass boost also feeds the virtual bass,
+            // and the compressors and limiters downstream keep it in check.
+            in[side] = T2DspUserEq(S, side, in[side]);
             if (Level >= T2DSP_LEVEL_VIRTBASS) {
                 in[side] = T2DspVirtBass(S->VirtBass[side], in[side]);
             }

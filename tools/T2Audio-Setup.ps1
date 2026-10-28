@@ -4,6 +4,7 @@
 #   .\T2Audio-Setup.ps1                                  # интерактивное меню
 #   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # установить, постоянный режим
 #   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # сменить пресет звука
+#   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # тембр поверх пресета
 #   .\T2Audio-Setup.ps1 -Action Status
 #   .\T2Audio-Setup.ps1 -Action ResetGuard               # сбросить защиту от падений
 #   .\T2Audio-Setup.ps1 -Action Uninstall                # вернуть AppleAudio
@@ -20,11 +21,19 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
-    [ValidateSet('macos', 'bright', 'loud', 'maxvolume', 'even', 'warm', 'natural', 'raw')]
+    [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
     [string]$Preset = 'macos',
+
+    # -Action Tune: тембр в дБ (-12..+12) поверх текущего пресета; не указан = не менять.
+    # Бас = полка 150 Гц, высокие = полка 6 кГц, разборчивость = пик 2,5 кГц.
+    [ValidateRange(-12, 12)] [Nullable[int]]$BassDb,
+    [ValidateRange(-12, 12)] [Nullable[int]]$TrebleDb,
+    [ValidateRange(-12, 12)] [Nullable[int]]$ClarityDb,
+    # Компрессор: 0 = быстрый пиковый (как раньше), 1 = точный как в macOS (RMS, мягкое колено).
+    [ValidateRange(0, 1)] [Nullable[int]]$CompStyle,
 
     # Громкость точки T2 после установки (0..1); -1 = не трогать.
     [double]$Volume = 0.3,
@@ -48,38 +57,65 @@ $CatPath      = Join-Path $PackageDir 't2audiominiport.cat'
 
 # ---------------------------------------------------------------------------
 # Пресеты звука. Значения - DWORD в Parameters; отсутствующее значение =
-# значение по умолчанию в драйвере. Проверен на железе владельцем только
-# 'macos' (2026-10-28, 1.0.11.0); остальные - варианты для подбора на слух.
+# значение по умолчанию в драйвере. Каждый пресет перечисляет только отличия
+# от значений по умолчанию (= 'macos'); при установке пишутся все значения.
+# Проверен на железе владельцем только 'macos' (2026-10-28, 1.0.11.0);
+# остальные - варианты для подбора на слух. BassDb/TrebleDb/ClarityDb/
+# CompStyle понимает драйвер начиная с 1.0.12.0 (старый их просто не читает).
 # ---------------------------------------------------------------------------
-$Presets = [ordered]@{
-    'macos'     = @{ Title = 'Как на Mac (рекомендуется)';
-                     Text  = 'Эквалайзер Apple для 6 динамиков, виртуальный бас, многополосный компрессор.';
-                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $true }
-    'bright'    = @{ Title = 'Ярче';
-                     Text  = 'Как на Mac, но твитеры на 3 дБ громче: больше «воздуха» и деталей.';
-                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 3; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
-    'loud'      = @{ Title = 'Громче';
-                     Text  = 'Сильнее компенсация громкости и защита вуферов от дребезга; лимитер держит пики.';
-                     Values = @{ SpeakerDsp = 4; DspGainDb = 9; TweeterTrimDb = 0; WooferLimitDb = 3; DspAutoGain = 0 }; Verified = $false }
-    'maxvolume' = @{ Title = 'Максимальная громкость без гула';
-                     Text  = 'Для громкой музыки с басом: вуферы ограничены на 6 дБ ниже, защита от дребезга.';
-                     Values = @{ SpeakerDsp = 4; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 6; DspAutoGain = 0 }; Verified = $false }
-    'even'      = @{ Title = 'Ровная громкость';
-                     Text  = 'Как на Mac плюс автоусиление: тихие записи до +6 дБ громче, громкие до -12 дБ тише (медленно, без «качания»).';
-                     Values = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 1 }; Verified = $false }
-    'warm'      = @{ Title = 'Мягкий';
-                     Text  = 'Эквалайзер Mac и виртуальный бас, без компрессора: больше динамики, чуть тише.';
-                     Values = @{ SpeakerDsp = 2; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
-    'natural'   = @{ Title = 'Естественный';
-                     Text  = 'Только эквалайзер и разделение на динамики Mac, без виртуального баса и компрессора.';
-                     Values = @{ SpeakerDsp = 1; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
-    'raw'       = @{ Title = 'Без обработки (для сравнения)';
-                     Text  = 'Сырой путь: вуферы на полном диапазоне, твитеры через ФВЧ 3 кГц. Звучит плоско, баса мало.';
-                     Values = @{ SpeakerDsp = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }; Verified = $false }
-}
-$PresetValueNames = @('SpeakerDsp', 'DspGainDb', 'TweeterTrimDb', 'WooferLimitDb', 'DspAutoGain')
+$PresetValueNames = @('SpeakerDsp', 'DspGainDb', 'TweeterTrimDb', 'WooferLimitDb', 'DspAutoGain',
+                      'BassDb', 'TrebleDb', 'ClarityDb', 'CompStyle')
 # Значения драйвера по умолчанию (если в реестре значения нет).
-$ParamDefaults = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0 }
+$ParamDefaults = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0;
+                    BassDb = 0; TrebleDb = 0; ClarityDb = 0; CompStyle = 0 }
+
+function New-PresetValues([hashtable]$changes) {
+    $v = $ParamDefaults.Clone()
+    foreach ($k in $changes.Keys) { $v[$k] = $changes[$k] }
+    return $v
+}
+
+$Presets = [ordered]@{
+    'macos'         = @{ Title = 'Как на Mac (рекомендуется)';
+                         Text  = 'Эквалайзер Apple для 6 динамиков, виртуальный бас, многополосный компрессор.';
+                         Values = (New-PresetValues @{ }); Verified = $true }
+    'macos-precise' = @{ Title = 'Как на Mac, точный компрессор';
+                         Text  = 'То же, но компрессор считает уровень как macOS (RMS, мягкое колено): мягче на пиках, ровнее на басе.';
+                         Values = (New-PresetValues @{ CompStyle = 1 }); Verified = $false }
+    'bright'        = @{ Title = 'Ярче';
+                         Text  = 'Как на Mac, но твитеры на 3 дБ громче: больше «воздуха» и деталей.';
+                         Values = (New-PresetValues @{ TweeterTrimDb = 3 }); Verified = $false }
+    'loud'          = @{ Title = 'Громче';
+                         Text  = 'Сильнее компенсация громкости и защита вуферов от дребезга; лимитер держит пики.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 4; DspGainDb = 9; WooferLimitDb = 3 }); Verified = $false }
+    'maxvolume'     = @{ Title = 'Максимальная громкость без гула';
+                         Text  = 'Для громкой музыки с басом: вуферы ограничены на 6 дБ ниже, защита от дребезга.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 4; WooferLimitDb = 6 }); Verified = $false }
+    'even'          = @{ Title = 'Ровная громкость';
+                         Text  = 'Как на Mac плюс автоусиление по громкости (LUFS): тихие записи до +6 дБ, громкие до -12 дБ, медленно.';
+                         Values = (New-PresetValues @{ DspAutoGain = 1 }); Verified = $false }
+    'bass'          = @{ Title = 'Больше баса';
+                         Text  = 'Бас +4 дБ (полка 150 Гц) с защитой вуферов от дребезга. Для музыки на средней громкости.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 4; WooferLimitDb = 2; BassDb = 4; CompStyle = 1 }); Verified = $false }
+    'voice'         = @{ Title = 'Голос (подкасты, звонки)';
+                         Text  = 'Разборчивость +4 дБ (2,5 кГц), бас -3 дБ, ровная громкость.';
+                         Values = (New-PresetValues @{ BassDb = -3; ClarityDb = 4; DspAutoGain = 1 }); Verified = $false }
+    'movie'         = @{ Title = 'Кино';
+                         Text  = 'Ровная громкость, диалоги +2 дБ, бас +2 дБ, точный компрессор.';
+                         Values = (New-PresetValues @{ BassDb = 2; ClarityDb = 2; DspAutoGain = 1; CompStyle = 1 }); Verified = $false }
+    'night'         = @{ Title = 'Ночь (тихо и ровно)';
+                         Text  = 'Меньше баса и пиков, ровная громкость: не будит соседей, речь остаётся понятной.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 4; DspGainDb = 3; WooferLimitDb = 6; DspAutoGain = 1; BassDb = -4; ClarityDb = 2; CompStyle = 1 }); Verified = $false }
+    'warm'          = @{ Title = 'Мягкий';
+                         Text  = 'Эквалайзер Mac и виртуальный бас, без компрессора: больше динамики, чуть тише.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 2 }); Verified = $false }
+    'natural'       = @{ Title = 'Естественный';
+                         Text  = 'Только эквалайзер и разделение на динамики Mac, без виртуального баса и компрессора.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 1 }); Verified = $false }
+    'raw'           = @{ Title = 'Без обработки (для сравнения)';
+                         Text  = 'Сырой путь: вуферы на полном диапазоне, твитеры через ФВЧ 3 кГц. Звучит плоско, баса мало.';
+                         Values = (New-PresetValues @{ SpeakerDsp = 0 }); Verified = $false }
+}
 
 # ---------------------------------------------------------------------------
 # Вывод
@@ -279,9 +315,7 @@ function Get-CurrentPresetName {
     foreach ($k in $Presets.Keys) {
         $match = $true
         foreach ($n in $PresetValueNames) {
-            $v = Get-Param $n
-            if ($null -eq $v) { $v = $ParamDefaults[$n] }
-            if ([int]$v -ne [int]$Presets[$k].Values[$n]) { $match = $false; break }
+            if ((Get-EffectiveParam $n) -ne [int]$Presets[$k].Values[$n]) { $match = $false; break }
         }
         if ($match) { return $k }
     }
@@ -293,6 +327,16 @@ function Write-PresetValues($name) {
     foreach ($n in $PresetValueNames) { Set-Param $n $p.Values[$n] }
     Write-Ok "Пресет «$($p.Title)»: $(($PresetValueNames | ForEach-Object { "$_=$($p.Values[$_])" }) -join ', ')"
 }
+
+# Текущее значение параметра с учётом значения по умолчанию (DWORD читается
+# как Int32, поэтому -3 дБ возвращается как -3).
+function Get-EffectiveParam($name) {
+    $v = Get-Param $name
+    if ($null -eq $v) { return [int]$ParamDefaults[$name] }
+    return [int]$v
+}
+
+function Format-Db([int]$v) { if ($v -gt 0) { "+$v" } else { "$v" } }
 
 function Restart-T2Device {
     $d = Get-T2Device
@@ -324,6 +368,9 @@ function Invoke-Status {
     $cur = Get-CurrentPresetName
     $pn = if ($cur) { $Presets[$cur].Title } else { 'свои значения / по умолчанию' }
     Write-Host ("   Пресет:         {0}" -f $pn) -ForegroundColor White
+    Write-Host ("   Тембр:          бас {0} дБ, высокие {1} дБ, разборчивость {2} дБ, компрессор {3}" -f `
+        (Format-Db (Get-EffectiveParam 'BassDb')), (Format-Db (Get-EffectiveParam 'TrebleDb')), `
+        (Format-Db (Get-EffectiveParam 'ClarityDb')), $(if ((Get-EffectiveParam 'CompStyle') -eq 1) { 'точный (как macOS)' } else { 'быстрый' })) -ForegroundColor White
     $strikes = Get-Param 'CrashGuardStrikes'; $armed = Get-Param 'CrashGuardArmed'
     if ($strikes -ge 2) {
         Write-Fail "Защита от падений СРАБОТАЛА ($strikes обрыва подряд): драйвер не стартует. Пункт «Сбросить защиту» после разбора причины."
@@ -411,6 +458,42 @@ function Invoke-Preset {
     $null = Restart-T2Device
 }
 
+function Read-DbInteractive($label, $name) {
+    $cur = Get-EffectiveParam $name
+    $a = Read-Host ("  {0}, дБ от -12 до +12 (сейчас {1}; Enter = не менять)" -f $label, (Format-Db $cur))
+    if (-not $a) { return $null }
+    $n = 0
+    if ([int]::TryParse($a.Trim().TrimStart('+'), [ref]$n) -and $n -ge -12 -and $n -le 12) { return $n }
+    Write-Warn 'Нужно целое число от -12 до +12; не меняю.'
+    return $null
+}
+
+# Тембр поверх текущего пресета: меняет только указанные значения.
+function Invoke-Tune([switch]$Interactive) {
+    Write-Section 'Тембр'
+    $changes = [ordered]@{}
+    if ($Interactive) {
+        foreach ($pair in @(@('Бас (150 Гц)', 'BassDb'), @('Высокие (6 кГц)', 'TrebleDb'), @('Разборчивость (2,5 кГц)', 'ClarityDb'))) {
+            $v = Read-DbInteractive $pair[0] $pair[1]
+            if ($null -ne $v) { $changes[$pair[1]] = $v }
+        }
+        $c = Read-Host '  Компрессор: 0 = быстрый, 1 = точный как macOS (Enter = не менять)'
+        if ($c -eq '0' -or $c -eq '1') { $changes['CompStyle'] = [int]$c }
+    } else {
+        if ($null -ne $BassDb)    { $changes['BassDb'] = $BassDb }
+        if ($null -ne $TrebleDb)  { $changes['TrebleDb'] = $TrebleDb }
+        if ($null -ne $ClarityDb) { $changes['ClarityDb'] = $ClarityDb }
+        if ($null -ne $CompStyle) { $changes['CompStyle'] = $CompStyle }
+    }
+    if ($changes.Count -eq 0) {
+        Write-Info 'Ничего не изменено. Пример: .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2'
+        return
+    }
+    foreach ($k in $changes.Keys) { Set-Param $k $changes[$k] }
+    Write-Ok "Тембр: $(($changes.Keys | ForEach-Object { "$_=$($changes[$_])" }) -join ', ')"
+    $null = Restart-T2Device
+}
+
 function Invoke-ResetGuard {
     Write-Section 'Сброс защиты от падений'
     $s = Get-Param 'CrashGuardStrikes'
@@ -452,6 +535,7 @@ function Show-Menu {
         Write-Host '   2. Сменить пресет звука' -ForegroundColor White
         Write-Host '   3. Сбросить защиту от падений' -ForegroundColor White
         Write-Host '   4. Вернуть драйвер Apple (удалить T2AudioPort)' -ForegroundColor White
+        Write-Host '   5. Подстроить тембр (бас / высокие / разборчивость)' -ForegroundColor White
         Write-Host '   0. Выход' -ForegroundColor White
         $c = Read-Host "`n  Выбор"
         switch ($c) {
@@ -459,6 +543,7 @@ function Show-Menu {
             '2' { $script:Preset = Select-PresetInteractive; Invoke-Preset }
             '3' { Invoke-ResetGuard }
             '4' { Invoke-Uninstall }
+            '5' { Invoke-Tune -Interactive }
             '0' { return }
             default { Write-Warn 'Нет такого пункта.' }
         }
@@ -472,6 +557,7 @@ switch ($Action) {
     'Menu'       { Show-Menu }
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
+    'Tune'       { Write-Banner; Invoke-Tune }
     'Status'     { Write-Banner; Invoke-Status }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
     'Uninstall'  { Write-Banner; Invoke-Uninstall }

@@ -177,6 +177,14 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // DspAutoGain (Parameters\DspAutoGain, default 0, 0/1): slow autogain
     // toward -12 dBFS RMS (+6/-12 dB) in front of the DSP chain.
     ULONG DspAutoGain;
+    // Tone controls in the DSP path (Parameters\BassDb, TrebleDb, ClarityDb:
+    // signed dB stored as DWORD, -12..+12, default 0) and the compressor
+    // detector (Parameters\CompStyle: 0 = peak/hard knee, the approved sound;
+    // 1 = lsp defaults, RMS of mid + soft knee). See T2DspSetTuning.
+    LONG BassDb;
+    LONG TrebleDb;
+    LONG ClarityDb;
+    ULONG CompStyle;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

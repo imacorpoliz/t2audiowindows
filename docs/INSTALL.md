@@ -45,10 +45,35 @@ Without the menu:
 | `bright` | `macos` + `TweeterTrimDb=3` | More "air", if the sound seems muffled |
 | `loud` | `SpeakerDsp=4`, `DspGainDb=9`, `WooferLimitDb=3` | Louder; woofer rattle protection |
 | `maxvolume` | `SpeakerDsp=4`, `DspGainDb=6`, `WooferLimitDb=6` | Loud music with bass, without hum |
-| `even` | `macos` + `DspAutoGain=1` | Even loudness: quiet recordings up to +6 dB louder, loud ones up to −12 dB quieter |
+| `macos-precise` | `macos` + `CompStyle=1` | The compressor measures the level like macOS (RMS, soft knee): gentler on peaks |
+| `even` | `macos` + `DspAutoGain=1` | Even loudness (K-weighted, LUFS): quiet recordings up to +6 dB louder, loud ones up to −12 dB quieter |
+| `bass` | `SpeakerDsp=4`, `WooferLimitDb=2`, `BassDb=4`, `CompStyle=1` | More bass at medium volume, with rattle protection |
+| `voice` | `macos` + `BassDb=-3`, `ClarityDb=4`, `DspAutoGain=1` | Podcasts and calls: clearer speech, even loudness |
+| `movie` | `macos` + `BassDb=2`, `ClarityDb=2`, `DspAutoGain=1`, `CompStyle=1` | Films: even loudness, dialogue and bass a little up |
+| `night` | `SpeakerDsp=4`, `DspGainDb=3`, `WooferLimitDb=6`, `DspAutoGain=1`, `BassDb=-4`, `ClarityDb=2`, `CompStyle=1` | Quiet and even: less bass and peaks, speech stays clear |
 | `warm` | `SpeakerDsp=2` | No compressor: more dynamics, slightly quieter |
 | `natural` | `SpeakerDsp=1` | Apple's EQ and crossover only |
 | `raw` | `SpeakerDsp=0` | No processing, for comparison (flat, no bass) |
+
+Only `macos` is verified on hardware; the others are starting points for
+listening. `macos-precise`, `bass`, `voice`, `movie` and `night` use the
+parameters added in 1.0.12.0 (`BassDb`, `TrebleDb`, `ClarityDb`, `CompStyle`);
+a 1.0.11.0 driver ignores them.
+
+### Tone on top of a preset
+
+`-Action Tune` (menu item 5) changes only the tone values and keeps the rest
+of the preset. Whole dB from −12 to +12; a parameter left out is not changed.
+
+```powershell
+.\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2 -ClarityDb 1
+.\tools\T2Audio-Setup.ps1 -Action Tune -CompStyle 1
+```
+
+`BassDb` is a shelf at 150 Hz, `TrebleDb` a shelf at 6 kHz, `ClarityDb` a peak
+at 2.5 kHz (speech). Choosing a preset again resets all four. After a change the
+installer restarts the device, as with `-Action Preset`. `-Action Status` shows
+the current tone.
 
 The values live in `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`
 (each one is described in `docs/DRIVER_GUIDE.md` §8.3).

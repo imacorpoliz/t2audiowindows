@@ -118,7 +118,8 @@ Two input devices: `"Digital Mic"` (`0x21`, the 3-microphone array) and `"Codec 
 | # | Item | Notes |
 |---|---|---|
 | 7.1 | Owner verdicts on `maxvolume`, `even`, `bright` (§1.5) decide the defaults. | If the hum remains at full volume with `SpeakerDsp=4` + `WooferLimitDb`, measure which band it is (a sweep with `-SpeakerCheck`). |
-| 7.2 | Closer lsp emulation: soft knee and RMS detection in the compressors, the true ControlFreak limiter curve, K-weighting (LUFS) in the autogain. | Only if the owner hears a difference worth it. |
+| 7.2 | Closer lsp emulation. **Done in source (2026-10-28, not hardware-tested):** RMS detection and a soft knee in the compressors (`CompStyle=1`, preset `macos-precise`), K-weighting (LUFS) and the −72 LUFS gate in the autogain. Left: the ControlFreak limiter's short release (ours 21 ms vs lsp 0.5 ms; ours is deliberately gentler), lsp autogain's fast surge path. | GEMINI.md step 5a: if the owner prefers `macos-precise`, make `CompStyle=1` the default. |
+| 7.4 | User tone controls `BassDb`/`TrebleDb`/`ClarityDb` and presets `bass`, `voice`, `movie`, `night`; `-Action Tune`. **Done in source, not hardware-tested.** | Verdicts in GEMINI.md step 5a; adjust the preset values by ear. |
 | 7.3 | "Not quite like macOS yet": compare against macOS on the same tracks (the owner can boot macOS); adjust `DspGainDb`/trims per preset. | Ears, not code. |
 
 ---
