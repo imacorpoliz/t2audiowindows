@@ -1,9 +1,23 @@
-# T2AudioPort Driver - Current State (Authoritative)
+﻿# T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28 (after Stage E; Claude analysis and fixes, see the first entry)  
 **Current status**: **STAGE E FIRST SOUND ACHIEVED (PROVEN ON HARDWARE).** Physical sound successfully produced on MacBookPro16,1 on bare-metal Windows via custom T2Audio driver! Streams verified both via WASAPI automated tone and live Windows system audio. Complete stability: zero BSODs, clean START_IO and STOP_IO. Owner acoustic observations recorded: sound is present, flat, occasionally crackles, and not very loud. Deep analysis and action plan documented in [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).  
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
+
+### 2026-10-28: Listening Session #1 — Build 1.0.9.0 Tested (PROVEN ON HARDWARE)
+
+- **Test Report:** [docs/logs/EXCERPT_20261028_151122.md](logs/EXCERPT_20261028_151122.md) & [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md) §6.
+- **Tested Build:** DriverVer 10/28/2026,1.0.9.0, SHA256 B7651B983903D3E6C1B67F2BF3AD03FE8246A978ADD4BEC5E548E649FFCCF296, signed with test cert.
+- **Start-of-stream gap fixed (PASS):** HostTime unwrap verified on hardware. All streams logged **exactly 1 re-aim** (-1049, -1080, -1080) at stream start; the second +6xx re-aim gap was completely eliminated.
+- **DPC copy timing (PASS):** maxCopyGapUs = 2635 (~2.6 ms), gaps>10ms = 0, gaps>lead = 0, skips = 0. Copy engine maintains timing without underruns.
+- **Acoustic Findings & Missing Woofers Mystery:**
+  - Owner listened to music, video, and a low-frequency tone generator.
+  - Overall volume is distinctly louder than default Apple driver (OutputAttenuation=1 / -6 dB).
+  - Sound is very flat, lacking bass ("нч нет вовсе").
+  - On low-frequency tone generator, the speaker produced **a single mechanical click, but zero bass tone**.
+  - Hypothesis: Channel mapping {0,1 woofers, 2 tweeter, 3,4 woofers, 5 tweeter} was an unverified guess from Linux kaiT2en. If woofers are actually channels 2 & 5, our 3 kHz Butterworth highpass filter has been silencing them (-120 dB at 100 Hz), while tweeters on 0/1/3/4 clicked on bass excursion limit. Next step: run Step §6.2 (-RawChannels -ToneChannel  -ToneFrequency 1000) across all 6 channels.
+- **Post-Session Recovery (PASS):** Device safely recovered to AppleAudio.sys (oem16.inf, Status: OK).
 
 ### 2026-10-28 (after Stage E, later still): virtual bass, SpeakerDsp=2 (source only, not hardware-tested)
 
