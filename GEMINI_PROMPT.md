@@ -30,10 +30,12 @@
    Спроси владельца, что он услышал: есть ли тон, с обеих ли сторон, из вуферов и/или твитеров, есть ли щелчки примерно раз в 0,35 с. Запиши ответ.
    Тона нет, а лог как на шаге 5? Повтори с -ToneFrequency 1000 и затем с Parameters\OutputAttenuation=1. Громкость точки не повышай. Если и так тихо — стоп, отчёт: T2 не читает кольцо.
 7. Раскладка (GEMINI.md §6.2): цикл по каналам 0..5 с -RawChannels -ToneChannel $c -ToneFrequency 1000 -AudibleVolume 0.03 -OwnerApprovedAudible, после каждого -Mode Recover. Спрашивай владельца, какой динамик звучал. Ожидаемо: 0/1 — левые вуферы, 2 — левый твитер, 3/4 — правые вуферы, 5 — правый твитер. Если не совпало, не правь код, запиши в отчёт.
-8. Часы (GEMINI.md §7 E2/E3): два прогона по 10 минут тихой музыки или тона (громкость Windows 1–5 %):
-   a) Parameters\ClockRateTracking=0 — посчитай «re-aimed», отметь щелчки на слух, вычисли дрейф T2 по меткам (шаг sample 16640 против интервала в мс);
-   b) Parameters\ClockRateTracking=1 (dword, перезапуск устройства) — в логе «T2 clock: rate=… ppb drift=… ppb lead=…»: drift стабилен, lead 1000 ± 100, re-aimed не больше 1–2 раз в начале. Если rate упирается в ±1000000 или lead уходит — верни 0 и приложи лог.
-   Для длинного прогона увеличь -CaptureSeconds (например 660) и проиграй звук своим тоном или плеером.
+8. Часы (GEMINI.md §7 E2/E3): два прогона по 10 минут. Агент выключает устройство сразу после тона, поэтому длинный прогон делается длинным тоном через агент:
+   .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -AudibleVolume 0.03 -OwnerApprovedAudible -ToneSeconds 600 -CaptureSeconds 660 -ExpectedSysHash $h
+   .\tools\T2Audio-TestAgent.ps1 -Mode Recover
+   a) с Parameters\ClockRateTracking отсутствующим или 0: посчитай «re-aimed», спроси владельца про щелчки, вычисли дрейф T2 по меткам (шаг sample 16640 против интервала в мс);
+   b) с Parameters\ClockRateTracking=1 (dword): в логе «T2 clock: rate=… ppb drift=… ppb lead=…», drift стабилен, lead 1000 ± 100, re-aimed не больше 1–2 раз в начале. Если rate упирается в ±1000000 или lead уходит, верни 0 и приложи лог.
+   Логи ограничены: первые 8 строк и потом каждая 1000-я для меток и rate, каждая 100-я для re-aimed. Опирайся на счётчики (#n) в строках.
 9. Отчёт: docs/logs/EXCERPT_<дата>_<время>.md по каждому шагу; датированная запись в docs/CURRENT_STATE.md (хэш, версия, PASS/FAIL каждого шага, что услышал владелец, раскладка, дрейф в ppm, результат ClockRateTracking); отметки в GEMINI.md §7; PR из своей ветки в diagnostics. В конце устройство снова на AppleAudio (Started, CM_PROB_NONE), звуковая схема Windows возвращена, Parameters\ClockRateTracking и OutputAttenuation возвращены к значениям по умолчанию (удалить значения).
 
 Правила:
