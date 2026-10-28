@@ -1,4 +1,4 @@
-# Промпт для Gemini (подбор звука: компрессор, громкость, яркость; звук разрешён)
+# Промпт для Gemini (доводка звука на 1.0.12.0; звук разрешён)
 
 Вставь текст ниже в Gemini как задание. Подробности: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md` и первая запись в `docs/CURRENT_STATE.md`.
 
@@ -7,17 +7,21 @@
 
 РАЗРЕШЕНИЯ ВЛАДЕЛЬЦА НА ЭТУ СЕССИЮ: «разрешаю START_IO» и «разрешаю звук» (-BceIo -OwnerApprovedBceIo, -Listen -OwnerApprovedAudible). Отдельно спрашивать не нужно.
 
-Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md (выполняй шаги 1–3 по порядку), §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md (разбор прослушивания №2: бас появился; «тускло/низкая частота дискретизации» — скорее баланс твитеров, добавлен Parameters\TweeterTrimDb).
+Прочитай: блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в GEMINI.md (шаги 1–3 по порядку), §1 «Жёсткие правила», первую запись в docs/CURRENT_STATE.md. SpeakerDsp=3 одобрен владельцем и теперь стоит по умолчанию; в run summary новое поле maxCopyUs.
 
-Цель: собрать 1.0.11.0 и вместе с владельцем подобрать лучшие значения SpeakerDsp (3 или 4), DspGainDb (6/9/12), TweeterTrimDb (0/3/6) и при гуле на максимальной громкости с басом WooferLimitDb (3/6) по таблице вариантов a–g (f/f2 — басовый трек на 100 % громкости); лучший вариант прослушать 10 минут с ClockRateTracking=1.
+Цель: сборка 1.0.12.0 и доводка с владельцем по таблице вариантов a–f:
+- гул на басовом треке при 100 % громкости (по умолчанию → SpeakerDsp=4 → WooferLimitDb 3/6);
+- яркость (TweeterTrimDb 3/6);
+- громкость (DspGainDb 9);
+- 10 минут лучшего варианта с ClockRateTracking=1.
 
-Отчёт: docs/logs/EXCERPT_*.md (таблица вариантов: слова владельца, mode parameters, все run summary с dspLimited=), запись в docs/CURRENT_STATE.md с лучшими значениями, PR в diagnostics. Выводы о коде не делай; «доказано» — только проверенное, остальное «гипотеза».
+Отчёт: docs/logs/EXCERPT_*.md (таблица вариантов, слова владельца, все run summary с maxCopyUs, dspLimited, wooferLimited), запись в docs/CURRENT_STATE.md с итоговыми лучшими значениями, PR в diagnostics. «Доказано» — только проверенное, остальное «гипотеза»; оценку стоимости DSP бери из maxCopyUs драйвера, а не из хост-теста.
 
 Правила:
 - Без PASS — -Mode Recover, логи, запись в CURRENT_STATE.md, сообщить владельцу. Драйвер наугад не чинить.
 - Неприятный звук — Mute, Enter, -Mode Recover.
 - BSOD — стоп, минидамп, отчёт.
-- Не убирать гейт TestSession, не включать автозапуск, не усыплять Mac.
-- В конце: AppleAudio (Started, CM_PROB_NONE), все значения в Parameters (OutputAttenuation, ClockRateTracking, SpeakerDsp, DspGainDb, TweeterTrimDb, WooferLimitDb, TweeterMode) удалены.
+- Не убирать гейт TestSession, не включать автозапуск, не усыплять Mac с работающим драйвером.
+- В конце: AppleAudio (Started, CM_PROB_NONE), все значения в Parameters удалены.
 - В diagnostics напрямую не пушить, только PR.
 ```

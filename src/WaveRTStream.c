@@ -75,6 +75,10 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG CopyGapsOver10ms;
     ULONG CopyGapsOverLead;
     ULONG SkipEvents;
+    // Longest time spent rendering and copying into the ring in one call
+    // (DSP included), in microseconds; measured at DISPATCH_LEVEL under the
+    // hardware lock, so it is also how long that lock was held for the copy.
+    ULONG MaxCopyUs;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
     // Speaker DSP state (context->SpeakerDsp); reset with SpeakerState.
@@ -395,6 +399,20 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // BAR1 may be mapped write-combining; drain the WC buffers so the T2
         // sees the samples before the position that covers them is reported.
         _mm_sfence();
+
+        // Diagnostics: cost of this render + copy (qpc was read on entry).
+        {
+            LARGE_INTEGER done = KeQueryPerformanceCounter(NULL);
+
+            if (qpcFreq.QuadPart > 0 && done.QuadPart > qpc.QuadPart) {
+                ULONG64 us = (((ULONG64)done.QuadPart - (ULONG64)qpc.QuadPart) * 1000000ull) /
+                             (ULONG64)qpcFreq.QuadPart;
+
+                if (us > instance->MaxCopyUs) {
+                    instance->MaxCopyUs = (us > MAXULONG) ? MAXULONG : (ULONG)us;
+                }
+            }
+        }
     }
     KeReleaseSpinLockFromDpcLevel(&context->HardwareLock);
 
@@ -727,6 +745,7 @@ T2AudioStreamSetState(
                 instance->CopyGapsOver10ms = 0;
                 instance->CopyGapsOverLead = 0;
                 instance->SkipEvents = 0;
+                instance->MaxCopyUs = 0;
                 instance->ClockCorrections = 0;
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
                                                       (ULONG64)qpcFreq.QuadPart);
@@ -768,10 +787,10 @@ T2AudioStreamSetState(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u dspLimited=%lu wooferLimited=%lu\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
-                 instance->CopyGapsOverLead, instance->SkipEvents,
+                 instance->CopyGapsOverLead, instance->SkipEvents, instance->MaxCopyUs,
                  instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;

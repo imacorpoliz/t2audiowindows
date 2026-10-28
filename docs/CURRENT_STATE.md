@@ -5,6 +5,19 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): analysis of Listening Session #3; SpeakerDsp=3 becomes the default; DSP cost counter (source only, not hardware-tested)
+
+Based on `docs/logs/EXCERPT_20261028_192200.md` (1.0.11.0, `SpeakerDsp=3`, `DspGainDb=6`, other trims 0):
+
+- **Confirmed on hardware:** level 3 (KAIT2EN chain + virtual bass + 4-band compressor) on ~15 minutes of real music, owner verdict "все хорошо". Loudness and density no longer lacking, no pumping, no distortion. Both limiters idle (`dspLimited=0`, `wooferLimited=0`). Copy timing clean (max gap 2.8–3.1 ms, no gaps over the lead, no skips). One re-aim per stream. Idle D3/D0 transitions are reported clean; the excerpt shows no log lines for them.
+- **Default changed:** `Parameters\SpeakerDsp` now defaults to **3**. The plain path stays available with `SpeakerDsp=0`. All other defaults are unchanged (`OutputAttenuation=1`, `DspGainDb=6`, trims 0, `ClockRateTracking=0`).
+- **DSP cost:** the excerpt quotes ~303 µs per 96-frame tick from a host test on the Mac, against ~70 µs here. A test built without optimisation would explain it, but the driver's own cost was never measured. `run summary` now has `maxCopyUs=`: the longest render+copy (DSP included) at DISPATCH_LEVEL under the hardware lock. Windows' guideline for a DPC is roughly ≤ 100 µs; much more would call for optimising the DSP. Timing is fine either way (no gaps).
+- **Still untested on hardware:**
+  - `DspGainDb` 9/12 (louder);
+  - `TweeterTrimDb` 3/6 (brightness: the "sample rate a bit low" remark);
+  - level 4 and `WooferLimitDb` on a bass track at 100 % volume (the earlier "slight hum");
+  - `ClockRateTracking=1`.
+
 ### 2026-10-28 (19:22 hardware test): Listening Session #3 — 4-band Compressor Verified on Hardware (`SpeakerDsp=3`, Build 1.0.11.0, PROVEN ON HARDWARE)
 
 - **Test Setup:** Build 1.0.11.0 (SYS SHA256: `ECC35ACE239D2A192A3205495BB4A6B7A9F5C791964A64023A84F2C7C3724FC5`). Variant b: `SpeakerDsp=3` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass + 4-band Multiband Compressor `dspComp`), `DspGainDb=6`, `TweeterTrimDb=0`, `WooferLimitDb=0`, `OutputAttenuation=1` (-6 dB default).

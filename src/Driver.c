@@ -280,8 +280,10 @@ T2AudioStartDevice(
     // Off by default: the hardware-verified path re-aims on drift only.
     context->ClockRateTracking =
         (T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClockRateTracking", 0) != 0);
-    // Off by default: the hardware-verified plain speaker path.
-    context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 0);
+    // Default 3 (KAIT2EN chain + virtual bass + multiband compressor), the
+    // level the owner approved on hardware (2026-10-28, 1.0.11.0); 0 is the
+    // plain path.
+    context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 3);
     // Make-up gain for the DSP path (see T2AudioDsp.h); clamped to 0..12 dB.
     context->DspGainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspGainDb", 6);
     if (context->DspGainDb > 12) {
