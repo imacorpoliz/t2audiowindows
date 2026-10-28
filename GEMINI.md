@@ -31,17 +31,18 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 
 **Шаг 3. Раскладка двумя тонами** (сырые каналы; низкий тон только на 0/1/3/4, на 2/5 агент его не пустит):
 ```powershell
-$base = '-Mode','Test','-Mmio','-BceIo','-OwnerApprovedBceIo','-RawChannels','-AudibleVolume','0.1','-OwnerApprovedAudible','-ToneSeconds','3','-ExpectedSysHash',$h
+$base = @{ Mode='Test'; Mmio=$true; BceIo=$true; OwnerApprovedBceIo=$true; RawChannels=$true;
+          AudibleVolume=0.1; OwnerApprovedAudible=$true; ToneSeconds=3; ExpectedSysHash=$h; Force=$true }
 foreach ($c in 0,1,3,4) {
   foreach ($f in 150, 6000) {
-    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f -Force
+    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f
     & .\tools\T2Audio-TestAgent.ps1 -Mode Recover
     Read-Host "Канал ${c}, $f Гц: слышно? откуда? (запиши)"
   }
 }
 foreach ($c in 2,5) {
   foreach ($f in 1500, 6000) {
-    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f -Force
+    & .\tools\T2Audio-TestAgent.ps1 @base -ToneChannel $c -ToneFrequency $f
     & .\tools\T2Audio-TestAgent.ps1 -Mode Recover
     Read-Host "Канал ${c}, $f Гц: слышно? откуда? (запиши)"
   }
