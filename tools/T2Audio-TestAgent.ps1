@@ -92,7 +92,8 @@ param(
     # its own (woofers 0/1/3/4: LF, MF, sweep 50-500 Hz; tweeters 2/5: MF-HF,
     # HF, sweep 1-16 kHz); without it the stereo endpoint is used (left, then
     # right: 100 Hz, 1 kHz, 8 kHz, sweep 40 Hz - 16 kHz) so the driver's own
-    # crossover / SpeakerDsp is heard. Endpoint volume: -AudibleVolume, or 0.1.
+    # crossover / SpeakerDsp is heard. Endpoint volume: -AudibleVolume, or
+    # 0.2; amplitude: -ToneAmplitude, or 0.3.
     [switch]$SpeakerCheck,
 
     # Listening session: start the driver (needs -Mmio -BceIo and both owner
@@ -143,6 +144,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Script-level: functions have their own (empty) $PSBoundParameters.
+$ToneAmplitudeGiven = $PSBoundParameters.ContainsKey('ToneAmplitude')
 
 $HardwareId       = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
 $KnownInstanceId  = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8'
@@ -511,7 +514,11 @@ function Invoke-Test {
             Write-Fail '-SpeakerCheck needs -Mmio -BceIo -OwnerApprovedBceIo -OwnerApprovedAudible (and no -Listen).'
             exit 1
         }
-        if ($AudibleVolume -lt 0.0) { $AudibleVolume = 0.1 }
+        # A quiet check risks a false "woofer dead": small woofers are not
+        # sensitive at 100 Hz. Default to endpoint 0.2 and amplitude 0.3
+        # unless given; -6 dB OutputAttenuation still applies in the driver.
+        if ($AudibleVolume -lt 0.0) { $AudibleVolume = 0.2 }
+        if (-not $ToneAmplitudeGiven) { $ToneAmplitude = 0.3 }
         $CaptureSeconds = 86400
     }
     $audible = ($AudibleVolume -ge 0.0) -and -not $SpeakerCheck
