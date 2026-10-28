@@ -54,7 +54,7 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
 ```
 
-**Шаг 4. Сравнение DSP** (`-Listen`, как в прошлый раз). Четыре прослушивания на одних и тех же треках и одной громкости Windows: `SpeakerDsp` = 0, 1, 2, 3 (dword в `Parameters`; перед каждым прослушиванием новое значение):
+**Шаг 4. Сравнение DSP** (`-Listen`, как в прошлый раз). Пять прослушиваний на одних и тех же треках и одной громкости Windows: `SpeakerDsp` = 0, 1, 2, 3, 4 (dword в `Parameters`; перед каждым прослушиванием новое значение):
 ```powershell
 .\tools\T2Audio-TestAgent.ps1 -Mode Test -Mmio -BceIo -OwnerApprovedBceIo -Listen -OwnerApprovedAudible -ExpectedSysHash $h
 .\tools\T2Audio-TestAgent.ps1 -Mode Recover
@@ -63,6 +63,7 @@ git checkout -b gemini/dsp-1 origin/diagnostics
 * **1** — ниже ~70 Гц срезано (защита вуферов), середина и верх тише, баланс ближе к Mac.
 * **2** — плюс виртуальный бас, бас ощущается полнее.
 * **3** — плюс компрессор, громче и плотнее.
+* **4** — плюс защита вуферов от дребезга на ~125 Гц: на громком басу меньше призвуков корпуса.
 
 Владелец оценивает каждый уровень: бас, яркость, громкость, хрип/искажения, и какой лучше. Из лога: строки `mode parameters` (`SpeakerDsp=`), все `run summary` (`dspLimited=`), `re-aimed`.
 

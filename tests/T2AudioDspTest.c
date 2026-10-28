@@ -40,6 +40,13 @@ typedef struct {
 } RCOMP;
 
 typedef struct {
+    RBQ xo[2][9];
+    double env[2], g[2], step[2];
+    unsigned int count;
+} RBUZZ;
+
+typedef struct {
+    RBUZZ buzz;
     RCOMP comp;
     RBQ vb[2][4];
     RBQ t1[2][T2DSP_TONE1_STAGES], t2[2][T2DSP_TONE2_STAGES];
@@ -113,6 +120,50 @@ static void rcomp(RCOMP *c, double *L, double *R)
     for (k = 0; k < 4; k++) c->g[k] += c->step[k];
 }
 
+static void rbuzz_reset(RBUZZ *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->g[0] = b->g[1] = 1.0;
+}
+
+static double rbuzz_target(double env)
+{
+    double t = 1.0;
+    if (env > g_T2DspRefBuzzBand[0]) {
+        t = pow(2.0, -log2(env / g_T2DspRefBuzzBand[0]) * (1.0 - 1.0 / g_T2DspRefBuzzBand[1]));
+    }
+    return t * g_T2DspRefBuzzBand[2];
+}
+
+// Double model of T2DspBuzz.
+static void rbuzz(RBUZZ *b, double *w)
+{
+    double band[2], rest[2];
+    int s;
+
+    for (s = 0; s < 2; s++) {
+        RBQ *x = b->xo[s];
+        double lo = rbq(g_T2DspRefBuzzXover[0], &x[1], rbq(g_T2DspRefBuzzXover[0], &x[0], w[s]));
+        double hi = rbq(g_T2DspRefBuzzXover[1], &x[3], rbq(g_T2DspRefBuzzXover[1], &x[2], w[s]));
+        double a, coef;
+        hi = rbq(g_T2DspRefBuzzXover[2], &x[4], hi);
+        band[s] = rbq(g_T2DspRefBuzzXover[4], &x[8], rbq(g_T2DspRefBuzzXover[4], &x[7], lo));
+        rest[s] = hi + rbq(g_T2DspRefBuzzXover[3], &x[6], rbq(g_T2DspRefBuzzXover[3], &x[5], lo));
+        a = fabs(band[s]);
+        coef = a > b->env[s] ? g_T2DspRefBuzzBand[3] : g_T2DspRefBuzzBand[4];
+        b->env[s] += (a - b->env[s]) * coef;
+    }
+    if (b->count == 0) {
+        b->count = T2DSP_COMP_BLOCK;
+        for (s = 0; s < 2; s++) b->step[s] = (rbuzz_target(b->env[s]) - b->g[s]) / T2DSP_COMP_BLOCK;
+    }
+    b->count--;
+    for (s = 0; s < 2; s++) {
+        w[s] = rest[s] + band[s] * b->g[s];
+        b->g[s] += b->step[s];
+    }
+}
+
 // out[6]: ring channels, full scale 1.0 (no limiter, no attenuation).
 static void ref_frame(REF *r, double l, double rr, double *out)
 {
@@ -145,13 +196,18 @@ static void ref_frame(REF *r, double l, double rr, double *out)
     in[1] = md - acc;
     for (s = 0; s < 2; s++) in[s] = rcas(g_T2DspRefTone2, r->t2[s], T2DSP_TONE2_STAGES, in[s]);
     if (g_level >= T2DSP_LEVEL_COMP) rcomp(&r->comp, &in[0], &in[1]);
-    for (s = 0; s < 2; s++) {
-        double x = in[s];
-        double w = rcas(g_T2DspRefWoofer, r->w[s], T2DSP_WOOFER_STAGES, x);
-        double t = rcas(g_T2DspRefTweeter, r->tw[s], T2DSP_TWEETER_STAGES, x);
-        out[s * 3 + 0] = w;
-        out[s * 3 + 1] = w;
-        out[s * 3 + 2] = t;
+    {
+        double w[2], t[2];
+        for (s = 0; s < 2; s++) {
+            w[s] = rcas(g_T2DspRefWoofer, r->w[s], T2DSP_WOOFER_STAGES, in[s]);
+            t[s] = rcas(g_T2DspRefTweeter, r->tw[s], T2DSP_TWEETER_STAGES, in[s]);
+        }
+        if (g_level >= T2DSP_LEVEL_BUZZ) rbuzz(&r->buzz, w);
+        for (s = 0; s < 2; s++) {
+            out[s * 3 + 0] = w[s];
+            out[s * 3 + 1] = w[s];
+            out[s * 3 + 2] = t[s];
+        }
     }
 }
 
@@ -176,6 +232,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
     T2DspReset(&st);
     memset(&ref, 0, sizeof(ref));
     rcomp_reset(&ref.comp);
+    rbuzz_reset(&ref.buzz);
     for (n = 0; n < total; n++) {
         double ph = 2.0 * 3.14159265358979323846 * hz * n / 48000.0;
         double l = amp * sin(ph), r = amp * sin(ph + rphase);
@@ -383,6 +440,7 @@ static double tone_band_energy(double hz, double amp, double lo, double hi, int 
     T2DspReset(&st);
     memset(&ref, 0, sizeof(ref));
     rcomp_reset(&ref.comp);
+    rbuzz_reset(&ref.buzz);
     // Goertzel-free: correlate with sines on a grid of 10 Hz bins.
     {
         static double y[48000];
@@ -457,6 +515,56 @@ static double comp_level(double amp, double hz, int fixed)
     return 20.0 * log10(pk / amp);
 }
 
+// Buzz compressor alone on the woofer signal (2^27 scale): fixed vs model.
+static double buzz_level(double amp, double hz, int fixed)
+{
+    static T2DSP_STATE st;
+    RBUZZ rb;
+    double pk = 0;
+    int n;
+
+    T2DspReset(&st);
+    rbuzz_reset(&rb);
+    for (n = 0; n < 48000; n++) {
+        double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0), y;
+        if (fixed) {
+            long long w[2];
+            w[0] = w[1] = (long long)floor(s * 134217728.0 + 0.5);
+            T2DspBuzz(&st, w);
+            y = (double)w[0] / 134217728.0;
+        } else {
+            double w[2] = { s, s };
+            rbuzz(&rb, w);
+            y = w[0];
+        }
+        if (n >= 38400 && fabs(y) > pk) pk = fabs(y);
+    }
+    return 20.0 * log10(pk / amp);
+}
+
+static void test_buzz(void)
+{
+    double lv[] = { -30, -18, -12, -6, 0 };
+    unsigned int i;
+    int ok = 1;
+
+    printf("Woofer buzz compressor (SpeakerDsp=4), 125 Hz gain vs level\n");
+    for (i = 0; i < sizeof(lv) / sizeof(lv[0]); i++) {
+        double amp = pow(10.0, lv[i] / 20.0);
+        double f = buzz_level(amp, 125.5, 1), r = buzz_level(amp, 125.5, 0);
+        printf("  in %5.1f dBFS: gain fixed %6.2f dB, model %6.2f dB\n", lv[i], f, r);
+        if (fabs(f - r) > 0.1) ok = 0;
+    }
+    check("fixed point matches the double model (0.1 dB)", ok);
+    check("125 Hz below threshold passes flat (|gain| < 0.2 dB)", fabs(buzz_level(pow(10.0, -30 / 20.0), 125.5, 1)) < 0.2);
+    // The 110-145 Hz band is narrow: the LR4 split puts only part of a
+    // 125 Hz tone into it (the rest stays in the neighbours), so the
+    // overall gain changes by about 1 dB at full scale (as in lsp).
+    check("125 Hz at 0 dBFS compressed (< -0.5 dB)", buzz_level(1.0, 125.5, 1) < -0.5);
+    check("300 Hz at 0 dBFS not compressed (|gain| < 0.5 dB)", fabs(buzz_level(1.0, 300, 1)) < 0.5);
+    check("60 Hz at 0 dBFS not compressed (|gain| < 0.5 dB)", fabs(buzz_level(1.0, 60, 1)) < 0.5);
+}
+
 static void test_log_exp(void)
 {
     long long e, v;
@@ -508,6 +616,13 @@ int main(void)
     test_virtual_bass();
     test_log_exp();
     test_compressor();
+    test_buzz();
+    g_level = T2DSP_LEVEL_BUZZ;
+    printf("--- level 4 (virtual bass + compressor + woofer buzz compressor) ---\n");
+    test_match_reference();
+    test_stability();
+    test_headroom_and_limiter();
+    test_cost();
     g_level = T2DSP_LEVEL_COMP;
     printf("--- level 3 (virtual bass + compressor) ---\n");
     test_match_reference();

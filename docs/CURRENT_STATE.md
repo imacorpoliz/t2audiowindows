@@ -5,6 +5,12 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): woofer buzz compressor, SpeakerDsp=4 (source only, not hardware-tested)
+
+- **Added** the graph's woofer "Buzz" compressor as level 4 (on top of 3), on each woofer pair after the woofer chain. lsp's band numbering resolved: band k's settings belong to its start frequency `sf_k`, bands are sorted by frequency. The enabled bands are then 110.06–125.51 and 125.51–144.58 Hz with one setting (−12 dB, ratio 8, 2/50 ms), reproduced as one LR4-split band 110–145 Hz (all-pass compensated, flat below threshold). The generator asserts the enabled bands are contiguous and share a setting.
+- **Tests:** fixed vs double model within 0.1 dB (125 Hz, −30..0 dBFS); flat below threshold; 300 Hz and 60 Hz untouched at 0 dBFS; full chain at level 4 vs reference, stability, headroom. The band is narrow, so a 125 Hz tone changes by ~1 dB at full scale (only part of it falls into the band, as with lsp).
+- CI green on `2e6e0bb` (speaker check, tone fixes, code-analysis fixes).
+
 ### 2026-10-28 (Claude, before the 17:00 session): speaker check tool, click-free tones, code-analysis fixes (source only, not hardware-tested)
 
 - **`T2Audio-TestAgent.ps1 -SpeakerCheck`** answers the owner's question "do the woofers work at all?". After the muted probe it plays a fixed sequence and waits for Enter before each step; the owner's answer per step goes to `speakercheck.txt`.

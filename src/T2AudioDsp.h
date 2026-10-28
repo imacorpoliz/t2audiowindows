@@ -16,13 +16,14 @@
 //                 L = mid + side, R = mid - side   (crosstalk cancellation)
 //        ──► Tone2 (midrange EQ)
 //        ──► [level 3] multiband compressor (4 bands, LR4 crossover)
-//        ──► per side: woofer chain (crossover + EQ) -> ring 0/1 (L), 3/4 (R)
+//        ──► per side: woofer chain (crossover + EQ) [level 4: + buzz
+//                      compressor 110-145 Hz] -> ring 0/1 (L), 3/4 (R)
 //                      tweeter chain (crossover + EQ) -> ring 2 (L), 5 (R)
 //        ──► limiter (linked: left woofers, right woofers, both tweeters)
 //
-// Not reproduced (nonlinear in the graph): autogain, woofer "Buzz"
-// compressor; KAIT2EN's limiters are replaced by the simple peak limiter
-// below. The multiband compressor is an approximation of lsp's (hard knee,
+// Not reproduced (nonlinear in the graph): autogain; KAIT2EN's limiters are
+// replaced by the simple peak limiter below. The woofer "Buzz" compressor
+// (level 4) is one LR4-split band with the graph's setting. The multiband compressor is an approximation of lsp's (hard knee,
 // peak envelope linked over L/R, gain updated every 16 frames and ramped).
 //
 // Number format: samples are 64-bit integers scaled so that full scale is
@@ -53,7 +54,8 @@
 #define T2DSP_LEVEL_LINEAR     1u
 #define T2DSP_LEVEL_VIRTBASS   2u
 #define T2DSP_LEVEL_COMP       3u
-#define T2DSP_LEVEL_MAX        3u
+#define T2DSP_LEVEL_BUZZ       4u
+#define T2DSP_LEVEL_MAX        4u
 #define T2DSP_COMP_BLOCK       16u    // frames per compressor gain update
 
 typedef struct _T2DSP_BQ_STATE {
@@ -72,6 +74,12 @@ typedef struct _T2DSP_STATE {
     long long CompGain[4];      // current band gain incl. makeup, Q30
     long long CompStep[4];      // per-frame gain ramp, Q30
     unsigned int CompCount;     // frames until the next gain update
+    // Woofer buzz compressor per side: LPhi x2, HPhi x2, APlo, LPlo x2, HPlo x2.
+    T2DSP_BQ_STATE BuzzXo[2][9];
+    long long BuzzEnv[2];
+    long long BuzzGain[2];      // Q30, includes makeup
+    long long BuzzStep[2];
+    unsigned int BuzzCount;
     T2DSP_BQ_STATE Woofer[2][T2DSP_WOOFER_STAGES];
     T2DSP_BQ_STATE Tweeter[2][T2DSP_TWEETER_STAGES];
     // Circular histories, newest at index Pos.
@@ -103,6 +111,8 @@ T2DspReset(T2DSP_STATE *S)
     for (i = 0; i < 4; i++) {
         S->CompGain[i] = T2DSP_GAIN_ONE;
     }
+    S->BuzzGain[0] = T2DSP_GAIN_ONE;
+    S->BuzzGain[1] = T2DSP_GAIN_ONE;
 }
 
 static __inline long long
@@ -242,6 +252,20 @@ T2DspExp2Q30(long long e)
     return v >> (unsigned int)(-ip);
 }
 
+// Gain (Q30, with makeup) of a downward compressor for an envelope, from a
+// band row {log2 threshold Q16, 1 - 1/ratio Q16, makeup Q28, ...}.
+static __inline long long
+T2DspCompTarget(const long long *Band, long long Env)
+{
+    long long over = T2DspLog2Q16(Env) - (27ll << 16) - Band[0];
+    long long target = T2DSP_GAIN_ONE;
+
+    if (over > 0) {
+        target = T2DspExp2Q30(-T2DspSar(over * Band[1], 16));
+    }
+    return T2DspSar(target * Band[2], T2DSP_Q);
+}
+
 // Multiband compressor on one stereo frame (in place), level 3.
 static __inline void
 T2DspComp(T2DSP_STATE *S, long long *L, long long *R)
@@ -278,15 +302,8 @@ T2DspComp(T2DSP_STATE *S, long long *L, long long *R)
     if (S->CompCount == 0) {
         S->CompCount = T2DSP_COMP_BLOCK;
         for (k = 0; k < 4; k++) {
-            // Level above threshold in log2 (Q16); full scale = 2^27.
-            long long over = T2DspLog2Q16(S->CompEnv[k]) - (27ll << 16) - g_T2DspCompBand[k][0];
-            long long target = T2DSP_GAIN_ONE;
-
-            if (over > 0) {
-                target = T2DspExp2Q30(-T2DspSar(over * g_T2DspCompBand[k][1], 16));
-            }
-            target = T2DspSar(target * g_T2DspCompBand[k][2], T2DSP_Q);   // makeup
-            S->CompStep[k] = (target - S->CompGain[k]) / (long long)T2DSP_COMP_BLOCK;
+            S->CompStep[k] = (T2DspCompTarget(g_T2DspCompBand[k], S->CompEnv[k]) - S->CompGain[k]) /
+                             (long long)T2DSP_COMP_BLOCK;
         }
     }
     S->CompCount--;
@@ -301,6 +318,44 @@ T2DspComp(T2DSP_STATE *S, long long *L, long long *R)
     }
     for (k = 0; k < 4; k++) {
         S->CompGain[k] += S->CompStep[k];
+    }
+}
+
+// Woofer buzz compressor on both sides' woofer signals (in place), level 4:
+// the 110-145 Hz band is split out (LR4, all-pass compensated) and
+// compressed; the rest passes unchanged.
+static __inline void
+T2DspBuzz(T2DSP_STATE *S, long long *W)
+{
+    long long band[2], rest[2];
+    unsigned int side;
+
+    for (side = 0; side < 2; side++) {
+        T2DSP_BQ_STATE *x = S->BuzzXo[side];
+        long long lo = T2DspBiquad(g_T2DspBuzzXover[0], &x[1], T2DspBiquad(g_T2DspBuzzXover[0], &x[0], W[side]));
+        long long hi = T2DspBiquad(g_T2DspBuzzXover[1], &x[3], T2DspBiquad(g_T2DspBuzzXover[1], &x[2], W[side]));
+        long long a;
+        long long coef;
+
+        hi = T2DspBiquad(g_T2DspBuzzXover[2], &x[4], hi);
+        band[side] = T2DspBiquad(g_T2DspBuzzXover[4], &x[8], T2DspBiquad(g_T2DspBuzzXover[4], &x[7], lo));
+        rest[side] = hi + T2DspBiquad(g_T2DspBuzzXover[3], &x[6], T2DspBiquad(g_T2DspBuzzXover[3], &x[5], lo));
+
+        a = band[side] < 0 ? -band[side] : band[side];
+        coef = (a > S->BuzzEnv[side]) ? g_T2DspBuzzBand[3] : g_T2DspBuzzBand[4];
+        S->BuzzEnv[side] += T2DspSar((a - S->BuzzEnv[side]) * coef, 30);
+    }
+    if (S->BuzzCount == 0) {
+        S->BuzzCount = T2DSP_COMP_BLOCK;
+        for (side = 0; side < 2; side++) {
+            S->BuzzStep[side] = (T2DspCompTarget(g_T2DspBuzzBand, S->BuzzEnv[side]) - S->BuzzGain[side]) /
+                                (long long)T2DSP_COMP_BLOCK;
+        }
+    }
+    S->BuzzCount--;
+    for (side = 0; side < 2; side++) {
+        W[side] = T2DspSat(rest[side] + T2DspSar(band[side] * S->BuzzGain[side], 30));
+        S->BuzzGain[side] += S->BuzzStep[side];
     }
 }
 
@@ -359,7 +414,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 
 // Render Frames stereo frames (MSB-aligned 32-bit host samples, L then R)
 // into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR,
-// T2DSP_LEVEL_VIRTBASS or T2DSP_LEVEL_COMP (virtual bass + compressor). AttenuationShift is the same safety cut as the
+// T2DSP_LEVEL_VIRTBASS, T2DSP_LEVEL_COMP (virtual bass + compressor) or
+// T2DSP_LEVEL_BUZZ (all of it + the woofer buzz compressor). AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
 // S24_LE).
 static __inline void
@@ -405,6 +461,11 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
 
             w[side] = T2DspCascade(g_T2DspWoofer, S->Woofer[side], T2DSP_WOOFER_STAGES, x);
             t[side] = T2DspCascade(g_T2DspTweeter, S->Tweeter[side], T2DSP_TWEETER_STAGES, x);
+        }
+        if (Level >= T2DSP_LEVEL_BUZZ) {
+            T2DspBuzz(S, w);
+        }
+        for (side = 0; side < 2; side++) {
             // Back to full scale (2^31) for the limiter and the ring.
             w[side] *= (1ll << T2DSP_INTERNAL_SHIFT);
             t[side] *= (1ll << T2DSP_INTERNAL_SHIFT);

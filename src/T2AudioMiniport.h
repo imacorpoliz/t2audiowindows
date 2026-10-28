@@ -138,7 +138,8 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // stereo path through T2AudioDsp.h (KAIT2EN 16_1 linear chain: sub-bass
     // high-pass, crosstalk cancellation, EQ, per-driver crossover, limiter)
     // instead of woofers full-range + tweeters high-passed; 2 adds the
-    // virtual bass in front; 3 also the multiband compressor. Values above
+    // virtual bass in front; 3 also the multiband compressor; 4 also the
+    // woofer buzz compressor (110-145 Hz). Values above
     // T2DSP_LEVEL_MAX act as the maximum. Not hardware-tested.
     ULONG SpeakerDsp;
     BOOLEAN RawSpeakerChannels;
