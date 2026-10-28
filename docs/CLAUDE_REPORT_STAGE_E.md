@@ -1,4 +1,4 @@
-# T2AudioPort: Stage E Hardware Milestone & Engineering Report for Claude
+﻿# T2AudioPort: Stage E Hardware Milestone & Engineering Report for Claude
 
 > **Date:** October 28, 2026  
 > **Target Machine:** MacBookPro16,1 (T2 Chip, PCI `VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01`)  
@@ -132,3 +132,40 @@ This report matches our architectural expectations and the theoretical models de
 * **Симптом C (тихо):** `OutputAttenuation` по умолчанию теперь 1 (−6 дБ). Лимиты тона подняты: точка ≤ 0.25, амплитуда ≤ 0.3. Аппаратное усиление (R7) пока гипотеза: сначала нужно сравнить уровень с AppleAudio на одинаковой громкости Windows.
 * **Режим прослушивания:** `T2Audio-TestAgent.ps1 … -Listen -OwnerApprovedAudible`. Драйвер работает, пока не нажат Enter.
 * Порядок следующей сессии — блок «▶ СЛЕДУЮЩИЙ ЗАПУСК» в `GEMINI.md` и `GEMINI_PROMPT.md`.
+
+---
+
+## 6. Listening Session #1 (Build 1.0.9.0) — Breakthroughs & The Missing Woofers Mystery
+
+> **Date:** October 28, 2026 (Build 1.0.9.0, SYS SHA256: B7651B983903D3E6C1B67F2BF3AD03FE8246A978ADD4BEC5E548E649FFCCF296)  
+> **Log:** docs/logs/EXCERPT_20261028_151122.md
+
+### 6.1 Confirmed Fixes on Hardware:
+1. **Start-of-stream gap successfully eliminated:**
+   - In 1.0.8.0, every stream experienced two re-aims: e-aimed lead by -17xx followed by +6xx ~333 ms later (causing a 13 ms silent gap).
+   - In 1.0.9.0, T2AudioClockUnwrapHostTime fixed hostTime wrapping: all three observed streams in Session #1 logged **EXACTLY ONE re-aim** (-1049, -1080, -1080), and ZERO subsequent re-aims! The initial gap is completely gone.
+2. **DPC Latency Counters:**
+   - maxCopyGapUs = 2635 (~2.6 ms).
+   - gaps>10ms = 0, gaps>lead = 0, skips = 0.
+   - The DPC mirror engine is copying smoothly without falling behind the T2 read head.
+
+### 6.2 Crucial Acoustic Discovery from Machine Owner:
+The owner listened to live playback and ran a low-frequency tone generator:
+> **"звук пока очень плоский будто нч нет вовсе, скажи клоду чтобы подумал и посмотрел работает ли вообще вуфер, был один щелчок когда я запускал tone generator на нч, но при этом явно громче стандартного драйвера"**
+> *(“Sound is very flat, as if low frequencies (bass) don't exist at all. Tell Claude to think and check if the woofer is working at all. There was a single click when I launched tone generator on bass, but noticeably louder than standard driver.”)*
+
+### 6.3 Urgent Architectural Question for Claude: Are the Woofers Active?
+Three critical hypotheses to analyze:
+1. **Hypothesis A: Channel Mapping is Not What We Assumed (Tweeters vs Woofers Swapped):**
+   - The channel layout {0: Woofer A, 1: Woofer B, 2: Tweeter, 3: Woofer A, 4: Woofer B, 5: Tweeter} came solely from kaiT2en Linux DSP configuration (dsp/profiles/16_1/graph.json), marked as **"вероятно" (probable)** in docs/analysis/RE_speaker_layout_and_clock.md and **never verified on hardware**.
+   - If Channels 2 & 5 are actually the Woofers, our driver is feeding them 	weeter[side], which has a **4th-order Butterworth 3 kHz high-pass filter**! At 100 Hz, that filter applies **-120 dB attenuation**, effectively silencing the woofers completely!
+   - Meanwhile, Channels 0, 1, 3, 4 would be the Tweeters receiving full-range sound. A tiny tweeter driven at 50-100 Hz cannot reproduce bass, sounds loud and tinny, and produces a single mechanical **click** at excursion limit — exactly what the owner observed!
+2. **Hypothesis B: Woofer Smart-Amp Power/Mute via BCE Command 28 (controls):**
+   - MacBookPro16,1 uses separate smart amplifier chips for the force-cancelling woofers.
+   - If BridgeOS powers down or mutes the woofer amplifier ICs until an explicit un-mute / volume command (msg 28) is dispatched over BCE, the woofers remain in hardware standby while the tweeters (on standard amp) play audio.
+3. **Hypothesis C: Force-Cancelling Woofer Phase Cancellation:**
+   - On MacBookPro16,1, dual woofers sit back-to-back. If pair A and pair B require opposite electrical polarities to move in phase acoustically, feeding identical out[0] to both 0 and 1 would cancel out acoustic pressure in the chassis.
+
+### 6.4 Recommended Next Action:
+Run **Step §6.2 Per-Channel Diagnostic** (	ools/T2Audio-TestAgent.ps1 -RawChannels -ToneChannel  -ToneFrequency 1000 -AudibleVolume 0.03 -OwnerApprovedAudible) for each channel  \dots 5$.
+This will isolate each of the 6 physical amplifier outputs with a safe 1 kHz tone and prove beyond doubt which physical transducer is wired to which ring channel!
