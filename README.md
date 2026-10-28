@@ -11,6 +11,7 @@
 > * **Safety Mode:** The driver runs only inside an explicit, volatile `TestSession` to protect system stability.
 
 📘 **Detailed Driver Guide (Russian): [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md)** — hardware register maps, BCE protocol, DSP, and debugging.  
+🤖 **Builder prompt (Gemini): [`GEMINI_PROMPT.md`](GEMINI_PROMPT.md)** — paste-ready task for the next hardware session.  
 📋 **Authoritative Status & Progress Log: [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md)** — chronological hardware test logs and verified findings.
 
 ---
