@@ -78,6 +78,7 @@
     <ClCompile Include="Phase4.c" />
     <ClCompile Include="BceTransport.c" />
     <ClCompile Include="Power.c" />
+    <ClCompile Include="MicCapture.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="T2AudioMiniport.h" />

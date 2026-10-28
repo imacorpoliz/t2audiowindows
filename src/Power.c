@@ -59,6 +59,11 @@ T2AudioPowerQuiesce(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_z_ PCSTR Why)
 {
     NTSTATUS status;
 
+    // Microphones (Parameters\MicInput): stop the T2 writing the host ring.
+    if (InterlockedExchange(&Context->MicIoActive, 0) != 0) {
+        status = T2AudioStopIoDevice(Context, Context->MicDeviceId);
+        KdPrint(("T2Audio: power %s: mic STOP_IO status=0x%08X\n", Why, status));
+    }
     // Headphones (Parameters\HeadphoneOutput): the same for their device.
     if (InterlockedExchange(&Context->HeadphoneIoActive, 0) != 0) {
         status = T2AudioStopIoDevice(Context, Context->HeadphoneDeviceId);
@@ -71,9 +76,11 @@ T2AudioPowerQuiesce(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_z_ PCSTR Why)
     KdPrint(("T2Audio: power %s: STOP_IO status=0x%08X\n", Why, status));
 }
 
-// Parameters\ResumeAfterSleep: back in D0, restart the I/O of streams that
-// are still in RUN (T2AudioStreamResumeAfterPower). Waits 500 ms first so
-// AppleUSBVHCI has re-established remote access, then tries up to 3 times.
+// Back in D0 (PASSIVE work item): with Parameters\MicInput re-announce the
+// microphone ring (msg 18, as AppleAudio does after every wake); with
+// Parameters\ResumeAfterSleep restart the I/O of streams that are still in
+// RUN. Waits 500 ms first so AppleUSBVHCI has re-established remote access,
+// then tries the restart up to 3 times.
 static IO_WORKITEM_ROUTINE T2AudioResumeWorkRoutine;
 
 static VOID
@@ -95,14 +102,27 @@ T2AudioResumeWorkRoutine(
 
         KeDelayExecutionThread(KernelMode, FALSE, &delay);
         KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
-        if (!context->PoweredDown) {
+        // Microphones: announce the host ring again after every wake, as
+        // AppleAudio does (once, before any stream restarts).
+        if (attempt == 0 && !context->PoweredDown && context->MicRegistered) {
+            NTSTATUS micStatus = T2AudioMicReRegister(context);
+
+            KdPrint(("T2Audio: D0: mic ranges re-sent: 0x%08X\n", micStatus));
+        }
+        if (!context->PoweredDown && context->ResumeAfterSleep) {
+            if (context->MicRunningStream != NULL) {
+                T2AudioMicStreamResumeAfterPower(context->MicRunningStream);
+            }
+        }
+        if (!context->PoweredDown && context->ResumeAfterSleep) {
             for (i = 0; i < 2; i++) {
                 if (context->RunningStream[i] != NULL) {
                     T2AudioStreamResumeAfterPower(context->RunningStream[i]);
                 }
             }
             pending = (context->RunningStream[0] != NULL && context->HardwareIoActive == 0) ||
-                      (context->RunningStream[1] != NULL && context->HeadphoneIoActive == 0);
+                      (context->RunningStream[1] != NULL && context->HeadphoneIoActive == 0) ||
+                      (context->MicRunningStream != NULL && context->MicIoActive == 0);
         }
         KeReleaseMutex(&context->StreamMutex, FALSE);
         if (!pending) {
@@ -139,8 +159,11 @@ T2AudioPowerChangeState(
         // Like AppleAudio, START_IO is not re-sent here: it comes from the
         // next SetState(RUN). With ResumeAfterSleep a work item restarts the
         // I/O of a stream that stayed in RUN through the sleep.
-        if (context->ResumeAfterSleep && context->DeviceObject != NULL &&
-            (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL) &&
+        if (context->DeviceObject != NULL &&
+            (context->MicRegistered ||
+             (context->ResumeAfterSleep &&
+              (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL ||
+               context->MicRunningStream != NULL))) &&
             InterlockedCompareExchange(&context->ResumeWorkPending, 1, 0) == 0) {
             PIO_WORKITEM workItem = IoAllocateWorkItem(context->DeviceObject);
 

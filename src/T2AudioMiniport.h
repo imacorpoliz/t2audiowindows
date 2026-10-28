@@ -147,6 +147,33 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 HpClockAnchorQpc;
     ULONG64 HpClockAnchorNs;
     PVOID HeadphonePortEvents;
+    // Built-in microphones (Parameters\MicInput=1, default 0; ROADMAP 5.2-5.4,
+    // MicCapture.c). The driver allocates a contiguous host ring
+    // (T2AUDIO_MIC_RING_BYTES), writes its physical address into BufferStruct
+    // input_streams[0] of "Digital Mic" and sends SET_INPUT_STREAM_ADDRESS_
+    // RANGES (msg 18), as kaiT2en and AppleAudio do; a capture WaveRT +
+    // topology pair exposes a mono microphone array. MicDsp (default 1) runs
+    // kaiT2en's 16_1 mic chain (T2AudioMicLogic.h); 0 passes mic 0 raw.
+    // The ring is freed only after STOP_IO and after the BufferStruct entry
+    // was cleared (MicUnregister in the PnP stop path).
+    ULONG MicInput;
+    ULONG MicDsp;
+    BOOLEAN MicFiltersRegistered;
+    BOOLEAN MicRegistered;
+    BOOLEAN MicFormatValid;
+    ULONG64 BceMicDeviceId;
+    ULONG64 MicDeviceId;
+    ULONG64 MicStreamId;
+    ULONG MicLatencyFrames;
+    PVOID MicBufferVa;
+    PHYSICAL_ADDRESS MicBufferPa;
+    ULONG MicBufferSize;
+    volatile LONG MicIoActive;
+    ULONG MicClockGeneration;
+    ULONG64 MicClockAnchorFrames;
+    ULONG64 MicClockAnchorQpc;
+    ULONG64 MicClockAnchorNs;
+    PVOID MicRunningStream;
     // Resume after sleep (Parameters\ResumeAfterSleep=1, default 0; ROADMAP
     // 2.1): streams register here while in RUN; on D0 a PASSIVE work item
     // restarts the I/O of a stream the power-down had stopped. StreamMutex
@@ -375,6 +402,22 @@ NTSTATUS T2AudioStopIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 
 VOID T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioReleaseHeadphoneEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioStreamResumeAfterPower(_In_ PVOID Stream);
+
+// Microphones (MicCapture.c).
+#define T2AUDIO_MIC_WAVE_PIN_CAPTURE  0u
+#define T2AUDIO_MIC_WAVE_PIN_BRIDGE   1u
+#define T2AUDIO_MIC_TOPO_PIN_MIC      0u
+#define T2AUDIO_MIC_TOPO_PIN_BRIDGE   1u
+BOOLEAN T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
+NTSTATUS T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+NTSTATUS T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+NTSTATUS T2AudioRegisterMicFilters(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PRESOURCELIST ResourceList,
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioMicStreamResumeAfterPower(_In_ PVOID Stream);
 NTSTATUS T2AudioRegisterPowerManagement(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PT2AUDIO_DEVICE_CONTEXT Context);

@@ -52,6 +52,9 @@ T2AudioPnpHandler(
             // is closed with the resources.
             T2AudioStopJackPoll(context);
             T2AudioReleaseHeadphoneEvents(context);
+            // The T2 must stop writing the mic ring before it is freed; this
+            // needs the BCE transport, which UnmapResources closes.
+            T2AudioMicUnregister(context);
             T2AudioUnmapResources(context);
             // Persistent mode: clean end of the session.
             T2AudioCrashGuardSetArmed(context, FALSE);
@@ -553,9 +556,13 @@ T2AudioStartDeviceInner(
     context->HeadphoneAttenuation = T2AudioClampAttenuation(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
     context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
-    KdPrint(("T2Audio: headphone/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) ResumeAfterSleep=%u\n",
+    // Built-in microphones (ROADMAP 5): off by default; MicDsp 1 = kaiT2en chain.
+    context->MicInput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
+    context->MicDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1) ? 1u : 0u;
+    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicDsp=%u ResumeAfterSleep=%u\n",
              context->HeadphoneOutput, context->HeadphoneAttenuation,
-             context->HeadphoneAttenuation * 6u, context->ResumeAfterSleep));
+             context->HeadphoneAttenuation * 6u, context->MicInput, context->MicDsp,
+             context->ResumeAfterSleep));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,
@@ -726,6 +733,16 @@ T2AudioStartDeviceInner(
                  NT_SUCCESS(hpStatus) ? "registered" : "NOT registered", hpStatus));
     }
 
+    // Microphone filter pair (Parameters\MicInput=1 and "Digital Mic" in
+    // BufferStruct). A failure only leaves the microphone out.
+    if (context->MicInput && context->HardwareReady && T2AudioMicPresentInBufferStruct(context)) {
+        NTSTATUS micStatus = T2AudioRegisterMicFilters(DeviceObject, Irp, ResourceList, context);
+
+        context->MicFiltersRegistered = NT_SUCCESS(micStatus) ? TRUE : FALSE;
+        KdPrint(("T2Audio: microphone endpoint %s (0x%08X)\n",
+                 NT_SUCCESS(micStatus) ? "registered" : "NOT registered", micStatus));
+    }
+
     // STOP_IO before D3 (as AppleAudio does), no MMIO while powered down.
     // Failure is not fatal: streams still stop I/O when they leave RUN.
     (VOID)T2AudioRegisterPowerManagement(DeviceObject, context);
@@ -772,6 +789,19 @@ T2AudioStartDeviceInner(
             KdPrint(("T2Audio: audio path ENABLED for headphones 0x%I64X ring 0x%Ix+0x%Ix\n",
                      context->HeadphoneDeviceId, context->HeadphoneBufferOffset,
                      context->HeadphoneBufferSize));
+        }
+        // Microphones: register the host ring with the T2 (writes BufferStruct
+        // and sends msg 18), only in the BCE I/O configuration.
+        if (context->MicFiltersRegistered && context->MicFormatValid &&
+            context->BceMicDeviceId != 0 && context->BceIoEnabled) {
+            NTSTATUS micStatus = T2AudioMicRegister(context);
+
+            if (NT_SUCCESS(micStatus)) {
+                context->MicDeviceId = context->BceMicDeviceId;
+            }
+            KdPrint(("T2Audio: audio path %s for microphones 0x%I64X (0x%08X)\n",
+                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
+                     context->BceMicDeviceId, micStatus));
         }
     } else {
         T2AudioCloseBceTransport();

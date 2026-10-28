@@ -1,6 +1,7 @@
 #include "T2AudioMiniport.h"
 #include "BceProtocolLogic.h"
 #include "T2AudioSpeakerLogic.h"
+#include "T2AudioMicLogic.h"
 
 // T2 BCE Protocol constants (from kaiT2en modules/t2bce_audio/protocol.h).
 // The 4-byte tag is not a constant: T2AudioSendBceMessage stamps a request
@@ -1006,6 +1007,58 @@ T2AudioQueryHeadphoneStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
              streams[0], Context->HeadphoneSampleShift, streamLatency, deviceLatency));
 }
 
+// Parameters\MicInput: input stream of "Digital Mic" (hardware 2026-10-28:
+// stream 0x22, 3 ch, 24-bit low-aligned in 32-bit slots). The capture path
+// stays off unless the format is exactly that (T2AudioMicLogic.h).
+static VOID
+T2AudioQueryMicStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG64 streams[4];
+    ULONG streamCount = 0;
+    UCHAR formatData[T2AUDIO_BCE_PHYS_FORMAT_SIZE];
+    ULONG formatLength = 0;
+    T2AUDIO_BCE_PHYS_FORMAT format;
+    ULONG64 deviceId = Context->BceMicDeviceId;
+    ULONG deviceLatency = 0;
+    ULONG streamLatency = 0;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    Context->MicStreamId = 0;
+    Context->MicFormatValid = FALSE;
+    Context->MicLatencyFrames = 0;
+    status = T2AudioGetStreamList(deviceId, TRUE, streams, ARRAYSIZE(streams), &streamCount);
+    if (!NT_SUCCESS(status) || streamCount == 0) {
+        KdPrint(("T2Audio: mic 0x%I64X: no input stream (0x%08X, n=%u)\n", deviceId, status, streamCount));
+        return;
+    }
+    Context->MicStreamId = streams[0];
+    status = T2AudioGetProperty(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_PHYS_FORMAT, formatData,
+                                sizeof(formatData), &formatLength);
+    if (!NT_SUCCESS(status) ||
+        !T2AudioBceParsePhysicalFormat(formatData, formatLength, &format)) {
+        KdPrint(("T2Audio: mic stream 0x%I64X: 'pft ' unavailable (0x%08X)\n", streams[0], status));
+        return;
+    }
+    // 3 x S24 low-aligned in 32-bit slots is a sample shift of 8.
+    if (T2AudioBceDeviceSampleShift(&format, T2AUDIO_MIC_CHANNELS, 48000) != 8) {
+        KdPrint(("T2Audio: mic stream format unsupported (ch=%u bits=%u bpf=%u flags=0x%X); mic disabled\n",
+                 format.ChannelsPerFrame, format.BitsPerChannel, format.BytesPerFrame,
+                 format.FormatFlags));
+        return;
+    }
+    (VOID)T2AudioGetU32Property(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_LATENCY, &streamLatency);
+    (VOID)T2AudioGetU32Property(deviceId, deviceId, T2AUDIO_PROP_SCOPE_INPUT,
+                                T2AUDIO_PROP_LATENCY, &deviceLatency);
+    Context->MicLatencyFrames = streamLatency + deviceLatency;
+    Context->MicFormatValid = TRUE;
+    KdPrint(("T2Audio: mic stream 0x%I64X: 3 ch S24, latency=%u+%u frames\n",
+             streams[0], streamLatency, deviceLatency));
+}
+
 NTSTATUS
 T2AudioGetDeviceList(
     _Out_writes_(MaxDevices) ULONG64 *DeviceList,
@@ -1238,6 +1291,24 @@ T2AudioHandleVhciMessage(
             Context->ClockAnchorNs = T2AudioClockAnchorNs(hostNs, receptionNs);
             Context->ClockGeneration++;
             KeReleaseSpinLock(&Context->ClockLock, oldIrql);
+        } else if (deviceId == Context->MicDeviceId && deviceId != 0) {
+            // Microphone (Parameters\MicInput): the T2 write position.
+            LARGE_INTEGER qpc, qpcFreq;
+            ULONG64 receptionNs;
+            ULONG64 hostNs;
+            KIRQL oldIrql;
+
+            qpc = KeQueryPerformanceCounter(&qpcFreq);
+            receptionNs = T2AudioQpcToNs((ULONG64)qpc.QuadPart, (ULONG64)qpcFreq.QuadPart);
+            hostNs = T2AudioClockUnwrapHostTime(timestamp, receptionNs,
+                                                (ULONG64)qpcFreq.QuadPart);
+            KeAcquireSpinLock(&Context->ClockLock, &oldIrql);
+            Context->MicClockAnchorFrames = T2AudioClockFramesAtReception(frames, hostNs,
+                                                                          receptionNs, 48000);
+            Context->MicClockAnchorQpc = (ULONG64)qpc.QuadPart;
+            Context->MicClockAnchorNs = T2AudioClockAnchorNs(hostNs, receptionNs);
+            Context->MicClockGeneration++;
+            KeReleaseSpinLock(&Context->ClockLock, oldIrql);
         } else if (deviceId == Context->HeadphoneDeviceId && deviceId != 0) {
             // Same anchor for the headphone device (Parameters\HeadphoneOutput).
             LARGE_INTEGER qpc, qpcFreq;
@@ -1358,6 +1429,10 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
             T2AudioBceUidIsSpeaker(uid, uidLength)) {
             Context->BceSpeakerDeviceId = deviceList[i];
         }
+        if (Context->BceMicDeviceId == 0 &&
+            T2AudioBceUidEquals(uid, uidLength, "Digital Mic")) {
+            Context->BceMicDeviceId = deviceList[i];
+        }
         // Headphone jack, read-only first step (KAIT2EN reads the same
         // property: 'outp'/'jack' on device "Codec Output", u32 plugged).
         if (Context->BceHeadphoneDeviceId == 0 &&
@@ -1383,6 +1458,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
     if (Context->HeadphoneOutput && Context->BceHeadphoneDeviceId != 0) {
         T2AudioQueryHeadphoneStream(Context);
+    }
+    if (Context->MicInput && Context->BceMicDeviceId != 0) {
+        T2AudioQueryMicStream(Context);
     }
     if (Context->JackEvents && Context->BceHeadphoneDeviceId != 0) {
         (VOID)T2AudioRegisterJackListener(Context);
