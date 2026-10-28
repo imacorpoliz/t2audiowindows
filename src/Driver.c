@@ -51,7 +51,9 @@ T2AudioPnpHandler(
             T2AudioUnmapResources(context);
             // Persistent mode: clean end of the session.
             T2AudioCrashGuardSetArmed(context, FALSE);
-            if (stack->MinorFunction != IRP_MN_STOP_DEVICE && context->ShutdownRegistered) {
+            // Unregister on stop too: the next start zeroes the context and
+            // registers again.
+            if (context->ShutdownRegistered) {
                 IoUnregisterShutdownNotification(DeviceObject);
                 context->ShutdownRegistered = FALSE;
             }
