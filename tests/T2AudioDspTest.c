@@ -34,6 +34,13 @@ static double ring_value(unsigned int word)
 // ---- double-precision reference of the same chain ---------------------
 typedef struct { double x1, x2, y1, y2; } RBQ;
 typedef struct {
+    RBQ xo[2][14];
+    double env[4], g[4], step[4];
+    unsigned int count;
+} RCOMP;
+
+typedef struct {
+    RCOMP comp;
     RBQ vb[2][4];
     RBQ t1[2][T2DSP_TONE1_STAGES], t2[2][T2DSP_TONE2_STAGES];
     RBQ w[2][T2DSP_WOOFER_STAGES], tw[2][T2DSP_TWEETER_STAGES];
@@ -53,6 +60,57 @@ static double rcas(const double (*c)[5], RBQ *s, unsigned int n, double x)
     unsigned int i;
     for (i = 0; i < n; i++) x = rbq(c[i], &s[i], x);
     return x;
+}
+
+static void rcomp_reset(RCOMP *c)
+{
+    int k;
+    memset(c, 0, sizeof(*c));
+    for (k = 0; k < 4; k++) c->g[k] = 1.0;
+}
+
+// Double model of T2DspComp (same structure, exact math).
+static void rcomp(RCOMP *c, double *L, double *R)
+{
+    double band[2][4], *io[2] = { L, R };
+    int s, k;
+
+    for (s = 0; s < 2; s++) {
+        RBQ *x = c->xo[s];
+        double in = *io[s] * g_T2DspRefCompInputGain;
+        double lo = rbq(g_T2DspRefCompXover[0], &x[1], rbq(g_T2DspRefCompXover[0], &x[0], in));
+        double hi = rbq(g_T2DspRefCompXover[1], &x[3], rbq(g_T2DspRefCompXover[1], &x[2], in));
+        lo = rbq(g_T2DspRefCompXover[2], &x[4], lo);
+        hi = rbq(g_T2DspRefCompXover[3], &x[5], hi);
+        band[s][0] = rbq(g_T2DspRefCompXover[4], &x[7], rbq(g_T2DspRefCompXover[4], &x[6], lo));
+        band[s][1] = rbq(g_T2DspRefCompXover[5], &x[9], rbq(g_T2DspRefCompXover[5], &x[8], lo));
+        band[s][2] = rbq(g_T2DspRefCompXover[6], &x[11], rbq(g_T2DspRefCompXover[6], &x[10], hi));
+        band[s][3] = rbq(g_T2DspRefCompXover[7], &x[13], rbq(g_T2DspRefCompXover[7], &x[12], hi));
+    }
+    for (k = 0; k < 4; k++) {
+        double p = fmax(fabs(band[0][k]), fabs(band[1][k]));
+        double coef = p > c->env[k] ? g_T2DspRefCompBand[k][3] : g_T2DspRefCompBand[k][4];
+        c->env[k] += (p - c->env[k]) * coef;
+    }
+    if (c->count == 0) {
+        c->count = T2DSP_COMP_BLOCK;
+        for (k = 0; k < 4; k++) {
+            double t = 1.0;
+            if (c->env[k] > g_T2DspRefCompBand[k][0]) {
+                double over = log2(c->env[k] / g_T2DspRefCompBand[k][0]);
+                t = pow(2.0, -over * (1.0 - 1.0 / g_T2DspRefCompBand[k][1]));
+            }
+            t *= g_T2DspRefCompBand[k][2];
+            c->step[k] = (t - c->g[k]) / T2DSP_COMP_BLOCK;
+        }
+    }
+    c->count--;
+    for (s = 0; s < 2; s++) {
+        double y = 0;
+        for (k = 0; k < 4; k++) y += band[s][k] * c->g[k];
+        *io[s] = y;
+    }
+    for (k = 0; k < 4; k++) c->g[k] += c->step[k];
 }
 
 // out[6]: ring channels, full scale 1.0 (no limiter, no attenuation).
@@ -85,8 +143,10 @@ static void ref_frame(REF *r, double l, double rr, double *out)
     }
     in[0] = md + acc;
     in[1] = md - acc;
+    for (s = 0; s < 2; s++) in[s] = rcas(g_T2DspRefTone2, r->t2[s], T2DSP_TONE2_STAGES, in[s]);
+    if (g_level >= T2DSP_LEVEL_COMP) rcomp(&r->comp, &in[0], &in[1]);
     for (s = 0; s < 2; s++) {
-        double x = rcas(g_T2DspRefTone2, r->t2[s], T2DSP_TONE2_STAGES, in[s]);
+        double x = in[s];
         double w = rcas(g_T2DspRefWoofer, r->w[s], T2DSP_WOOFER_STAGES, x);
         double t = rcas(g_T2DspRefTweeter, r->tw[s], T2DSP_TWEETER_STAGES, x);
         out[s * 3 + 0] = w;
@@ -115,6 +175,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
 
     T2DspReset(&st);
     memset(&ref, 0, sizeof(ref));
+    rcomp_reset(&ref.comp);
     for (n = 0; n < total; n++) {
         double ph = 2.0 * 3.14159265358979323846 * hz * n / 48000.0;
         double l = amp * sin(ph), r = amp * sin(ph + rphase);
@@ -241,7 +302,13 @@ static void test_headroom_and_limiter(void)
     }
     printf("  full-scale 100 Hz: output peak %.4f, limited frames %lu\n", peak, st.LimitedFrames);
     check("output never exceeds the -1 dBFS threshold (+2 LSB)", peak <= 0.8912509 + 2.0 / 8388608.0);
-    check("limiter engaged on the full-scale 100 Hz sine", st.LimitedFrames > 0);
+    if (g_level >= T2DSP_LEVEL_COMP) {
+        // The compressor (band 0: -24 dB, ratio 4) already holds the bass
+        // well below the limiter threshold.
+        check("compressor keeps a full-scale 100 Hz below -6 dBFS", peak < 0.5);
+    } else {
+        check("limiter engaged on the full-scale 100 Hz sine", st.LimitedFrames > 0);
+    }
 
     // Full-scale square at 80 Hz: no overflow anywhere.
     T2DspReset(&st);
@@ -315,6 +382,7 @@ static double tone_band_energy(double hz, double amp, double lo, double hi, int 
 
     T2DspReset(&st);
     memset(&ref, 0, sizeof(ref));
+    rcomp_reset(&ref.comp);
     // Goertzel-free: correlate with sines on a grid of 10 Hz bins.
     {
         static double y[48000];
@@ -361,6 +429,76 @@ static void test_virtual_bass(void)
     g_level = T2DSP_LEVEL_LINEAR;
 }
 
+// Compressor alone: static curve at 730 Hz (band 1: threshold -12.85 dB,
+// ratio 1.7, makeup +0.08 dB, input gain +2 dB), fixed vs double model.
+static double comp_level(double amp, double hz, int fixed)
+{
+    static T2DSP_STATE st;
+    RCOMP rc;
+    double pk = 0;
+    int n;
+
+    T2DspReset(&st);
+    rcomp_reset(&rc);
+    for (n = 0; n < 48000; n++) {
+        double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0);
+        double y;
+        if (fixed) {
+            long long l = (long long)floor(s * 134217728.0 + 0.5), r = l;   // 2^27 scale
+            T2DspComp(&st, &l, &r);
+            y = (double)l / 134217728.0;
+        } else {
+            double l = s, r = s;
+            rcomp(&rc, &l, &r);
+            y = l;
+        }
+        if (n >= 38400 && fabs(y) > pk) pk = fabs(y);
+    }
+    return 20.0 * log10(pk / amp);
+}
+
+static void test_log_exp(void)
+{
+    long long e, v;
+    double worstExp = 0, worstLog = 0;
+
+    printf("log2 / exp2 tables\n");
+    for (e = -30ll * 65536; e <= 0; e += 37) {
+        double exact = pow(2.0, (double)e / 65536.0) * 1073741824.0;
+        double got = (double)T2DspExp2Q30(e);
+        double rel = fabs(got - exact) / exact;
+        if (exact > 1e5 && rel > worstExp) worstExp = rel;
+    }
+    for (v = 1000; v < (1ll << 39); v += v / 997 + 1) {
+        double err = fabs((double)T2DspLog2Q16(v) / 65536.0 - log2((double)v));
+        if (err > worstLog) worstLog = err;
+    }
+    printf("  exp2 max rel error %.2e, log2 max abs error %.2e\n", worstExp, worstLog);
+    check("exp2 relative error < 2e-5 over 2^-30..2^0", worstExp < 2e-5);
+    check("log2 absolute error < 1e-4 over 1e3..2^39", worstLog < 1e-4);
+}
+
+static void test_compressor(void)
+{
+    double lv[] = { -40, -30, -20, -15, -10, -6, -3, 0 };
+    unsigned int i;
+    int ok = 1;
+    double gLow, gHigh;
+
+    printf("Multiband compressor (SpeakerDsp=3), 730 Hz gain vs input level\n");
+    for (i = 0; i < sizeof(lv) / sizeof(lv[0]); i++) {
+        double amp = pow(10.0, lv[i] / 20.0);
+        double f = comp_level(amp, 730, 1), r = comp_level(amp, 730, 0);
+        printf("  in %5.1f dBFS: gain fixed %6.2f dB, model %6.2f dB\n", lv[i], f, r);
+        if (fabs(f - r) > 0.1) ok = 0;
+    }
+    check("fixed point matches the double model (0.1 dB)", ok);
+    gLow = comp_level(pow(10.0, -40 / 20.0), 730, 1);
+    gHigh = comp_level(1.0, 730, 1);
+    check("below threshold: input gain + makeup only (about +2 dB)", gLow > 1.5 && gLow < 2.6);
+    check("at 0 dBFS the band is compressed by > 4 dB vs quiet", gLow - gHigh > 4.0);
+}
+
 int main(void)
 {
     test_match_reference();
@@ -368,6 +506,14 @@ int main(void)
     test_stability();
     test_headroom_and_limiter();
     test_virtual_bass();
+    test_log_exp();
+    test_compressor();
+    g_level = T2DSP_LEVEL_COMP;
+    printf("--- level 3 (virtual bass + compressor) ---\n");
+    test_match_reference();
+    test_stability();
+    test_headroom_and_limiter();
+    test_cost();
     g_level = T2DSP_LEVEL_VIRTBASS;
     printf("--- level 2 (virtual bass) ---\n");
     test_match_reference();

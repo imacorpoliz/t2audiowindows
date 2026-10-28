@@ -15,13 +15,15 @@
 //        ──► XTC: mid = (L+R)/2 delayed, side = (L-R)/2 through the FIR,
 //                 L = mid + side, R = mid - side   (crosstalk cancellation)
 //        ──► Tone2 (midrange EQ)
+//        ──► [level 3] multiband compressor (4 bands, LR4 crossover)
 //        ──► per side: woofer chain (crossover + EQ) -> ring 0/1 (L), 3/4 (R)
 //                      tweeter chain (crossover + EQ) -> ring 2 (L), 5 (R)
 //        ──► limiter (linked: left woofers, right woofers, both tweeters)
 //
-// Not reproduced (nonlinear in the graph): autogain, multiband compressor,
-// woofer "Buzz" compressor; KAIT2EN's limiters are replaced by the simple
-// peak limiter below.
+// Not reproduced (nonlinear in the graph): autogain, woofer "Buzz"
+// compressor; KAIT2EN's limiters are replaced by the simple peak limiter
+// below. The multiband compressor is an approximation of lsp's (hard knee,
+// peak envelope linked over L/R, gain updated every 16 frames and ramped).
 //
 // Number format: samples are 64-bit integers scaled so that full scale is
 // 2^27 inside the chain: 24 dB of headroom, because the cascades reach
@@ -50,7 +52,9 @@
 #define T2DSP_LEVEL_OFF        0u
 #define T2DSP_LEVEL_LINEAR     1u
 #define T2DSP_LEVEL_VIRTBASS   2u
-#define T2DSP_LEVEL_MAX        2u
+#define T2DSP_LEVEL_COMP       3u
+#define T2DSP_LEVEL_MAX        3u
+#define T2DSP_COMP_BLOCK       16u    // frames per compressor gain update
 
 typedef struct _T2DSP_BQ_STATE {
     long long X1, X2, Y1, Y2;
@@ -61,6 +65,13 @@ typedef struct _T2DSP_STATE {
     T2DSP_BQ_STATE VirtBass[2][4];
     T2DSP_BQ_STATE Tone1[2][T2DSP_TONE1_STAGES];
     T2DSP_BQ_STATE Tone2[2][T2DSP_TONE2_STAGES];
+    // Compressor crossover per side: LPf2 x2, HPf2 x2, APf3, APf1, LPf1 x2,
+    // HPf1 x2, LPf3 x2, HPf3 x2.
+    T2DSP_BQ_STATE CompXo[2][14];
+    long long CompEnv[4];       // peak envelope per band (internal scale)
+    long long CompGain[4];      // current band gain incl. makeup, Q30
+    long long CompStep[4];      // per-frame gain ramp, Q30
+    unsigned int CompCount;     // frames until the next gain update
     T2DSP_BQ_STATE Woofer[2][T2DSP_WOOFER_STAGES];
     T2DSP_BQ_STATE Tweeter[2][T2DSP_TWEETER_STAGES];
     // Circular histories, newest at index Pos.
@@ -89,6 +100,9 @@ T2DspReset(T2DSP_STATE *S)
     S->Gain[0] = T2DSP_GAIN_ONE;
     S->Gain[1] = T2DSP_GAIN_ONE;
     S->Gain[2] = T2DSP_GAIN_ONE;
+    for (i = 0; i < 4; i++) {
+        S->CompGain[i] = T2DSP_GAIN_ONE;
+    }
 }
 
 static __inline long long
@@ -187,6 +201,109 @@ T2DspVirtBass(T2DSP_BQ_STATE *S, long long x)
     return T2DspSat(x + wet);
 }
 
+// log2(v) in Q16 for 0 < v < 2^40 (table + linear interpolation).
+static __inline long long
+T2DspLog2Q16(long long v)
+{
+    long long n, frac, t0, t1;
+    unsigned int msb = 0, idx;
+
+    if (v <= 0) {
+        return -(64ll << 16);
+    }
+    while (msb < 62 && (v >> (msb + 1)) != 0) {
+        msb++;
+    }
+    n = (msb <= 40) ? (v << (40 - msb)) : (v >> (msb - 40));   // [2^40, 2^41)
+    idx = (unsigned int)((n >> 32) & 255);
+    frac = (n >> 16) & 0xFFFF;
+    t0 = g_T2DspLog2[idx];
+    t1 = g_T2DspLog2[idx + 1];
+    return ((long long)msb << 16) + t0 + T2DspSar((t1 - t0) * frac, 16);
+}
+
+// 2^(e / 65536) in Q30 for e <= 0 (Q16 exponent).
+static __inline long long
+T2DspExp2Q30(long long e)
+{
+    long long ip = T2DspSar(e, 16);
+    long long frac = e - ip * 65536;          // 0..65535
+    unsigned int idx = (unsigned int)(frac >> 8);
+    long long t0 = g_T2DspExp2[idx];
+    long long t1 = g_T2DspExp2[idx + 1];
+    long long v = t0 + T2DspSar((t1 - t0) * (frac & 255), 8);
+
+    if (ip >= 0) {
+        return v;                               // e > 0 is not used
+    }
+    if (ip < -40) {
+        return 0;
+    }
+    return v >> (unsigned int)(-ip);
+}
+
+// Multiband compressor on one stereo frame (in place), level 3.
+static __inline void
+T2DspComp(T2DSP_STATE *S, long long *L, long long *R)
+{
+    long long band[2][4];
+    long long *io[2];
+    unsigned int side, k;
+
+    io[0] = L;
+    io[1] = R;
+    for (side = 0; side < 2; side++) {
+        T2DSP_BQ_STATE *x = S->CompXo[side];
+        long long in = T2DspSat(T2DspSar(*io[side] * T2DSP_COMP_INPUT_GAIN, T2DSP_Q));
+        long long lo = T2DspBiquad(g_T2DspCompXover[0], &x[1], T2DspBiquad(g_T2DspCompXover[0], &x[0], in));
+        long long hi = T2DspBiquad(g_T2DspCompXover[1], &x[3], T2DspBiquad(g_T2DspCompXover[1], &x[2], in));
+
+        lo = T2DspBiquad(g_T2DspCompXover[2], &x[4], lo);
+        hi = T2DspBiquad(g_T2DspCompXover[3], &x[5], hi);
+        band[side][0] = T2DspBiquad(g_T2DspCompXover[4], &x[7], T2DspBiquad(g_T2DspCompXover[4], &x[6], lo));
+        band[side][1] = T2DspBiquad(g_T2DspCompXover[5], &x[9], T2DspBiquad(g_T2DspCompXover[5], &x[8], lo));
+        band[side][2] = T2DspBiquad(g_T2DspCompXover[6], &x[11], T2DspBiquad(g_T2DspCompXover[6], &x[10], hi));
+        band[side][3] = T2DspBiquad(g_T2DspCompXover[7], &x[13], T2DspBiquad(g_T2DspCompXover[7], &x[12], hi));
+    }
+
+    for (k = 0; k < 4; k++) {
+        long long a = band[0][k] < 0 ? -band[0][k] : band[0][k];
+        long long b = band[1][k] < 0 ? -band[1][k] : band[1][k];
+        long long peak = a > b ? a : b;
+        long long coef = (peak > S->CompEnv[k]) ? g_T2DspCompBand[k][3] : g_T2DspCompBand[k][4];
+
+        S->CompEnv[k] += T2DspSar((peak - S->CompEnv[k]) * coef, 30);
+    }
+
+    if (S->CompCount == 0) {
+        S->CompCount = T2DSP_COMP_BLOCK;
+        for (k = 0; k < 4; k++) {
+            // Level above threshold in log2 (Q16); full scale = 2^27.
+            long long over = T2DspLog2Q16(S->CompEnv[k]) - (27ll << 16) - g_T2DspCompBand[k][0];
+            long long target = T2DSP_GAIN_ONE;
+
+            if (over > 0) {
+                target = T2DspExp2Q30(-T2DspSar(over * g_T2DspCompBand[k][1], 16));
+            }
+            target = T2DspSar(target * g_T2DspCompBand[k][2], T2DSP_Q);   // makeup
+            S->CompStep[k] = (target - S->CompGain[k]) / (long long)T2DSP_COMP_BLOCK;
+        }
+    }
+    S->CompCount--;
+
+    for (side = 0; side < 2; side++) {
+        long long y = 0;
+
+        for (k = 0; k < 4; k++) {
+            y += T2DspSar(band[side][k] * S->CompGain[k], 30);
+        }
+        *io[side] = T2DspSat(y);
+    }
+    for (k = 0; k < 4; k++) {
+        S->CompGain[k] += S->CompStep[k];
+    }
+}
+
 // XTC on one frame (in place).
 static __inline void
 T2DspXtc(T2DSP_STATE *S, long long *L, long long *R)
@@ -241,8 +358,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 }
 
 // Render Frames stereo frames (MSB-aligned 32-bit host samples, L then R)
-// into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR or
-// T2DSP_LEVEL_VIRTBASS. AttenuationShift is the same safety cut as the
+// into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR,
+// T2DSP_LEVEL_VIRTBASS or T2DSP_LEVEL_COMP (virtual bass + compressor). AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
 // S24_LE).
 static __inline void
@@ -278,7 +395,13 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
         }
         T2DspXtc(S, &in[0], &in[1]);
         for (side = 0; side < 2; side++) {
-            long long x = T2DspCascade(g_T2DspTone2, S->Tone2[side], T2DSP_TONE2_STAGES, in[side]);
+            in[side] = T2DspCascade(g_T2DspTone2, S->Tone2[side], T2DSP_TONE2_STAGES, in[side]);
+        }
+        if (Level >= T2DSP_LEVEL_COMP) {
+            T2DspComp(S, &in[0], &in[1]);
+        }
+        for (side = 0; side < 2; side++) {
+            long long x = in[side];
 
             w[side] = T2DspCascade(g_T2DspWoofer, S->Woofer[side], T2DSP_WOOFER_STAGES, x);
             t[side] = T2DspCascade(g_T2DspTweeter, S->Tweeter[side], T2DSP_TWEETER_STAGES, x);

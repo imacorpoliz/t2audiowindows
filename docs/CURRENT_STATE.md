@@ -5,6 +5,13 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (after Stage E, latest): multiband compressor, SpeakerDsp=3 (source only, not hardware-tested)
+
+- CI green on `ea6bd9c` (level 2).
+- **Added:** the graph's 4-band compressor `Comp` after Tone2 as `SpeakerDsp=3` (on top of level 2). LR4 crossover tree at 338 / 1590 / 6597 Hz with all-pass compensation (bands sum flat: deviation ~1e-12 dB in the design check), per-band downward compression with the graph's thresholds/ratios/makeups, +2 dB input gain, 5 ms attack / 50 ms release, peak envelope linked over L/R, hard knee, gains updated every 16 frames and ramped. log2/exp2 by tables (errors 2e-5 / 1e-5).
+- **Tests:** compressor alone matches a double model within 0.1 dB over −40..0 dBFS (730 Hz: +2.2 dB below threshold, −2.5 dB at 0 dBFS); full chain at level 3 vs double reference, stability, headroom; log/exp accuracy. clang caught a table overflow (`2^31` in an `int`) that gcc accepted silently; fixed and covered by the new accuracy test.
+- Cost ~70 µs per 2 ms tick on the build host at level 3.
+- Not ported: `Norm` (autogain to −12 LUFS, +6 dB max) — it would counteract the Windows volume slider; `Buzz` (woofer resonance compressor) — its band mapping in the graph is ambiguous (unsorted split frequencies).
 ### 2026-10-28: Listening Session #1 — Build 1.0.9.0 Tested (PROVEN ON HARDWARE)
 
 - **Test Report:** [docs/logs/EXCERPT_20261028_151122.md](logs/EXCERPT_20261028_151122.md) & [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md) §6.
