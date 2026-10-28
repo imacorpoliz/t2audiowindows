@@ -357,13 +357,16 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // compose, so the raw path adds it to the sample shift). Frames
             // are 4-byte aligned in both rings.
             if (instance->Channels == 2 && context->SpeakerDsp) {
-                // KAIT2EN 16_1 linear chain + limiter (T2AudioDsp.h).
+                // KAIT2EN 16_1 chain + limiter (T2AudioDsp.h); level 2 adds
+                // the virtual bass.
                 T2DspRenderStereoToSpeakers(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
                     (const unsigned int *)(sourceBase + srcOffset),
                     chunkFrames,
                     context->SpeakerSampleShift,
                     context->OutputAttenuation,
+                    (context->SpeakerDsp > T2DSP_LEVEL_MAX) ? T2DSP_LEVEL_MAX
+                                                            : context->SpeakerDsp,
                     &instance->Dsp);
             } else if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(

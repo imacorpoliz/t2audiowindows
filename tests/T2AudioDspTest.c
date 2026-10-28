@@ -14,6 +14,7 @@
 #include "../src/T2AudioDsp.h"
 
 static int g_failures = 0;
+static unsigned int g_level = T2DSP_LEVEL_LINEAR;   // DSP level under test
 
 static void check(const char *name, int condition)
 {
@@ -33,6 +34,7 @@ static double ring_value(unsigned int word)
 // ---- double-precision reference of the same chain ---------------------
 typedef struct { double x1, x2, y1, y2; } RBQ;
 typedef struct {
+    RBQ vb[2][4];
     RBQ t1[2][T2DSP_TONE1_STAGES], t2[2][T2DSP_TONE2_STAGES];
     RBQ w[2][T2DSP_WOOFER_STAGES], tw[2][T2DSP_TWEETER_STAGES];
     double mid[T2DSP_XTC_DELAY + 1], side[T2DSP_XTC_TAPS];
@@ -59,6 +61,15 @@ static void ref_frame(REF *r, double l, double rr, double *out)
     double in[2] = { l, rr }, mid, side, md, acc = 0;
     unsigned int s, i, idx;
 
+    if (g_level >= T2DSP_LEVEL_VIRTBASS) {
+        for (s = 0; s < 2; s++) {
+            double p = rbq(g_T2DspRefVirtBass[1], &r->vb[s][1], rbq(g_T2DspRefVirtBass[0], &r->vb[s][0], in[s]));
+            double wet = g_T2DspRefVb[2] * tanh(p * g_T2DspRefVb[0]);
+            if (p <= 0) wet += g_T2DspRefVb[3] * tanh(p * g_T2DspRefVb[1]);
+            wet = rbq(g_T2DspRefVirtBass[3], &r->vb[s][3], rbq(g_T2DspRefVirtBass[2], &r->vb[s][2], wet));
+            in[s] += wet;
+        }
+    }
     for (s = 0; s < 2; s++) in[s] = rcas(g_T2DspRefTone1, r->t1[s], T2DSP_TONE1_STAGES, in[s]);
     mid = 0.5 * (in[0] + in[1]);
     side = 0.5 * (in[0] - in[1]);
@@ -109,7 +120,7 @@ static void sine_gain(double hz, double amp, double rphase, int ch, double *fixe
         double l = amp * sin(ph), r = amp * sin(ph + rphase);
         src[0] = host_word(l);
         src[1] = host_word(r);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
         ref_frame(&ref, l, r, out);
         if (n >= 48000) {
             double a = fabs(ring_value(dst[ch]));
@@ -190,7 +201,7 @@ static void test_stability(void)
     printf("Stability\n");
     T2DspReset(&st);
     for (n = 0; n < 48000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
         if (dst[0] | dst[2] | dst[3] | dst[5]) nonzero++;
     }
     check("silence in -> exact silence out", nonzero == 0);
@@ -198,10 +209,10 @@ static void test_stability(void)
     // Impulse, then 2 s of silence: the output must decay to (near) zero.
     T2DspReset(&st);
     src[0] = src[1] = 0x7FFFFF00u;
-    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+    T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
     src[0] = src[1] = 0;
     for (n = 0; n < 96000; n++) {
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
         if (n > 95000) {
             int c;
             for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > tail) tail = fabs(ring_value(dst[c]));
@@ -225,7 +236,7 @@ static void test_headroom_and_limiter(void)
         double s = 0.999 * sin(2.0 * 3.14159265358979323846 * 100.0 * n / 48000.0);
         int c;
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     printf("  full-scale 100 Hz: output peak %.4f, limited frames %lu\n", peak, st.LimitedFrames);
@@ -239,7 +250,7 @@ static void test_headroom_and_limiter(void)
         unsigned int v = ((n / 300) & 1) ? 0x80000000u : 0x7FFFFFFFu;
         int c;
         src[0] = src[1] = v;
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
         for (c = 0; c < 6; c++) if (fabs(ring_value(dst[c])) > peak) peak = fabs(ring_value(dst[c]));
     }
     check("full-scale square: output bounded by the threshold", peak <= 0.8912509 + 2.0 / 8388608.0);
@@ -249,7 +260,7 @@ static void test_headroom_and_limiter(void)
     for (n = 0; n < 48000; n++) {
         double s = 0.05 * sin(2.0 * 3.14159265358979323846 * 440.0 * n / 48000.0);
         src[0] = src[1] = host_word(s);
-        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, &st);
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
     }
     check("limiter idle at -26 dBFS", st.LimitedFrames == 0);
 
@@ -264,7 +275,7 @@ static void test_headroom_and_limiter(void)
             for (n = 0; n < 57600; n++) {
                 double s = 0.1 * sin(2.0 * 3.14159265358979323846 * 1000.0 * n / 48000.0);
                 src[0] = src[1] = host_word(s);
-                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, &st);
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 1, g_level, &st);
                 if (n >= 48000 && fabs(ring_value(dst[0])) > pf) pf = fabs(ring_value(dst[0]));
             }
             a1 = 20.0 * log10(pf / 0.1);
@@ -284,10 +295,70 @@ static void test_cost(void)
     T2DspReset(&st);
     for (i = 0; i < 96 * 2; i++) src[i] = host_word(0.1 * sin(i * 0.1));
     t0 = clock();
-    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, &st);
+    for (i = 0; i < 5000; i++) T2DspRenderStereoToSpeakers(dst, src, 96, 8, 0, g_level, &st);
     t1 = clock();
     us = (double)(t1 - t0) / CLOCKS_PER_SEC * 1e6 / 5000.0;
     printf("Cost: %.1f us per 2 ms DPC tick (96 frames) on this host\n", us);
+}
+
+// Level 2: the fixed-point virtual bass matches the double reference, adds
+// harmonics of a 60 Hz tone in the 200-450 Hz band, and leaves a 1 kHz
+// tone alone. Harmonic content is measured on the woofer output.
+static double tone_band_energy(double hz, double amp, double lo, double hi, int fixed)
+{
+    static T2DSP_STATE st;
+    REF ref;
+    unsigned int src[2], dst[6];
+    double out[6], e = 0;
+    int n, total = 48000;
+    double bin;
+
+    T2DspReset(&st);
+    memset(&ref, 0, sizeof(ref));
+    // Goertzel-free: correlate with sines on a grid of 10 Hz bins.
+    {
+        static double y[48000];
+        for (n = 0; n < total; n++) {
+            double s = amp * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0);
+            src[0] = src[1] = host_word(s);
+            if (fixed) {
+                T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, g_level, &st);
+                y[n] = ring_value(dst[T2AUDIO_SPK_LEFT_WOOFER_A]);
+            } else {
+                ref_frame(&ref, s, s, out);
+                y[n] = out[0];
+            }
+        }
+        for (bin = lo; bin <= hi; bin += 10.0) {
+            double c = 0, sn = 0;
+            for (n = 24000; n < total; n++) {
+                double ph = 2.0 * 3.14159265358979323846 * bin * n / 48000.0;
+                c += y[n] * cos(ph);
+                sn += y[n] * sin(ph);
+            }
+            e += (c * c + sn * sn) / (24000.0 * 24000.0) * 4.0;
+        }
+    }
+    return 10.0 * log10(e + 1e-30);
+}
+
+static void test_virtual_bass(void)
+{
+    double lin, vbf, vbr, wf, wr;
+
+    printf("Virtual bass (SpeakerDsp=2)\n");
+    g_level = T2DSP_LEVEL_LINEAR;
+    lin = tone_band_energy(60, 0.25, 170, 460, 1);
+    g_level = T2DSP_LEVEL_VIRTBASS;
+    vbf = tone_band_energy(60, 0.25, 170, 460, 1);
+    vbr = tone_band_energy(60, 0.25, 170, 460, 0);
+    printf("  60 Hz tone, 180-450 Hz harmonics on the woofer: linear %.1f dB, virtual bass %.1f dB (ref %.1f dB)\n",
+           lin, vbf, vbr);
+    check("virtual bass adds harmonics (> +30 dB over the linear chain)", vbf > lin + 30);
+    check("harmonics match the double reference (0.5 dB)", fabs(vbf - vbr) < 0.5);
+    sine_gain(1000, 0.1, 0.0, T2AUDIO_SPK_LEFT_TWEETER, &wf, &wr);
+    check("1 kHz tweeter level unchanged by the virtual bass (0.05 dB of ref)", fabs(wf - wr) < 0.05);
+    g_level = T2DSP_LEVEL_LINEAR;
 }
 
 int main(void)
@@ -296,6 +367,14 @@ int main(void)
     test_shape();
     test_stability();
     test_headroom_and_limiter();
+    test_virtual_bass();
+    g_level = T2DSP_LEVEL_VIRTBASS;
+    printf("--- level 2 (virtual bass) ---\n");
+    test_match_reference();
+    test_stability();
+    test_headroom_and_limiter();
+    test_cost();
+    g_level = T2DSP_LEVEL_LINEAR;
     test_cost();
     if (g_failures != 0) {
         printf("%d FAILURE(S)\n", g_failures);

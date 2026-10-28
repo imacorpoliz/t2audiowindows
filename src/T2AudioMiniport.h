@@ -137,8 +137,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // SpeakerDsp (Parameters\SpeakerDsp, default 0 = plain path): 1 runs the
     // stereo path through T2AudioDsp.h (KAIT2EN 16_1 linear chain: sub-bass
     // high-pass, crosstalk cancellation, EQ, per-driver crossover, limiter)
-    // instead of woofers full-range + tweeters high-passed. Not hardware-tested.
-    BOOLEAN SpeakerDsp;
+    // instead of woofers full-range + tweeters high-passed; 2 adds the
+    // virtual bass in front. Values above 2 act as 2. Not hardware-tested.
+    ULONG SpeakerDsp;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

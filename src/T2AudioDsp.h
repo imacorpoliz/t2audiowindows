@@ -5,10 +5,13 @@
 // it can run in the copy DPC, and free of kernel APIs so the host tests
 // (tests/T2AudioDspTest.c) run the same code.
 //
-// Signal flow per frame (the linear part of KAIT2EN's MacBookPro16,1 graph,
-// coefficients in T2AudioDspProfile16_1.h):
+// Signal flow per frame (KAIT2EN's MacBookPro16,1 graph, coefficients in
+// T2AudioDspProfile16_1.h). Level 1 = linear chain; level 2 adds the virtual
+// bass in front of it:
 //
-//   L, R ──► Tone1 (12th-order high-pass, woofer excursion protection)
+//   L, R ──► [level 2] virtual bass (bankstown): harmonics of 40-150 Hz,
+//                 band-limited to 200-450 Hz, added to the dry signal
+//        ──► Tone1 (12th-order high-pass, woofer excursion protection)
 //        ──► XTC: mid = (L+R)/2 delayed, side = (L-R)/2 through the FIR,
 //                 L = mid + side, R = mid - side   (crosstalk cancellation)
 //        ──► Tone2 (midrange EQ)
@@ -16,9 +19,9 @@
 //                      tweeter chain (crossover + EQ) -> ring 2 (L), 5 (R)
 //        ──► limiter (linked: left woofers, right woofers, both tweeters)
 //
-// Not reproduced (nonlinear in the graph): autogain, virtual bass,
-// multiband compressor, woofer "Buzz" compressor; KAIT2EN's limiters are
-// replaced by the simple peak limiter below.
+// Not reproduced (nonlinear in the graph): autogain, multiband compressor,
+// woofer "Buzz" compressor; KAIT2EN's limiters are replaced by the simple
+// peak limiter below.
 //
 // Number format: samples are 64-bit integers scaled so that full scale is
 // 2^27 inside the chain: 24 dB of headroom, because the cascades reach
@@ -43,12 +46,19 @@
 #define T2DSP_GAIN_ONE        (1ll << 30)    // limiter gain, Q30
 #define T2DSP_RELEASE_SHIFT   10
 
+// SpeakerDsp levels.
+#define T2DSP_LEVEL_OFF        0u
+#define T2DSP_LEVEL_LINEAR     1u
+#define T2DSP_LEVEL_VIRTBASS   2u
+#define T2DSP_LEVEL_MAX        2u
+
 typedef struct _T2DSP_BQ_STATE {
     long long X1, X2, Y1, Y2;
     long long E;    // truncation remainder fed back into the next sample
 } T2DSP_BQ_STATE;
 
 typedef struct _T2DSP_STATE {
+    T2DSP_BQ_STATE VirtBass[2][4];
     T2DSP_BQ_STATE Tone1[2][T2DSP_TONE1_STAGES];
     T2DSP_BQ_STATE Tone2[2][T2DSP_TONE2_STAGES];
     T2DSP_BQ_STATE Woofer[2][T2DSP_WOOFER_STAGES];
@@ -136,6 +146,47 @@ T2DspCascade(const int (*C)[5], T2DSP_BQ_STATE *S, unsigned int Stages, long lon
     return x;
 }
 
+// tanh of an internal-scale value (2^27 = 1.0), result in the same scale;
+// table lookup with linear interpolation (error < 2e-6).
+static __inline long long
+T2DspTanh(long long u)
+{
+    long long a = u < 0 ? -u : u;
+    long long idx = a >> (27 - 8);              // 256 steps per unit
+    long long frac = a & ((1ll << (27 - 8)) - 1);
+    long long v;
+
+    if (idx >= T2DSP_TANH_ENTRIES - 1) {
+        v = 1ll << 30;
+    } else {
+        long long t0 = g_T2DspTanh[idx];
+        long long t1 = g_T2DspTanh[idx + 1];
+        v = t0 + T2DspSar((t1 - t0) * frac, 27 - 8);
+    }
+    v = T2DspSar(v, 3);                         // Q30 -> 2^27 scale
+    return u < 0 ? -v : v;
+}
+
+// Virtual bass (bankstown): x + LP3c(HPf(sat(LPc(HPfloor(x))))).
+static __inline long long
+T2DspVirtBass(T2DSP_BQ_STATE *S, long long x)
+{
+    long long p = T2DspBiquad(g_T2DspVirtBass[0], &S[0], x);
+    long long wet;
+
+    p = T2DspBiquad(g_T2DspVirtBass[1], &S[1], p);
+    wet = T2DspSar(T2DspTanh(T2DspSar(p * T2DSP_VB_THIRD_SCALE, T2DSP_Q)) * T2DSP_VB_THIRD_GAIN,
+                   T2DSP_Q);
+    if (p <= 0) {
+        wet += T2DspSar(T2DspTanh(T2DspSar(p * T2DSP_VB_SECOND_SCALE, T2DSP_Q)) *
+                            T2DSP_VB_SECOND_GAIN,
+                        T2DSP_Q);
+    }
+    wet = T2DspBiquad(g_T2DspVirtBass[2], &S[2], wet);
+    wet = T2DspBiquad(g_T2DspVirtBass[3], &S[3], wet);
+    return T2DspSat(x + wet);
+}
+
 // XTC on one frame (in place).
 static __inline void
 T2DspXtc(T2DSP_STATE *S, long long *L, long long *R)
@@ -190,15 +241,17 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 }
 
 // Render Frames stereo frames (MSB-aligned 32-bit host samples, L then R)
-// into the 6-channel ring through the DSP. AttenuationShift is the same
-// safety cut as the plain path (applied to the input); Shift converts to the
-// ring word (8 for S24_LE).
+// into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR or
+// T2DSP_LEVEL_VIRTBASS. AttenuationShift is the same safety cut as the
+// plain path (applied to the input); Shift converts to the ring word (8 for
+// S24_LE).
 static __inline void
 T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             const unsigned int *Source,
                             unsigned long Frames,
                             unsigned int Shift,
                             unsigned int AttenuationShift,
+                            unsigned int Level,
                             T2DSP_STATE *S)
 {
     unsigned long f;
@@ -218,6 +271,9 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                 x = (long long)host;
             }
             in[side] = T2DspSar(x, T2DSP_INTERNAL_SHIFT);
+            if (Level >= T2DSP_LEVEL_VIRTBASS) {
+                in[side] = T2DspVirtBass(S->VirtBass[side], in[side]);
+            }
             in[side] = T2DspCascade(g_T2DspTone1, S->Tone1[side], T2DSP_TONE1_STAGES, in[side]);
         }
         T2DspXtc(S, &in[0], &in[1]);

@@ -70,3 +70,17 @@ building the driver with MSBuild) follows the approach of that project's
 ## Note on Clean Room Implementation
 
 This Windows driver does NOT contain any copied GPL code. All implementation is original, written for the Windows Driver Model (WDM) and PortCls framework. Protocol constants and structure definitions are derived from publicly documented reverse engineering research.
+
+## bankstown (virtual bass)
+
+**Source:** https://github.com/chadmed/bankstown (`bankstown-lv2`), via the
+C++ port in `imacorpoliz/mbp` `SpeakerDSP-APO/vst/src/bankstown_vst2.cpp`
+**License:** MIT, Copyright (C) 2023 James Calligeros <jcalligeros99@gmail.com>
+**Used in:** `src/T2AudioDsp.h` (`T2DspVirtBass`, `T2DspTanh`), filter and gain
+constants in the generated `src/T2AudioDspProfile16_1.h`
+
+The algorithm (band-pass 40-150 Hz, asymmetric tanh saturation, band-limit
+to 200-450 Hz, add to the dry signal) is re-implemented in fixed point; the
+settings come from the KAIT2EN 16_1 graph. The MIT license requires keeping
+the copyright notice above and the MIT permission notice (full text in the
+upstream repository's `LICENSE`) with copies of the software.

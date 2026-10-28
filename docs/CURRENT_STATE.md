@@ -5,6 +5,13 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (after Stage E, later still): virtual bass, SpeakerDsp=2 (source only, not hardware-tested)
+
+- CI green on `01a7aa1` (SpeakerDsp level 1 builds with the WDK; DSP test passes on MSVC).
+- **Added:** bankstown virtual bass (MIT, James Calligeros; settings from the 16_1 graph: amt 3, floor 40 Hz, ceil 150 Hz, sat 1.5/1.5, blend 0.75, final HP 200 Hz) in front of Tone1, as `Parameters\SpeakerDsp=2`. Without it, Tone1's ~70 Hz high-pass leaves the low end thinner; the virtual bass synthesises harmonics (200–450 Hz) that the ear reads as the missing fundamental.
+- Fixed point: tanh by 2049-entry table with interpolation (error < 2e-6), RBJ filters in Q28 with error feedback. Test: a 60 Hz tone gains harmonics +114 dB over the linear chain in 180–450 Hz, matching the double reference within 0.5 dB; all level-1 checks repeated at level 2 (reference match, stability, limiter).
+- `SpeakerDsp` is now a level: 0 plain, 1 linear chain, 2 linear + virtual bass (values > 2 act as 2).
+
 ### 2026-10-28 (after Stage E, later): speaker DSP from KAIT2EN 16_1 behind Parameters\SpeakerDsp (source only, not hardware-tested)
 
 - **Why:** the plain path sends the full band to the woofers (including sub-bass) and the tweeters at 0 dB above 3 kHz. KAIT2EN's 16_1 graph instead high-passes the stereo signal at ~70 Hz (Tone1, 12th order, woofer excursion protection), applies crosstalk cancellation and EQ, and splits per driver: woofers low-passed (−37 dB at 2 kHz) with +3.7 dB bass shelf, tweeters high-passed and about −12 dB. "Flat" sound and some of the "crackle" (woofers overdriven by sub-bass) may come from this.
