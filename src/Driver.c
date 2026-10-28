@@ -48,6 +48,9 @@ T2AudioPnpHandler(
             // 0x140002864 and its callers). Turning it off from the audio
             // driver would leave AppleAudio without audio until VHCI
             // re-initializes.
+            // The jack poll sends BCE requests: stop it before the transport
+            // is closed with the resources.
+            T2AudioStopJackPoll(context);
             T2AudioUnmapResources(context);
             // Persistent mode: clean end of the session.
             T2AudioCrashGuardSetArmed(context, FALSE);

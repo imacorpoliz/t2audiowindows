@@ -5,6 +5,15 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): Gemini hardware reports reviewed — balance fixed, reboot PASS, headphone/mic formats known, jack events absent → jack polling added (source only)
+
+Reviewed `docs/logs/EXCERPT_20261028_balance.md` and `EXCERPT_20261028_step4.md` (Gemini branch `gemini/install-1.0.12.0`, merged into `diagnostics`; it also raises `DriverVer` to 1.0.12.0).
+- **"Right side quiet" — fixed by `-Action Balance`.** The installer read the endpoint's channel levels as `L=0,00 R=0,00` before and set `L=0,30 R=0,30`; owner: «да появился делай дальше что нужно» ("yes, it appeared, do what is needed next"). The cause was the Windows endpoint volume state, not the driver. Not fully explained: with both channels at 0.00 there should have been no sound at all, yet the owner heard the left side; the reading may have been taken while the endpoint was settling. Either way `Install` now always evens the balance. No Equalizer APO on the device.
+- **Step 3 reboot: PASS.** Persistent mode started by itself, crash guard armed and disarmed cleanly, `CrashGuardStrikes=0`. **Open point:** after the reboot `Status` showed `mute=True volume=0,50`, i.e. the T2 endpoint was **muted** after boot. Unknown whether the owner muted it or Windows restored a muted state; asked in GEMINI.md step 4f.
+- **Step 4b ExtendedProbe (read-only, all replies OK):** five BCE devices: Digital Mic 0x21 (in 0x22: 3 ch, 24-in-32), Codec Output 0x25 (out 0x26: 2 ch, 24-in-32, ring 0x190000/0x20800 = 16 640 frames), Speaker 0x39 (out 0x3A: 6 ch, ring 0x12C000/0x61800), Bridge Loopback 0x3F (2 ch in/out), Codec Input 0x44 (in 0x45: 1 ch, 32-bit). `'jack'` reads succeed only on Codec Output (other devices: 0xC0000010, unsupported). This is everything the headphone endpoint needs (ROADMAP §4.3 done) and the input formats for the microphones (§5.1 done).
+- **Step 4c JackEvents:** the listener registered (`0x00000000`, 128-byte reply) but no `PROPERTY_CHANGED` arrived during 3 plug/unplug cycles. Speaker audio unaffected. Possible reasons: bridgeOS only notifies while the headphone device's own I/O runs, or AppleUSBVHCI forwards notifications only to AppleAudio. **Change (source only):** with `JackEvents=1` the driver now also re-reads `'jack'` every second (KTIMER → DPC → the existing PASSIVE work item, coalesced; skipped while powered down; stopped and drained in the PnP stop/removal path before the BCE transport closes). The log shows the first read and then only changes. Default (`JackEvents=0`) unchanged: no timer is created.
+- Still unknown: whether `'jack'` itself changes on plug (the probe only ever read it unplugged). GEMINI.md step 4f tests exactly that.
+
 ### 2026-10-28 (Claude): owner report "right side quiet" — host analysis, installer balance check (cause not yet known)
 
 The owner reported after running the installer: «слева звук нормальный а справа тихий» ("left sounds normal, right is quiet"). No log or preset name came with the report.

@@ -16,6 +16,7 @@ Goal: verify on hardware what Claude built for daily use:
 2) install: T2Audio-Setup.ps1 -Action Install -Preset macos;
 3) ordinary reboot: the driver starts by itself, CrashGuardStrikes stays 0 (the main test);
 4) headphones/mics groundwork (GEMINI.md step 4): jack line at probe; ExtendedProbe=1 (copy every 'BCE detail' and 'BufferStruct device' line into the report); JackEvents=1 (plug/unplug without restart -> PROPERTY_CHANGED + 'headphone jack PLUGGED/unplugged'); HeadphoneAutoMute=1 (speakers go silent while plugged, return on unplug); then all three back to 0;
+4f) jack polling retest (GEMINI.md step 4f): headphones plugged at boot → probe says PLUGGED?; JackEvents=1 → "headphone jack PLUGGED/unplugged" within ~1 s of each change; auto-mute; device disable/enable with JackEvents=1 (no BSOD); is the endpoint muted after a reboot?
 5) presets bright / loud / maxvolume / even / macos (even = autogain, now K-weighted LUFS: is the level more even between a quiet and a loud recording, any "pumping"? autoGainDb10 from run summary);
 5a) new presets and tone (GEMINI.md step 5a): macos-precise vs macos A/B (does the RMS soft-knee compressor sound closer to macOS?), bass, voice, movie, night (owner verdict each), -Action Tune -BassDb 6 -TrebleDb -6 and back, everything-on CPU check (maxCopyUs at low volume);
 6) sleep (only with permission);

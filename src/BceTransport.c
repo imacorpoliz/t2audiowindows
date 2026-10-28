@@ -749,6 +749,7 @@ T2AudioJackWorkRoutine(
     PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
     ULONG plugged = 0;
     LONG previous;
+    LONG polls;
     NTSTATUS status;
 
     PAGED_CODE();
@@ -756,20 +757,109 @@ T2AudioJackWorkRoutine(
     // Clear first: a notification arriving during the read queues another
     // pass, so the last state always wins.
     InterlockedExchange(&context->JackWorkPending, 0);
-    status = T2AudioGetU32Property(context->BceHeadphoneDeviceId,
-                                   context->BceHeadphoneDeviceId,
-                                   T2AUDIO_PROP_SCOPE_OUTPUT,
-                                   T2AUDIO_PROP_JACK_PLUGGED, &plugged);
-    if (NT_SUCCESS(status)) {
-        previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
-        KdPrint(("T2Audio: headphone jack %s (was %s)%s\n",
-                 plugged ? "PLUGGED" : "unplugged", previous ? "plugged" : "unplugged",
-                 (context->HeadphoneAutoMute && plugged) ? " - speakers muted" : ""));
-    } else {
-        KdPrint(("T2Audio: headphone jack re-read failed: 0x%08X\n", status));
+    // Not while powered down (sleep, idle D3): no BCE traffic then.
+    if (context->JackPollStop == 0 && !context->PoweredDown) {
+        status = T2AudioGetU32Property(context->BceHeadphoneDeviceId,
+                                       context->BceHeadphoneDeviceId,
+                                       T2AUDIO_PROP_SCOPE_OUTPUT,
+                                       T2AUDIO_PROP_JACK_PLUGGED, &plugged);
+        polls = InterlockedIncrement(&context->JackPollCount);
+        if (NT_SUCCESS(status)) {
+            previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
+            // The poll runs every second: log changes only (and the first
+            // read, as proof the poll works).
+            if ((previous != 0) != (plugged != 0) || polls == 1) {
+                KdPrint(("T2Audio: headphone jack %s (was %s, read #%d)%s\n",
+                         plugged ? "PLUGGED" : "unplugged", previous ? "plugged" : "unplugged",
+                         polls, (context->HeadphoneAutoMute && plugged) ? " - speakers muted" : ""));
+            }
+        } else if (polls <= 8 || (polls % 600) == 0) {
+            KdPrint(("T2Audio: headphone jack re-read #%d failed: 0x%08X\n", polls, status));
+        }
     }
     if (workItem != NULL) {
         IoFreeWorkItem(workItem);
+    }
+    InterlockedDecrement(&context->JackWorkRunning);
+}
+
+// Queue one jack re-read unless one is already queued (any IRQL <= DISPATCH).
+static VOID
+T2AudioQueueJackRead(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PIO_WORKITEM workItem;
+
+    if (Context->JackPollStop != 0 || Context->DeviceObject == NULL ||
+        InterlockedCompareExchange(&Context->JackWorkPending, 1, 0) != 0) {
+        return;
+    }
+    workItem = IoAllocateWorkItem(Context->DeviceObject);
+    if (workItem == NULL) {
+        InterlockedExchange(&Context->JackWorkPending, 0);
+        return;
+    }
+    InterlockedIncrement(&Context->JackWorkRunning);
+    IoQueueWorkItem(workItem, T2AudioJackWorkRoutine, DelayedWorkQueue, workItem);
+}
+
+static KDEFERRED_ROUTINE T2AudioJackPollDpc;
+
+static VOID
+T2AudioJackPollDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    if (DeferredContext != NULL) {
+        T2AudioQueueJackRead((PT2AUDIO_DEVICE_CONTEXT)DeferredContext);
+    }
+}
+
+// Start the 1 s jack poll (JackEvents=1 only), once per device start.
+static VOID
+T2AudioStartJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    LARGE_INTEGER due;
+
+    if (Context->JackPollStarted || Context->DeviceObject == NULL) {
+        return;
+    }
+    InterlockedExchange(&Context->JackPollStop, 0);
+    KeInitializeTimer(&Context->JackPollTimer);
+    KeInitializeDpc(&Context->JackPollDpc, T2AudioJackPollDpc, Context);
+    due.QuadPart = -10000000ll; // 1 s
+    KeSetTimerEx(&Context->JackPollTimer, due, 1000, &Context->JackPollDpc);
+    Context->JackPollStarted = TRUE;
+    KdPrint(("T2Audio: jack poll started (every 1000 ms)\n"));
+}
+
+// PnP stop/removal (PASSIVE): stop the poll and wait for a queued re-read,
+// so nothing touches the BCE transport after it is closed.
+VOID
+T2AudioStopJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    LARGE_INTEGER wait;
+    ULONG i;
+
+    PAGED_CODE();
+
+    InterlockedExchange(&Context->JackPollStop, 1);
+    if (Context->JackPollStarted) {
+        KeCancelTimer(&Context->JackPollTimer);
+        KeFlushQueuedDpcs();
+        Context->JackPollStarted = FALSE;
+    }
+    wait.QuadPart = -100000ll; // 10 ms
+    for (i = 0; i < 300 && Context->JackWorkRunning != 0; i++) {
+        KeDelayExecutionThread(KernelMode, FALSE, &wait);
+    }
+    if (Context->JackWorkRunning != 0) {
+        KdPrint(("T2Audio: jack poll: re-read still running after 3 s\n"));
     }
 }
 
@@ -1111,17 +1201,10 @@ T2AudioHandleVhciMessage(
         }
         // Re-read the jack at PASSIVE: this handler runs while AppleUSBVHCI
         // waits for the IRP and must not send a BCE request itself.
-        if (Context->JackEvents && Context->DeviceObject != NULL &&
+        if (Context->JackEvents &&
             changedDevice == Context->BceHeadphoneDeviceId && changedDevice != 0 &&
-            scope == T2AUDIO_PROP_SCOPE_OUTPUT && selector == T2AUDIO_PROP_JACK_PLUGGED &&
-            InterlockedCompareExchange(&Context->JackWorkPending, 1, 0) == 0) {
-            PIO_WORKITEM workItem = IoAllocateWorkItem(Context->DeviceObject);
-
-            if (workItem != NULL) {
-                IoQueueWorkItem(workItem, T2AudioJackWorkRoutine, DelayedWorkQueue, workItem);
-            } else {
-                InterlockedExchange(&Context->JackWorkPending, 0);
-            }
+            scope == T2AUDIO_PROP_SCOPE_OUTPUT && selector == T2AUDIO_PROP_JACK_PLUGGED) {
+            T2AudioQueueJackRead(Context);
         }
         return;
     }
@@ -1217,6 +1300,7 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
     if (Context->JackEvents && Context->BceHeadphoneDeviceId != 0) {
         (VOID)T2AudioRegisterJackListener(Context);
+        T2AudioStartJackPoll(Context);
     }
 
     Context->BceProbed = TRUE;

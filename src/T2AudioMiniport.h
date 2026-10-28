@@ -104,6 +104,16 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     BOOLEAN JackListenerRegistered;
     volatile LONG JackWorkPending;
     volatile LONG JackEventCount;
+    // Jack polling (with JackEvents): bridgeOS sent no PROPERTY_CHANGED on
+    // plug/unplug under Windows (EXCERPT_20261028_step4.md), so a 1 s timer
+    // also queues the re-read. JackPollStop/JackWorkRunning let the PnP stop
+    // path cancel the timer and wait for a queued re-read to finish.
+    KTIMER JackPollTimer;
+    KDPC JackPollDpc;
+    BOOLEAN JackPollStarted;
+    volatile LONG JackPollStop;
+    volatile LONG JackWorkRunning;
+    volatile LONG JackPollCount;
     // Parameters\ExtendedProbe=1: log every BCE device's streams, formats,
     // latencies and jacks, and the whole BufferStruct table (read-only), as
     // groundwork for the headphone and microphone endpoints (docs/ROADMAP.md).
@@ -331,6 +341,7 @@ NTSTATUS T2AudioFindSpeakerDeviceId(
     _Out_ PULONG64 DeviceId);
 
 NTSTATUS T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioStopJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioLogBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 // IOCTL AppleUSBVHCI uses to push bridgeOS messages to the audio device:

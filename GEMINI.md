@@ -105,6 +105,15 @@ Set-ItemProperty $p ExtendedProbe 0 -Type DWord
 .\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos
 ```
 
+**Step 4f. Jack polling retest** (after Claude's jack-poll commit; rebuild 1.0.12.0 from the latest `diagnostics`; sound allowed, headphones give no sound yet).
+1. With headphones **plugged in before boot**: reboot, then the probe line `BCE probe: headphone jack device 0x25: …` — does it say `PLUGGED`? (This shows whether `'jack'` reflects the jack at all.)
+2. `Set-ItemProperty $p JackEvents 1 -Type DWord`, `-Action Preset -Preset macos` (restarts the device). Log: `jack poll started (every 1000 ms)` and `headphone jack … (was …, read #1)`.
+3. Unplug / plug 3 times, ~5 s apart, music playing. PASS: a `headphone jack PLUGGED` / `unplugged` line within ~1 s of each change; no audio dropouts; `run summary` normal. Also copy any `VHCI message #… msg=…` and `PROPERTY_CHANGED` lines.
+4. If 3 passed: `HeadphoneAutoMute=1`, restart, plug in → speakers silent within ~1 s; unplug → sound back. `jackMutedFrames` in `run summary`.
+5. Disable/enable the device once in Device Manager while `JackEvents=1` (tests the poll stop path): no BSOD, log has no `re-read still running`.
+6. Back to `JackEvents=0`, `HeadphoneAutoMute=0`.
+7. **Mute after reboot:** in step 3 `Status` showed `mute=True` after the reboot. Ask the owner whether they muted it. If not, reboot once more and record `Status` right after login (before touching volume).
+
 **Step 5. Presets.** `-Action Preset -Preset bright`, then `loud`, `maxvolume`, `even`, `macos`. After each one the log line `mode parameters` shows the expected values (`even` has `DspAutoGain=1`). The owner gives a short verdict by ear:
 * `maxvolume` and `loud`: a bass-heavy track at 100 %. Is there hum, or harshness on peaks? (The limiter now looks ahead, so harshness on peaks should be lower.)
 * `even`: first a quiet recording (old, classical, a podcast), then a loud one (modern pop/rock). Is the level between them more even? Any "pumping" (volume noticeably drifting up and down in pauses and after hits)? Record `autoGainDb10=` from `run summary` (tenths of a dB; e.g. `-45` = −4.5 dB). The autogain now measures LUFS (K-weighted), so bass-heavy tracks should no longer be turned down more than vocal ones.
