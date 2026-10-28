@@ -6,6 +6,7 @@
 #   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # сменить пресет звука
 #   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # тембр поверх пресета
 #   .\T2Audio-Setup.ps1 -Action Balance -Volume 0.3      # выровнять баланс L/R
+#   .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1   # экспериментальные функции
 #   .\T2Audio-Setup.ps1 -Action Status
 #   .\T2Audio-Setup.ps1 -Action ResetGuard               # сбросить защиту от падений
 #   .\T2Audio-Setup.ps1 -Action Uninstall                # вернуть AppleAudio
@@ -22,7 +23,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
@@ -35,6 +36,12 @@ param(
     [ValidateRange(-12, 12)] [Nullable[int]]$ClarityDb,
     # Компрессор: 0 = быстрый пиковый (как раньше), 1 = точный как в macOS (RMS, мягкое колено).
     [ValidateRange(0, 1)] [Nullable[int]]$CompStyle,
+
+    # -Action Features: экспериментальные функции (1 = включить, 0 = выключить; не указан = не менять).
+    [ValidateRange(0, 1)] [Nullable[int]]$Headphones,      # выход на наушники (+ слежение за гнездом)
+    [ValidateRange(0, 1)] [Nullable[int]]$Microphone,      # встроенные микрофоны
+    [ValidateRange(0, 1)] [Nullable[int]]$ResumeAfterSleep,# звук сам возвращается после сна
+    [ValidateRange(0, 1)] [Nullable[int]]$ExtraFormats,    # 16/24 бит для монопольного режима
 
     # Громкость точки T2 после установки (0..1); -1 = не трогать.
     [double]$Volume = 0.3,
@@ -427,6 +434,7 @@ function Invoke-Status {
             }
         } catch { }
     }
+    Show-Features
     $ts = if (Test-TestSigning) { 'включён' } else { 'ВЫКЛЮЧЕН' }
     Write-Host ("   testsigning:    {0}" -f $ts) -ForegroundColor White
     if (Test-Path $TestSession) { Write-Warn 'Есть тестовая сессия агента (TestSession) - она удалится при перезагрузке.' }
@@ -574,6 +582,55 @@ function Invoke-Uninstall {
     }
 }
 
+# Экспериментальные функции драйвера 1.0.12.0+ (все выключены по умолчанию).
+# Наушники = HeadphoneOutput + JackEvents (слежение за гнездом) + HeadphoneAutoMute
+# (динамики молчат, пока вставлены наушники).
+$FeatureParams = [ordered]@{
+    Headphones       = @('HeadphoneOutput', 'JackEvents', 'HeadphoneAutoMute')
+    Microphone       = @('MicInput')
+    ResumeAfterSleep = @('ResumeAfterSleep')
+    ExtraFormats     = @('ExtraFormats')
+}
+$FeatureTitles = @{
+    Headphones = 'Наушники (выход 3,5 мм, автопереключение)'; Microphone = 'Встроенные микрофоны'
+    ResumeAfterSleep = 'Звук после сна без перезапуска'; ExtraFormats = 'Форматы 16/24 бит'
+}
+
+function Show-Features {
+    foreach ($f in $FeatureParams.Keys) {
+        $on = ((Get-Param $FeatureParams[$f][0]) -eq 1)
+        Write-Host ("   {0,-46} {1}" -f $FeatureTitles[$f], $(if ($on) { 'вкл' } else { 'выкл' })) -ForegroundColor White
+    }
+}
+
+function Invoke-Features([switch]$Interactive) {
+    Write-Section 'Экспериментальные функции (не проверены на железе)'
+    $changes = [ordered]@{}
+    if ($Interactive) {
+        foreach ($f in $FeatureParams.Keys) {
+            $cur = ((Get-Param $FeatureParams[$f][0]) -eq 1)
+            $a = Read-Host ("  {0} (сейчас {1}): 1 = вкл, 0 = выкл, Enter = не менять" -f $FeatureTitles[$f], $(if ($cur) { 'вкл' } else { 'выкл' }))
+            if ($a -eq '0' -or $a -eq '1') { $changes[$f] = [int]$a }
+        }
+    } else {
+        foreach ($f in $FeatureParams.Keys) {
+            $v = Get-Variable -Name $f -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+            if ($null -ne $v) { $changes[$f] = [int]$v }
+        }
+    }
+    if ($changes.Count -eq 0) {
+        Show-Features
+        Write-Info 'Ничего не изменено. Пример: .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1'
+        return
+    }
+    foreach ($f in $changes.Keys) {
+        foreach ($n in $FeatureParams[$f]) { Set-Param $n $changes[$f] }
+        Write-Ok ("{0}: {1}" -f $FeatureTitles[$f], $(if ($changes[$f] -eq 1) { 'включено' } else { 'выключено' }))
+    }
+    Write-Warn 'Если что-то пошло не так: .\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0'
+    $null = Restart-T2Device
+}
+
 function Show-Menu {
     while ($true) {
         Write-Banner
@@ -584,6 +641,7 @@ function Show-Menu {
         Write-Host '   3. Сбросить защиту от падений' -ForegroundColor White
         Write-Host '   4. Вернуть драйвер Apple (удалить T2AudioPort)' -ForegroundColor White
         Write-Host '   5. Подстроить тембр (бас / высокие / разборчивость)' -ForegroundColor White
+        Write-Host '   6. Экспериментальные функции (наушники, микрофоны, сон)' -ForegroundColor White
         Write-Host '   0. Выход' -ForegroundColor White
         $c = Read-Host "`n  Выбор"
         switch ($c) {
@@ -592,6 +650,7 @@ function Show-Menu {
             '3' { Invoke-ResetGuard }
             '4' { Invoke-Uninstall }
             '5' { Invoke-Tune -Interactive }
+            '6' { Invoke-Features -Interactive }
             '0' { return }
             default { Write-Warn 'Нет такого пункта.' }
         }
@@ -606,6 +665,7 @@ switch ($Action) {
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
+    'Features'   { Write-Banner; Invoke-Features }
     'Balance'    { Write-Banner; Write-Section 'Баланс'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }

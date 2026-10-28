@@ -68,6 +68,21 @@ sets both channels equal (Windows keeps a balance per device, under Sound
 settings → device properties → Levels → Balance, even across reinstalls).
 `-Action Install` does the same at the end.
 
+### Experimental features (driver 1.0.13.0+, off by default, not yet verified on hardware)
+
+```powershell
+.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1       # headphone output + jack tracking + speaker auto-mute
+.\tools\T2Audio-Setup.ps1 -Action Features -Microphone 1       # built-in microphones
+.\tools\T2Audio-Setup.ps1 -Action Features -ResumeAfterSleep 1 # sound comes back after sleep by itself
+.\tools\T2Audio-Setup.ps1 -Action Features -ExtraFormats 1     # 16/24-bit for exclusive-mode apps
+.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0   # all off
+```
+
+Menu item 6 does the same interactively; `-Action Status` lists what is on. The
+registry values behind them are described in `docs/DRIVER_GUIDE.md` §8.3
+(`HeadphoneOutput`, `JackEvents`, `HeadphoneAutoMute`, `MicInput`,
+`ResumeAfterSleep`, `ExtraFormats`).
+
 ### Tone on top of a preset
 
 `-Action Tune` (menu item 5) changes only the tone values and keeps the rest

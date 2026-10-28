@@ -371,8 +371,10 @@ T2AudioMiniportDataRangeIntersection(
         DataRange->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX)) {
         ULONG formatChannels;
 
-        if (!NT_SUCCESS(T2AudioValidateRenderFormat((PKSDATAFORMAT)DataRange,
-                                                    allowRaw, &formatChannels))) {
+        if (!NT_SUCCESS(T2AudioValidateRenderFormatEx((PKSDATAFORMAT)DataRange, allowRaw,
+                                                      (instance->DeviceContext != NULL &&
+                                                       instance->DeviceContext->ExtraFormats) ? TRUE : FALSE,
+                                                      &formatChannels, NULL))) {
             return STATUS_NO_MATCH;
         }
         channels = formatChannels;
@@ -446,6 +448,11 @@ T2AudioMiniportInit(
     UNREFERENCED_PARAMETER(UnknownAdapter);
     UNREFERENCED_PARAMETER(ResourceList);
     instance->Port = Port;
+    // ExtraFormats: advertise 16..32-bit containers on the render pins.
+    if (instance->DeviceContext != NULL && instance->DeviceContext->ExtraFormats) {
+        g_T2AudioSpeakerRange.MinimumBitsPerSample = 16;
+        g_T2AudioHeadphoneRange.MinimumBitsPerSample = 16;
+    }
     if (instance->Headphone) {
         // Fixed stereo descriptor; the speaker range below is not touched.
         return STATUS_SUCCESS;
@@ -525,13 +532,28 @@ T2AudioValidateRenderFormat(
     _In_ BOOLEAN AllowRawChannels,
     _Out_opt_ PULONG Channels)
 {
+    return T2AudioValidateRenderFormatEx(DataFormat, AllowRawChannels, FALSE, Channels, NULL);
+}
+
+NTSTATUS
+T2AudioValidateRenderFormatEx(
+    _In_ PKSDATAFORMAT DataFormat,
+    _In_ BOOLEAN AllowRawChannels,
+    _In_ BOOLEAN AllowExtraBits,
+    _Out_opt_ PULONG Channels,
+    _Out_opt_ PULONG BitsPerSample)
+{
     PKSDATAFORMAT_WAVEFORMATEX waveFormat;
     ULONG channels;
+    ULONG bits;
     ULONG blockAlign;
     ULONG expectedMask;
 
     if (Channels != NULL) {
         *Channels = 0;
+    }
+    if (BitsPerSample != NULL) {
+        *BitsPerSample = 0;
     }
 
     if (DataFormat == NULL ||
@@ -567,10 +589,15 @@ T2AudioValidateRenderFormat(
                  channels, AllowRawChannels ? 1u : 0u));
         return STATUS_INVALID_PARAMETER;
     }
-    blockAlign = channels * 4u;
+    bits = waveFormat->WaveFormatEx.wBitsPerSample;
+    if (bits != 32 && !(AllowExtraBits && (bits == 16 || bits == 24))) {
+        KdPrint(("T2Audio: Validate: %u-bit not offered (extra=%u)\n",
+                 bits, AllowExtraBits ? 1u : 0u));
+        return STATUS_INVALID_PARAMETER;
+    }
+    blockAlign = channels * (bits / 8u);
 
     if (waveFormat->WaveFormatEx.nSamplesPerSec != 48000 ||
-        waveFormat->WaveFormatEx.wBitsPerSample != 32 ||
         waveFormat->WaveFormatEx.nBlockAlign != blockAlign ||
         waveFormat->WaveFormatEx.nAvgBytesPerSec != 48000 * blockAlign) {
         KdPrint(("T2Audio: Validate: ch=%u rate=%u bits=%u block=%u\n",
@@ -596,7 +623,7 @@ T2AudioValidateRenderFormat(
                                        : KSAUDIO_SPEAKER_5POINT1_SURROUND;
         if (wfext->WaveFormatExt.Format.cbSize < sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX) ||
             wfext->WaveFormatExt.Samples.wValidBitsPerSample == 0 ||
-            wfext->WaveFormatExt.Samples.wValidBitsPerSample > 32 ||
+            wfext->WaveFormatExt.Samples.wValidBitsPerSample > bits ||
             (wfext->WaveFormatExt.dwChannelMask != expectedMask &&
              !(channels == T2AUDIO_RING_CHANNELS &&
                wfext->WaveFormatExt.dwChannelMask == KSAUDIO_SPEAKER_5POINT1))) {
@@ -619,6 +646,9 @@ T2AudioValidateRenderFormat(
 
     if (Channels != NULL) {
         *Channels = channels;
+    }
+    if (BitsPerSample != NULL) {
+        *BitsPerSample = bits;
     }
     return STATUS_SUCCESS;
 }

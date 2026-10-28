@@ -36,6 +36,32 @@ T2AudioAlignSizeUpToFrame(unsigned long RequestedSize,
     return 1;
 }
 
+// Parameters\ExtraFormats: widen Samples little-endian PCM samples of
+// BitsPerSample (16 or 24, packed) to 32-bit MSB-aligned values, the layout
+// the render paths take. 32 copies. Other sizes write silence.
+#define T2AUDIO_WIDEN_FRAMES 64u
+
+static __inline void
+T2AudioWidenPcmToS32(const unsigned char *Source, unsigned int *Dest,
+                     unsigned long Samples, unsigned long BitsPerSample)
+{
+    unsigned long i;
+
+    for (i = 0; i < Samples; i++) {
+        if (BitsPerSample == 16) {
+            Dest[i] = ((unsigned int)Source[2 * i] << 16) | ((unsigned int)Source[2 * i + 1] << 24);
+        } else if (BitsPerSample == 24) {
+            Dest[i] = ((unsigned int)Source[3 * i] << 8) | ((unsigned int)Source[3 * i + 1] << 16) |
+                      ((unsigned int)Source[3 * i + 2] << 24);
+        } else if (BitsPerSample == 32) {
+            Dest[i] = (unsigned int)Source[4 * i] | ((unsigned int)Source[4 * i + 1] << 8) |
+                      ((unsigned int)Source[4 * i + 2] << 16) | ((unsigned int)Source[4 * i + 3] << 24);
+        } else {
+            Dest[i] = 0;
+        }
+    }
+}
+
 // Returns 1 if a fixed hardware buffer of ActualSize bytes can satisfy a client
 // request for RequestedSize bytes and is frame-aligned; otherwise 0.
 static __inline int

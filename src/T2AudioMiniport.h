@@ -158,6 +158,10 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // was cleared (MicUnregister in the PnP stop path).
     ULONG MicInput;
     ULONG MicDsp;
+    // Parameters\ExtraFormats=1 (default 0; ROADMAP 2.8): the render pins
+    // also accept 16- and 24-bit PCM (exclusive-mode apps). Shared mode keeps
+    // using 32-bit, the format the intersection proposes.
+    ULONG ExtraFormats;
     BOOLEAN MicFiltersRegistered;
     BOOLEAN MicRegistered;
     BOOLEAN MicFormatValid;
@@ -358,6 +362,15 @@ NTSTATUS T2AudioValidateRenderFormat(
     _In_ PKSDATAFORMAT DataFormat,
     _In_ BOOLEAN AllowRawChannels,
     _Out_opt_ PULONG Channels);
+
+// Like T2AudioValidateRenderFormat; with AllowExtraBits also 16- and 24-bit
+// (packed) containers. *BitsPerSample is 16, 24 or 32.
+NTSTATUS T2AudioValidateRenderFormatEx(
+    _In_ PKSDATAFORMAT DataFormat,
+    _In_ BOOLEAN AllowRawChannels,
+    _In_ BOOLEAN AllowExtraBits,
+    _Out_opt_ PULONG Channels,
+    _Out_opt_ PULONG BitsPerSample);
 
 VOID T2AudioLogFormat(
     _In_z_ PCSTR Tag,

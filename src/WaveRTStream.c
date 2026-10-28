@@ -31,6 +31,8 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // Client format: 2 channels (stereo, laid out over the six speakers) or 6
     // (raw ring channels, diagnostic). BytesPerFrame is the client frame size.
     ULONG Channels;
+    // Client container size: 32 (default), or 16 / 24 with ExtraFormats.
+    ULONG BitsPerSample;
     ULONG BytesPerFrame;
     KSPIN_LOCK StreamLock;
     ULONG64 AnchorQpc;
@@ -278,6 +280,70 @@ T2AudioStreamFollowT2ClockLocked(
     }
 }
 
+// Render Frames client frames (32-bit MSB-aligned samples, Channels per
+// frame) into the ring at Dest. Caller holds StreamLock and HardwareLock.
+static VOID
+T2AudioStreamRenderFrames(
+    _Inout_ PT2AUDIO_WAVERT_STREAM instance,
+    _In_ PT2AUDIO_DEVICE_CONTEXT context,
+    _Out_ volatile unsigned int *Dest,
+    _In_ const unsigned int *Source,
+    _In_ ULONG Frames)
+{
+    // The ring layout comes from the stream's 'pft ' descriptor: the
+    // T2 speaker is S24_LE (24 bits in the low bytes), while Windows
+    // delivers MSB-aligned 32-bit samples, so each sample is shifted
+    // (kaiT2en maps the same descriptor to SNDRV_PCM_FORMAT_S24_LE).
+    // Stereo is laid out over the woofer pairs and the high-passed
+    // tweeters; the raw 6-channel format is copied as is. Both paths
+    // apply the OutputAttenuation safety shift (two arithmetic shifts
+    // compose, so the raw path adds it to the sample shift). Frames
+    // are 4-byte aligned in both rings.
+    if (instance->Headphone) {
+        // Headphones: stereo straight into the 2-channel ring (same
+        // 4-byte slots as the client), with the headphone safety cut.
+        T2AudioConvertSamples(
+            Dest,
+            Source,
+            Frames * instance->Channels,
+            context->HeadphoneSampleShift + context->HeadphoneAttenuation);
+    } else if (instance->Channels == 2 && context->SpeakerDsp) {
+        // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
+        // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
+        // the autogain in front, then the tone controls.
+        T2DspSetTuning(&instance->Dsp, (int)context->BassDb, (int)context->TrebleDb,
+                       (int)context->ClarityDb, context->CompStyle);
+        T2DspRenderStereoToSpeakers(
+            Dest,
+            Source,
+            Frames,
+            context->SpeakerSampleShift,
+            context->OutputAttenuation,
+            (context->SpeakerDsp > T2DSP_LEVEL_MAX) ? T2DSP_LEVEL_MAX
+                                                    : context->SpeakerDsp,
+            context->DspGainDb,
+            context->TweeterTrimDb,
+            context->WooferLimitDb,
+            context->DspAutoGain,
+            &instance->Dsp);
+    } else if (instance->Channels == 2) {
+        T2AudioRenderStereoToSpeakers(
+            Dest,
+            Source,
+            Frames,
+            context->SpeakerSampleShift,
+            context->TweeterMode,
+            context->OutputAttenuation,
+            &instance->SpeakerState);
+    } else {
+        T2AudioConvertSamples(
+            Dest,
+            Source,
+            Frames * instance->Channels,
+            context->SpeakerSampleShift + context->OutputAttenuation);
+    }
+}
+
 // Advance the consumed-frame cursor to "now" and mirror the newly consumed
 // source frames into the BAR1 hardware ring. Must be called with StreamLock
 // held (so at DISPATCH_LEVEL); only advances while the stream is in RUN.
@@ -422,57 +488,31 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                 break;
             }
 
-            // The ring layout comes from the stream's 'pft ' descriptor: the
-            // T2 speaker is S24_LE (24 bits in the low bytes), while Windows
-            // delivers MSB-aligned 32-bit samples, so each sample is shifted
-            // (kaiT2en maps the same descriptor to SNDRV_PCM_FORMAT_S24_LE).
-            // Stereo is laid out over the woofer pairs and the high-passed
-            // tweeters; the raw 6-channel format is copied as is. Both paths
-            // apply the OutputAttenuation safety shift (two arithmetic shifts
-            // compose, so the raw path adds it to the sample shift). Frames
-            // are 4-byte aligned in both rings.
-            if (instance->Headphone) {
-                // Headphones: stereo straight into the 2-channel ring (same
-                // 4-byte slots as the client), with the headphone safety cut.
-                T2AudioConvertSamples(
-                    (volatile unsigned int *)(hwBufferBase + dstOffset),
-                    (const unsigned int *)(sourceBase + srcOffset),
-                    byteLen / sizeof(unsigned int),
-                    context->HeadphoneSampleShift + context->HeadphoneAttenuation);
-            } else if (instance->Channels == 2 && context->SpeakerDsp) {
-                // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
-                // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
-                // the autogain in front, then the tone controls.
-                T2DspSetTuning(&instance->Dsp, (int)context->BassDb, (int)context->TrebleDb,
-                               (int)context->ClarityDb, context->CompStyle);
-                T2DspRenderStereoToSpeakers(
-                    (volatile unsigned int *)(hwBufferBase + dstOffset),
-                    (const unsigned int *)(sourceBase + srcOffset),
-                    chunkFrames,
-                    context->SpeakerSampleShift,
-                    context->OutputAttenuation,
-                    (context->SpeakerDsp > T2DSP_LEVEL_MAX) ? T2DSP_LEVEL_MAX
-                                                            : context->SpeakerDsp,
-                    context->DspGainDb,
-                    context->TweeterTrimDb,
-                    context->WooferLimitDb,
-                    context->DspAutoGain,
-                    &instance->Dsp);
-            } else if (instance->Channels == 2) {
-                T2AudioRenderStereoToSpeakers(
-                    (volatile unsigned int *)(hwBufferBase + dstOffset),
-                    (const unsigned int *)(sourceBase + srcOffset),
-                    chunkFrames,
-                    context->SpeakerSampleShift,
-                    context->TweeterMode,
-                    context->OutputAttenuation,
-                    &instance->SpeakerState);
+            if (instance->BitsPerSample == 32) {
+                T2AudioStreamRenderFrames(instance, context,
+                                          (volatile unsigned int *)(hwBufferBase + dstOffset),
+                                          (const unsigned int *)(sourceBase + srcOffset),
+                                          chunkFrames);
             } else {
-                T2AudioConvertSamples(
-                    (volatile unsigned int *)(hwBufferBase + dstOffset),
-                    (const unsigned int *)(sourceBase + srcOffset),
-                    byteLen / sizeof(unsigned int),
-                    context->SpeakerSampleShift + context->OutputAttenuation);
+                // Parameters\ExtraFormats: 16- or 24-bit client samples are
+                // widened to 32-bit MSB-aligned in small pieces on the stack.
+                ULONG done = 0;
+
+                while (done < chunkFrames) {
+                    unsigned int wide[T2AUDIO_WIDEN_FRAMES * T2AUDIO_RING_CHANNELS];
+                    ULONG n = chunkFrames - done;
+
+                    if (n > T2AUDIO_WIDEN_FRAMES) {
+                        n = T2AUDIO_WIDEN_FRAMES;
+                    }
+                    T2AudioWidenPcmToS32(sourceBase + srcOffset + done * instance->BytesPerFrame,
+                                         wide, n * instance->Channels, instance->BitsPerSample);
+                    T2AudioStreamRenderFrames(instance, context,
+                                              (volatile unsigned int *)(hwBufferBase + dstOffset +
+                                                                        done * frameBytes),
+                                              wide, n);
+                    done += n;
+                }
             }
 
             frame += chunkFrames;
@@ -696,17 +736,19 @@ T2AudioStreamSetFormat(
     PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
         Stream, T2AUDIO_WAVERT_STREAM, Interface);
     ULONG channels = 0;
+    ULONG bits = 0;
     NTSTATUS status;
 
     // The client buffer was sized for the current frame size; a format with
     // another frame size would need a new buffer.
-    status = T2AudioValidateRenderFormat(
+    status = T2AudioValidateRenderFormatEx(
         DataFormat,
         (!instance->Headphone && instance->DeviceContext != NULL &&
          instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
-        &channels);
+        (instance->DeviceContext != NULL && instance->DeviceContext->ExtraFormats) ? TRUE : FALSE,
+        &channels, &bits);
     if (NT_SUCCESS(status) && instance->AudioBufferMdl != NULL &&
-        channels != instance->Channels) {
+        (channels != instance->Channels || bits != instance->BitsPerSample)) {
         status = STATUS_INVALID_DEVICE_REQUEST;
     }
 
@@ -719,7 +761,8 @@ T2AudioStreamSetFormat(
         KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
         instance->SampleRate = 48000;
         instance->Channels = channels;
-        instance->BytesPerFrame = channels * 4u;
+        instance->BitsPerSample = bits;
+        instance->BytesPerFrame = channels * (bits / 8u);
         KeReleaseSpinLock(&instance->StreamLock, oldIrql);
     }
     return status;
@@ -1257,16 +1300,18 @@ T2AudioCreateStream(
 {
     PT2AUDIO_WAVERT_STREAM instance;
     ULONG channels = 0;
+    ULONG bits = 0;
     NTSTATUS status;
 
     if (Stream == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     *Stream = NULL;
-    status = T2AudioValidateRenderFormat(
+    status = T2AudioValidateRenderFormatEx(
         DataFormat,
         (!Headphone && DeviceContext != NULL && DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
-        &channels);
+        (DeviceContext != NULL && DeviceContext->ExtraFormats) ? TRUE : FALSE,
+        &channels, &bits);
     if (!NT_SUCCESS(status)) {
         return status;
     }
@@ -1284,7 +1329,8 @@ T2AudioCreateStream(
     instance->PortStream = PortStream;
     instance->SampleRate = 48000;
     instance->Channels = channels;
-    instance->BytesPerFrame = channels * 4u;
+    instance->BitsPerSample = bits;
+    instance->BytesPerFrame = channels * (bits / 8u);
     instance->DestOffset = T2AUDIO_LEAD_FRAMES;
     T2AudioSpeakerStateReset(&instance->SpeakerState);
     T2DspReset(&instance->Dsp);

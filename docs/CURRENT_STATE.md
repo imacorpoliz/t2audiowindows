@@ -5,6 +5,18 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): headphones, microphones, resume after sleep, 16/24-bit — all implemented behind parameters (source only, not hardware-tested)
+
+The owner asked to finish all remaining work («делай все что надо доделывай до конца всю работу»). Everything below is **off by default**: with the new parameters at 0 the driver registers the same two filters and runs the same speaker path as before (the speaker copy now goes through ring accessors and a render helper; same arithmetic, host tests unchanged). CI (WDK build + host tests on gcc/clang/MSVC) is green.
+- **Headphones** (`HeadphoneOutput=1`, ROADMAP 4.4/4.5): second WaveRT + topology pair `WaveHeadphone`/`TopologyHeadphone` for the BCE device "Codec Output" (ring from BufferStruct, `'pft '` check, START_IO/STOP_IO and clock anchor of that device, plain copy, `HeadphoneAttenuation` default −12 dB). The jack pin answers `KSPROPERTY_JACK_DESCRIPTION`/`DESCRIPTION2` and raises `KSEVENT_PINCAPS_JACKINFOCHANGE` when the jack poll (`JackEvents=1`) sees a change, so Windows can show the endpoint as unplugged and switch the default device.
+- **Microphones** (`MicInput=1`, ROADMAP 5.2–5.4, new `src/MicCapture.c`, `src/T2AudioMicLogic.h`): contiguous host ring registered in BufferStruct ("Digital Mic", `input_streams[0]`) + `SET_INPUT_STREAM_ADDRESS_RANGES` (msg 18), as kaiT2en and AppleAudio; capture endpoint (mono 48 kHz 32-bit) fed by a 2 ms DPC 512 frames behind the T2 write position (UPDATE_TIMESTAMP of the mic device, minus its input latency, like kaiT2en's capture pointer); kaiT2en 16_1 mic DSP (beam of mics 0+1, 20 Hz high-pass, +39 dB). Teardown order: STOP_IO → BufferStruct entry cleared → ring freed. The ranges are re-sent after every wake. New host test `tests/T2AudioMicTest.c` (format, DSP against a double reference within 0.05 dB, DC removal, saturation, capture clock with jitter and 80 ppm drift).
+- **Resume after sleep** (`ResumeAfterSleep=1`, ROADMAP 2.1): a D0 work item restarts streams still in RUN (PAUSE → RUN without a second STOP_IO); `SetState` serialised with it by a KMUTEX (the thread stays at PASSIVE, so BCE messages can still be sent).
+- **16/24-bit** (`ExtraFormats=1`, ROADMAP 2.8): render pins accept 16/24-bit packed PCM, widened to 32-bit before the normal path (`T2AudioWidenPcmToS32`, host-tested).
+- **Installer:** `-Action Features -Headphones/-Microphone/-ResumeAfterSleep/-ExtraFormats 0|1`, menu item 6, `Status` lists the features.
+- **INF:** new interfaces `WaveHeadphone`, `TopologyHeadphone`, `WaveMic` (`KSCATEGORY_CAPTURE`), `TopologyMic`; they are inactive unless the subdevices are registered. The package must be rebuilt and re-signed (1.0.13.0).
+- Hardware plan: `GEMINI.md`, "▶ NEXT RUN, part 2" (P1 headphones, P2 microphones — needs the owner's permission because it writes BufferStruct, P3 sleep, P4 formats).
+- Still not done: hardware volume (ROADMAP §3, needs reverse engineering of msg 28), 44.1/96 kHz, the headset microphone on "Codec Input" (5.5), production signing (§6, an owner decision).
+
 ### 2026-10-28 (Claude): Gemini hardware reports reviewed — balance fixed, reboot PASS, headphone/mic formats known, jack events absent → jack polling added (source only)
 
 Reviewed `docs/logs/EXCERPT_20261028_balance.md` and `EXCERPT_20261028_step4.md` (Gemini branch `gemini/install-1.0.12.0`, merged into `diagnostics`; it also raises `DriverVer` to 1.0.12.0).

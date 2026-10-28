@@ -559,10 +559,11 @@ T2AudioStartDeviceInner(
     // Built-in microphones (ROADMAP 5): off by default; MicDsp 1 = kaiT2en chain.
     context->MicInput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
     context->MicDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1) ? 1u : 0u;
-    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicDsp=%u ResumeAfterSleep=%u\n",
+    context->ExtraFormats = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtraFormats", 0) ? 1u : 0u;
+    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicDsp=%u ExtraFormats=%u ResumeAfterSleep=%u\n",
              context->HeadphoneOutput, context->HeadphoneAttenuation,
              context->HeadphoneAttenuation * 6u, context->MicInput, context->MicDsp,
-             context->ResumeAfterSleep));
+             context->ExtraFormats, context->ResumeAfterSleep));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,

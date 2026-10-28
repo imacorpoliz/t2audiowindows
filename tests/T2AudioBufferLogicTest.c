@@ -291,6 +291,29 @@ static void test_convert_samples(void)
     check("zero count writes nothing", dst[0] == 0xDEADBEEFu);
 }
 
+static void test_widen_pcm(void)
+{
+    // 16-bit -32768, +1, +32767; 24-bit -1, +0x123456.
+    const unsigned char s16[6] = { 0x00, 0x80, 0x01, 0x00, 0xFF, 0x7F };
+    const unsigned char s24[6] = { 0xFF, 0xFF, 0xFF, 0x56, 0x34, 0x12 };
+    const unsigned char s32[4] = { 0x78, 0x56, 0x34, 0x12 };
+    unsigned int d[3] = { 1, 1, 1 };
+
+    printf("T2AudioWidenPcmToS32\n");
+    T2AudioWidenPcmToS32(s16, d, 3, 16);
+    check("16-bit -32768 -> 0x80000000", d[0] == 0x80000000u);
+    check("16-bit +1 -> 0x00010000", d[1] == 0x00010000u);
+    check("16-bit +32767 -> 0x7FFF0000", d[2] == 0x7FFF0000u);
+    T2AudioWidenPcmToS32(s24, d, 2, 24);
+    check("24-bit -1 -> 0xFFFFFF00", d[0] == 0xFFFFFF00u);
+    check("24-bit 0x123456 -> 0x12345600", d[1] == 0x12345600u);
+    T2AudioWidenPcmToS32(s32, d, 1, 32);
+    check("32-bit little-endian copy", d[0] == 0x12345678u);
+    d[0] = 5;
+    T2AudioWidenPcmToS32(s32, d, 1, 20);
+    check("unsupported size -> silence", d[0] == 0);
+}
+
 int main(void)
 {
     test_align();
@@ -301,6 +324,7 @@ int main(void)
     test_calculate_copy_chunk();
     test_ticks_to_frames();
     test_convert_samples();
+    test_widen_pcm();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

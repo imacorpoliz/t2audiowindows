@@ -156,6 +156,40 @@ PASS: «Устройство снова на AppleAudio» [device is back on App
 
 ---
 
+## ▶ NEXT RUN, part 2 — new features (only after part 1 passed; all off by default)
+
+Claude added (2026-10-28, commits a2c6227 → the latest `diagnostics`), **source only, CI green, never run on hardware**:
+* **headphone endpoint** "T2 Audio Headphones" (`HeadphoneOutput`), with jack state reported to Windows (`JackEvents`) and speaker auto-mute;
+* **built-in microphones** "T2 Audio Microphone" (`MicInput`): a host ring registered with the T2 (writes BufferStruct, sends msg 18 — a **new kind of hardware access**), capture with kaiT2en's mic DSP;
+* **resume after sleep** (`ResumeAfterSleep`);
+* **16/24-bit formats** (`ExtraFormats`).
+
+The installer switches them: `.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1` (sets HeadphoneOutput, JackEvents, HeadphoneAutoMute), `-Microphone 1`, `-ResumeAfterSleep 1`, `-ExtraFormats 1`; `0` turns each off; `-Action Status` lists them. The installer's output: «Наушники (выход 3,5 мм, автопереключение)» [headphones], «Встроенные микрофоны» [built-in microphones], «Звук после сна без перезапуска» [sound after sleep without restart], «Форматы 16/24 бит» [16/24-bit formats], «вкл/выкл» [on/off].
+
+Rebuild 1.0.13.0 from the latest `diagnostics` (the INF gained interfaces, so the package must be re-signed and reinstalled: `-Action Install -Preset macos`). Check first that part 1 still passes with everything off (speakers play, reboot OK). **One feature at a time; DbgView from the start; on any BSOD: stop, minidump, `-Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0`, report.**
+
+**P1. Headphones** (sound allowed; **headphones on the desk first, not on the ears**, volume 10 %).
+1. `-Action Features -Headphones 1`. Log: `headphone endpoint registered`, `headphone stream 0x26: shift=8 …`, `audio path ENABLED for headphones 0x25 ring 0x190000+0x20800`, `jack poll started`. If the stream line says `format unsupported` or the endpoint is NOT registered: record, turn it off, go on with P2.
+2. Windows Sound settings: a new output «T2 Audio Headphones». With headphones unplugged it should show as unplugged/hidden (only if the jack poll sees the jack, step 4f); plugged in it appears. **If it stays "unplugged" with the headphones in** (the `'jack'` read does not follow the jack): `Set-ItemProperty $p JackEvents 0 -Type DWord` and restart the device — the endpoint is then always shown (no auto-switch, no auto-mute) — record it.
+3. Plug in, select it, play a 1 kHz tone at 10 % (`tools\Test-WasapiTone.ps1` on that device, or any music). Is it audible in the headphones, both sides? Speakers silent (auto-mute)? Then music at a comfortable level: owner verdict (quality, noise, crackle).
+4. Unplug while playing: speakers take over (Windows switches the default back) within ~1–2 s; plug in again.
+5. `run summary` for the headphone stream (reAims, gaps, maxCopyUs); `jack change signalled to Windows` lines.
+
+**P2. Microphones** (no sound needed; **this writes BufferStruct** — the owner must allow this step).
+1. `-Action Features -Microphone 1`. Log: `microphone endpoint registered`, `mic stream 0x22: 3 ch S24, latency=…`, `mic ring registered: pa=0x… size=0x30C00 (16640 frames)`, `mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x21: 0x00000000`, `audio path ENABLED for microphones`. If msg 18 fails: record the status, turn it off, stop P2.
+2. Sound settings → Input: «T2 Audio Microphone». Speak: does the level meter move? Record 10 s with the Voice Recorder app (or `tools\Test-WasapiRender.ps1` if it can capture), play it back on the speakers. Owner verdict: loud enough? noise? hum? Is the voice clear?
+3. `mic run summary: captured=… silent=… reAims=… maxCopyUs=…`: `captured` should be close to 48000 per second of recording, `silent` small (only the first ~20 ms), `reAims` 0–1.
+4. If the level is far too low or too loud: try `MicDsp=0` (raw mic 0, expected very quiet) for comparison and report both.
+5. Disable/enable the device in Device Manager once (tests STOP_IO → clear entry → free order): no BSOD; log `mic ring released`, then registered again.
+
+**P3. Resume after sleep** (only if the owner allows sleep). `-Action Features -ResumeAfterSleep 1`. Play music, sleep 1–2 min, wake **without touching the player**. Log: `resume after sleep: restarting speaker I/O`, `status=0x00000000`; does the sound come back by itself within ~1 s? With the microphone on as well: `D0: mic ranges re-sent: 0x00000000`. Compare once with `ResumeAfterSleep 0` (expected: silence until the player is restarted).
+
+**P4. 16/24-bit** (`-Action Features -ExtraFormats 1`). Sound settings → T2 speakers → Advanced: the list should now offer 16 and 24 bit. Pick "24 bit, 48000 Hz", play music: same sound as 32-bit? Then back to the default (32 bit). Shared-mode playback must be unaffected.
+
+Report: `docs/logs/EXCERPT_*_part2.md` with the lines above, the owner's verdicts (verbatim, translated), an entry in `CURRENT_STATE.md`, a PR into `diagnostics`. At the end the owner decides which features stay on.
+
+---
+
 ## 0. State (as of 2026-10-28 evening; the current state is in the block above and in `docs/CURRENT_STATE.md`)
 
 * The main branch is **`diagnostics`** (the default branch). CI (`.github/workflows/build.yml`): the driver builds with the WDK (Release x64); the host tests pass on MSVC, gcc and clang.
