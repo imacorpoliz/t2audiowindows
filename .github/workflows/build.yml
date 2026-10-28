@@ -28,7 +28,7 @@ jobs:
         run: |
           set -e
           for cc in gcc clang; do
-            for t in BceProtocolLogicTest T2AudioBufferLogicTest T2AudioSpeakerLogicTest T2AudioPipelineTest; do
+            for t in BceProtocolLogicTest T2AudioBufferLogicTest T2AudioSpeakerLogicTest T2AudioPipelineTest T2AudioDspTest; do
               $cc -Wall -Wextra -Werror -o "$t-$cc" "tests/$t.c" -lm
               "./$t-$cc"
             done
@@ -85,6 +85,8 @@ jobs:
           tests\T2AudioSpeakerLogicTest.exe || exit /b 1
           cl /nologo /W4 /Fe:tests\T2AudioPipelineTest.exe tests\T2AudioPipelineTest.c || exit /b 1
           tests\T2AudioPipelineTest.exe || exit /b 1
+          cl /nologo /W4 /Fe:tests\T2AudioDspTest.exe tests\T2AudioDspTest.c || exit /b 1
+          tests\T2AudioDspTest.exe || exit /b 1
 
       # The WASAPI tools embed C# in a here-string compiled by Add-Type at run
       # time; compile it here (Windows PowerShell 5.1, as on the test machine)

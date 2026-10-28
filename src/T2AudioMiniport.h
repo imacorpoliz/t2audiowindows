@@ -134,6 +134,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG TweeterMode;
     ULONG OutputAttenuation;
     BOOLEAN ClockRateTracking;
+    // SpeakerDsp (Parameters\SpeakerDsp, default 0 = plain path): 1 runs the
+    // stereo path through T2AudioDsp.h (KAIT2EN 16_1 linear chain: sub-bass
+    // high-pass, crosstalk cancellation, EQ, per-driver crossover, limiter)
+    // instead of woofers full-range + tweeters high-passed. Not hardware-tested.
+    BOOLEAN SpeakerDsp;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

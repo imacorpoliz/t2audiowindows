@@ -30,7 +30,7 @@ The 16-inch MacBook Pro is renowned for class-leading laptop acoustics, achieved
 ### 1. First Audible Playback (Stage E — first sound achieved 2026-10-28)
 * **Result:** the owner heard sound from the internal speakers through this driver (build 1.0.8.0, `docs/logs/EXCERPT_20261028_143928.md`): flat, sometimes crackling, not loud.
 * **Since then (source only):** start-of-stream gap fixed (wrapped `hostTime` after > 25.6 h uptime), per-run copy-timing counters, `-Listen` mode in `tools/T2Audio-TestAgent.ps1`, default attenuation −6 dB. Analysis: first entry of `docs/CURRENT_STATE.md`.
-* **Next:** owner listening session on the new build (`GEMINI_PROMPT.md`), then DSP/EQ (Stage F).
+* **Next:** owner listening session on the new build (`GEMINI_PROMPT.md`), including the in-driver speaker DSP (`Parameters\SpeakerDsp=1`, Stage F start: KAIT2EN 16_1 linear chain + limiter, not yet hardware-tested).
 
 ### 2. Acoustic EQ & Deep Bass Tuning (macOS DSP Parity)
 * **The Reality of Laptop Acoustics:** The MacBook Pro speaker enclosures are physically compact. macOS achieves its signature deep, punchy low-end via heavy DSP equalization: boosting frequencies below 100 Hz while notching out chassis resonances of the unibody aluminum casing. Without EQ, raw speakers sound thin and flat.

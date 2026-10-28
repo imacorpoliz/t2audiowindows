@@ -1,6 +1,7 @@
 #include "T2AudioMiniport.h"
 #include "T2AudioBufferLogic.h"
 #include "T2AudioSpeakerLogic.h"
+#include "T2AudioDsp.h"
 #include <intrin.h>
 
 // How often the system-memory WaveRT buffer is mirrored into the BAR1 hardware
@@ -76,6 +77,8 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG SkipEvents;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
+    // Speaker DSP state (context->SpeakerDsp); reset with SpeakerState.
+    T2DSP_STATE Dsp;
     KTIMER CopyTimer;
     KDPC CopyDpc;
     BOOLEAN TimerActive;
@@ -353,7 +356,16 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             // apply the OutputAttenuation safety shift (two arithmetic shifts
             // compose, so the raw path adds it to the sample shift). Frames
             // are 4-byte aligned in both rings.
-            if (instance->Channels == 2) {
+            if (instance->Channels == 2 && context->SpeakerDsp) {
+                // KAIT2EN 16_1 linear chain + limiter (T2AudioDsp.h).
+                T2DspRenderStereoToSpeakers(
+                    (volatile unsigned int *)(hwBufferBase + dstOffset),
+                    (const unsigned int *)(sourceBase + srcOffset),
+                    chunkFrames,
+                    context->SpeakerSampleShift,
+                    context->OutputAttenuation,
+                    &instance->Dsp);
+            } else if (instance->Channels == 2) {
                 T2AudioRenderStereoToSpeakers(
                     (volatile unsigned int *)(hwBufferBase + dstOffset),
                     (const unsigned int *)(sourceBase + srcOffset),
@@ -714,6 +726,7 @@ T2AudioStreamSetState(
                                                       (ULONG64)qpcFreq.QuadPart);
                 if (instance->LastCopiedFrame == 0) {
                     T2AudioSpeakerStateReset(&instance->SpeakerState);
+                    T2DspReset(&instance->Dsp);
                 }
                 instance->State = KSSTATE_RUN;
                 KeReleaseSpinLock(&instance->StreamLock, oldIrql);
@@ -749,10 +762,11 @@ T2AudioStreamSetState(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u dspLimited=%lu\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
-                 instance->CopyGapsOverLead, instance->SkipEvents));
+                 instance->CopyGapsOverLead, instance->SkipEvents,
+                 instance->Dsp.LimitedFrames));
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 
@@ -1079,6 +1093,7 @@ T2AudioCreateStream(
     instance->BytesPerFrame = channels * 4u;
     instance->DestOffset = T2AUDIO_LEAD_FRAMES;
     T2AudioSpeakerStateReset(&instance->SpeakerState);
+    T2DspReset(&instance->Dsp);
     instance->State = KSSTATE_STOP;
     // The stream uses PortStream until it is destroyed (FreeAudioBuffer and the
     // final Release), so hold a reference for its lifetime.
