@@ -5,6 +5,13 @@
 **Master Handover Guide**: See [`docs/AGENT_HANDOVER_GUIDE.md`](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (night): session summary, layout tooling (source only, not hardware-tested)
+
+- Full list of findings, changes, rollbacks and open items: [`docs/REVIEW_20261028.md`](REVIEW_20261028.md). Step-by-step for the next hardware session: "▶ Next run" block at the top of `GEMINI.md`.
+- `Test-WasapiTone.ps1 -Channel` / agent `-ToneChannel`: single-channel tone for the speaker-layout check; raw tweeters (2/5) refuse < 1 kHz.
+- First WDK code-analysis report (CI, report only): no driver change made for it; assessment in the review §1.7.
+- CI green on `e304854` (driver with `ClockRateTracking`, default off) and later commits.
+
 ### 2026-10-28 (late): clock-drift defect found by simulation; rate tracking prepared (host tests; driver path behind a default-off flag)
 
 - **New test `tests/T2AudioPipelineTest.c`:** host simulation of the whole path (client ring -> 2 ms copy DPC -> 16,640-frame BAR0 ring -> T2 reader on its own clock, one `UPDATE_TIMESTAMP` per lap, 2 ms delivery). It mirrors `T2AudioStreamAdvanceLocked` / `T2AudioStreamFollowT2ClockLocked` and must be kept in sync with `src/WaveRTStream.c`. Runs in CI (gcc, clang, MSVC).

@@ -4,7 +4,8 @@
 > Перед работой прочитай:
 > 1. [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md) — как устроен драйвер (железо, протокол, тракт, стадии, лог);
 > 2. последнюю датированную запись в [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) — единственный авторитетный статус;
-> 3. [`docs/analysis/RE_speaker_layout_and_clock.md`](docs/analysis/RE_speaker_layout_and_clock.md) — раскладка динамиков и часы T2.
+> 3. [`docs/analysis/RE_speaker_layout_and_clock.md`](docs/analysis/RE_speaker_layout_and_clock.md) — раскладка динамиков и часы T2;
+> 4. [`docs/REVIEW_20261028.md`](docs/REVIEW_20261028.md) — что изменилось после этапа D, найденные проблемы и быстрые откаты.
 
 ---
 
@@ -380,7 +381,7 @@ foreach ($c in 0..5) {
 - [ ] **S2. Упаковка в CI (D4).** Копировать `.sys` в `packaging/`, проставлять `DriverVer`, прогонять `InfVerif`, собирать неподписанный каталог (как `BuildT2TouchId.yml` у osaul4ik). Секреты в CI не добавлять.
 - [ ] **S3. INF: значения по умолчанию.** Записать `OutputAttenuation=3` и `TweeterMode=1` в `Parameters` через `AddReg`, чтобы они были видны и редактируемы в реестре. Сейчас это только значения по умолчанию в коде.
 - [ ] **S5. Driver Verifier** (стандартные флаги + IRQL checking) на стадиях 1–3, беззвучно, только с разрешения владельца. После прогона Verifier выключить (`verifier /reset`, перезагрузка) и записать результат.
-- [ ] **S6. Разобрать отчёты CI с флагом report-only** (PSScriptAnalyzer, InfVerif, анализ кода WDK) в логе Actions. Исправить найденное отдельными PR, затем убрать `continue-on-error`.
+- [ ] **S6. Разобрать отчёты CI с флагом report-only** (PSScriptAnalyzer, InfVerif, анализ кода WDK) в логе Actions. Первый разбор анализа кода — таблица в `docs/REVIEW_20261028.md` §1.7. Исправить найденное отдельными PR, затем убрать `continue-on-error`.
 - [ ] **S4. Удалить устаревший hardware-MDL путь** (`T2AudioCreateSpeakerMdl`, `MdlVariant`, `tools/Test-MdlVariants.ps1`): буфер WaveRT давно живёт в системной памяти. Только если CI остаётся зелёным, без изменения поведения.
 
 **Инструменты:**
