@@ -5,6 +5,19 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (18:43 hardware test): Listening Session #2 — Virtual Bass Verified on Hardware (`SpeakerDsp=2`, PROVEN ON HARDWARE)
+
+- **Test Setup:** Build 1.0.10.0 (SYS SHA256: `7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB`). `SpeakerDsp=2` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass harmonics synthesis), `DspGainDb=6`, `OutputAttenuation=1` (-6 dB default).
+- **Acoustic Milestone (Owner Report):**
+  - Owner auditioned music in Windows with `SpeakerDsp=2`:
+    *«хороший звук, только тихий немного, басс появился, но как будто еще не совсем так как на макос»*.
+  - **Bass has officially appeared on Windows!** Virtual bass synthesized harmonics (200–450 Hz) from low frequencies (<150 Hz), making bass immediately audible where un-EQ'd drivers were previously perceived as completely flat/treble-only.
+  - Sound quality confirmed "good" — no harsh distortion, clicks, or popping.
+  - "A bit quiet" perfectly validates Claude's loudness analysis (level 2 with +6 dB makeup is ~5.6 dB softer than un-EQ'd plain audio); `SpeakerDsp=3` (4-band compressor) and higher `DspGainDb` (up to 12 dB) will provide increased loudness.
+- **Copy & Clock Stability (PASS):** `maxCopyGapUs = 3024` (3.0 ms), `gaps>10ms = 0`, `gaps>lead = 0`, `skips = 0`, `dspLimited = 0`. Exactly 1 re-aim at start of each stream. Zero buffer underruns.
+- **Safe State (PASS):** Device safely recovered and re-bound to official `AppleAudio.sys` (`oem16.inf`, `CM_PROB_NONE`, Status OK). Volatile test session removed, registry parameters cleaned.
+- See detailed log in [docs/logs/EXCERPT_20261028_184300.md](logs/EXCERPT_20261028_184300.md).
+
 ### 2026-10-28 (Claude): analysis of the 18:14 speaker check (1.0.10.0)
 
 Based on `docs/logs/EXCERPT_20261028_181400.md`:
