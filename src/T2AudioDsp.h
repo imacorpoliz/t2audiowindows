@@ -399,7 +399,7 @@ T2DspXtc(T2DSP_STATE *S, long long *L, long long *R)
     *R = T2DspSat(midDelayed - side);
 }
 
-// Peak limiter on Count linked samples (full scale 2^31, |x| < 2^35): scales
+// Peak limiter on Count linked samples (full scale 2^31, |x| < 2^40): scales
 // them by the shared gain (Q30) kept in *Gain.
 static __inline void
 T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned long *Limited)
@@ -431,7 +431,8 @@ T2DspLimit(long long *Gain, long long *Samples, unsigned int Count, unsigned lon
 // into the 6-channel ring through the DSP. Level is T2DSP_LEVEL_LINEAR,
 // T2DSP_LEVEL_VIRTBASS, T2DSP_LEVEL_COMP (virtual bass + compressor) or
 // T2DSP_LEVEL_BUZZ (all of it + the woofer buzz compressor). GainDb is the
-// make-up gain (0..12 dB) in front of the limiter. AttenuationShift is the same safety cut as the
+// make-up gain (0..12 dB) in front of the limiter; TweeterTrimDb (0..12 dB)
+// lifts the tweeters only. AttenuationShift is the same safety cut as the
 // plain path (applied to the input); Shift converts to the ring word (8 for
 // S24_LE).
 static __inline void
@@ -442,10 +443,14 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
                             unsigned int AttenuationShift,
                             unsigned int Level,
                             unsigned int GainDb,
+                            unsigned int TweeterTrimDb,
                             T2DSP_STATE *S)
 {
     unsigned long f;
     long long gain = T2DspGainFromDb(GainDb);
+    // Tweeter trim: extra 0..12 dB on the tweeters only, on top of the
+    // make-up gain (the chain leaves them ~13 dB under the woofers).
+    long long tgain = T2DspSar(gain * T2DspGainFromDb(TweeterTrimDb), T2DSP_Q);
 
     AttenuationShift = T2AudioClampAttenuation(AttenuationShift);
     for (f = 0; f < Frames; f++) {
@@ -485,9 +490,19 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
         }
         for (side = 0; side < 2; side++) {
             // Back to full scale (2^31) for the limiter and the ring, with
-            // the make-up gain (|w| < 2^31 * 4 after it; the limiter takes < 2^35).
+            // the make-up gain and, on the tweeters, the trim. Gains are
+            // < 2^30 (woofer) and < 2^32 (tweeter, Q28); the tweeter is first
+            // held to +12 dB over full scale (2^29 internal), so both products
+            // stay below 2^62 and the results below 2^38 (limiter: < 2^40).
+            long long tc = t[side];
+
+            if (tc > (1ll << 29)) {
+                tc = 1ll << 29;
+            } else if (tc < -(1ll << 29)) {
+                tc = -(1ll << 29);
+            }
             w[side] = T2DspSar(w[side] * gain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
-            t[side] = T2DspSar(t[side] * gain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
+            t[side] = T2DspSar(tc * tgain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
         }
         lw[0] = w[0];
         rw[0] = w[1];

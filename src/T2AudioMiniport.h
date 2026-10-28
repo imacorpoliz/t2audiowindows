@@ -145,6 +145,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // DspGainDb (Parameters\DspGainDb, default 6, 0..12): make-up gain after
     // the speaker DSP, in front of its -1 dBFS limiter (T2AudioDsp.h).
     ULONG DspGainDb;
+    // TweeterTrimDb (Parameters\TweeterTrimDb, default 0, 0..12): extra gain
+    // on the tweeters in the DSP path only (brightness / "air").
+    ULONG TweeterTrimDb;
     BOOLEAN RawSpeakerChannels;
     BOOLEAN ForceSystemBuffer;
     ULONG MdlVariant;

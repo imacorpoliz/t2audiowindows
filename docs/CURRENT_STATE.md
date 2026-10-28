@@ -5,6 +5,22 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-28 (Claude): analysis of Listening Session #2 (SpeakerDsp=2); tweeter trim (source only, not hardware-tested)
+
+Based on `docs/logs/EXCERPT_20261028_184300.md` and the owner: "good sound, a bit quiet, the bass appeared, but not quite like macOS"; later also "as if the sample rate is a little too low".
+
+- **Confirmed on hardware (1.0.10.0, `SpeakerDsp=2`):** the in-driver DSP works on real music. The bass that was absent in the plain path is now heard (woofer EQ plus virtual bass). The sound is clean, the limiter idle (`dspLimited=0`), copy timing clean (3.0 ms max gap), one re-aim per stream.
+- **Corrections to the excerpt's analysis:** XTC (crosstalk cancellation) is already part of levels 1–4, so it is not what is missing compared with macOS. The level-3 compressor adds loudness and density, but it does not change the treble balance.
+- **"Sample rate a bit low":** the whole path is 48 kHz (endpoint, T2 ring `pft` 48000, DSP coefficients at 48 kHz) with 24-bit output; the Windows engine resamples 44.1 kHz content to 48 kHz. A real rate problem would sound pitch-shifted or aliased, not "slightly dull". More likely the treble balance: the KAIT2EN chain keeps the tweeters ~13 dB under the woofers, and the missing "air" is heard as low resolution.
+- **Added `Parameters\TweeterTrimDb`** (0–12 dB, default 0): extra gain on the tweeters in the DSP path only, in front of the limiter. Overflow-safe at +12 dB make-up plus +12 dB trim with full-scale input (tested, also under UBSan). Logged in `mode parameters`.
+- **Next listening (owner):**
+  1. `SpeakerDsp=3`.
+  2. `DspGainDb=9`, then 12, for loudness.
+  3. `TweeterTrimDb=3`, then 6, for brightness.
+  4. The best combination for 10 minutes.
+
+  This needs build **1.0.11.0** (`TweeterTrimDb` is new).
+
 ### 2026-10-28 (18:43 hardware test): Listening Session #2 — Virtual Bass Verified on Hardware (`SpeakerDsp=2`, PROVEN ON HARDWARE)
 
 - **Test Setup:** Build 1.0.10.0 (SYS SHA256: `7D78BC1D82E9BC65BAC944C43C84ECFD0F87D91A8F0F752ACBF5901FEE2A87FB`). `SpeakerDsp=2` (KAIT2EN 16_1 linear chain + Bankstown Virtual Bass harmonics synthesis), `DspGainDb=6`, `OutputAttenuation=1` (-6 dB default).
