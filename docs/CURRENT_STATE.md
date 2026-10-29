@@ -31,6 +31,11 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): colourful README, step-by-step user guide for the release
+
+- **README** redesigned (owner: «сделай readme красочнее»): SVG banner (`assets/banner.svg`, rendered and checked), badges (CI, beta, model, Windows, WaveRT, licence), feature tables with status icons, a quick start, a mermaid diagram of the sound chain, credits table, licence. Content unchanged in substance and still honest: beta, one machine, what does not work.
+- **New `docs/GUIDE.md`** (owner: «подготовь гайд к будущему установщику»): for end users installing from a release zip — before-you-start checklist (model, BitLocker key, restore point), turning Secure Boot off in the Startup Security Utility, unblocking the downloaded files and the per-window execution policy, `-Action Prepare` + restart, `-Action Install` with the expected English messages (certificate prompt, `INSTALL`), picking the output, optional features (headphones switch manually for now), presets, keeping it working (Windows Update, crash guard), uninstall incl. turning test mode and Secure Boot back, troubleshooting table, FAQ. The messages quoted are the installer's actual strings.
+
 ### 2026-10-29 (Claude): licence GPL-3.0-or-later; installer prepares test mode and can turn it off
 
 The owner agreed («делай») to the three proposals after deciding against a Microsoft signature:

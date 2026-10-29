@@ -1,67 +1,102 @@
-# T2AudioPort — Apple T2 audio driver for Windows
+<p align="center">
+  <img src="assets/banner.svg" alt="T2AudioPort — Apple T2 audio for Windows" width="100%">
+</p>
 
-[![Build & Test](https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml/badge.svg?branch=diagnostics)](https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml)
+<p align="center">
+  <a href="https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml"><img src="https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml/badge.svg?branch=diagnostics" alt="Build &amp; Test"></a>
+  <img src="https://img.shields.io/badge/status-beta-orange" alt="Status: beta">
+  <img src="https://img.shields.io/badge/Mac-MacBookPro16%2C1-lightgrey?logo=apple" alt="MacBookPro16,1">
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0078D6?logo=windows" alt="Windows 10/11 x64">
+  <img src="https://img.shields.io/badge/driver-WaveRT%20%2F%20PortCls-blue" alt="WaveRT / PortCls">
+  <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-green" alt="GPL-3.0-or-later">
+</p>
 
-A Windows (WaveRT / PortCls) driver for the audio of the **MacBook Pro 16" 2019 (MacBookPro16,1)** with the Apple T2 chip, as an alternative to Apple's Boot Camp driver (`AppleAudio.sys`). It brings the speaker processing of the Linux project [KAIT2EN](https://github.com/kaiT2en/KaiT2en-Fedora) to Windows: equaliser for the six speakers, crosstalk cancellation, virtual bass, multiband compressor and limiter.
+<p align="center">
+  <b>A Windows audio driver for the MacBook Pro 16" (2019) with the Apple T2 chip</b><br>
+  an alternative to Apple's Boot Camp driver, with the speaker sound of the Linux project <a href="https://github.com/kaiT2en/KaiT2en-Fedora">KAIT2EN</a>
+</p>
 
-**Status: beta, one machine.** Everything below was tested on a single MacBookPro16,1 by the project owner. Other T2 Macs are not supported.
+<p align="center">
+  <a href="docs/GUIDE.md">🚀 Install guide</a> ·
+  <a href="docs/INSTALL.md">📖 Reference</a> ·
+  <a href="docs/ROADMAP.md">🗺️ Roadmap</a> ·
+  <a href="docs/CURRENT_STATE.md">📋 Changelog &amp; tests</a>
+</p>
 
-## What works (verified on hardware)
+---
 
-| Feature | Since | Notes |
-|---|---|---|
-| Internal speakers, stereo 48 kHz | 1.0.8 | All six speakers, through the KAIT2EN 16_1 processing; the default `macos` preset was approved by ear |
-| Sound presets and tone controls | 1.0.12 | 13 presets, bass / treble / clarity ±12 dB; only `macos` is owner-approved |
-| Start on every boot, crash guard | 1.0.12 | After two unclean ends in a row the driver stops loading until reset |
-| 3.5 mm headphones (separate output) | 1.0.13 | Plays; **no automatic switching yet** (see below) |
-| Built-in microphone array (mono) | 1.0.13 | Records speech; simple KAIT2EN mic processing, no noise suppression |
-| Sound returns after sleep | 1.0.13 | `ResumeAfterSleep` |
-| 16/24-bit for exclusive-mode apps | 1.0.13 | `ExtraFormats` |
+> [!NOTE]
+> **Beta, one machine.** Everything marked ✅ was tested on a single MacBookPro16,1 by the project owner. Other T2 Macs are not supported yet.
 
-## What does not work yet
+## ✨ What works
 
-* **Automatic headphone ↔ speaker switching.** The T2 does not report the jack the way the driver reads it; you pick the output in Windows by hand. Under investigation.
-* Headset microphone on the 3.5 mm jack.
-* Hardware volume (Windows' software volume is used; it works).
-* 44.1 / 96 kHz (48 kHz only; Windows converts in shared mode).
-* Any Mac other than MacBookPro16,1.
-* A Microsoft signature: the driver is **test-signed, and will stay so** (the owner decided not to pursue a Microsoft signature). You need `testsigning` on and Secure Boot off; Windows shows a "Test Mode" mark on the desktop.
+| | Feature | Since | Notes |
+|:-:|---|:-:|---|
+| ✅ | 🔊 **Six speakers**, stereo 48 kHz | 1.0.8 | KAIT2EN 16_1 processing: EQ per speaker, crosstalk cancellation, virtual bass, multiband compressor, limiter |
+| ✅ | 🎚️ **Presets and tone** | 1.0.12 | 13 presets, bass / treble / clarity ±12 dB; `macos` is the owner-approved default |
+| ✅ | 🛡️ **Starts with Windows**, crash guard | 1.0.12 | Two unclean ends in a row and the driver steps aside until you reset it |
+| ✅ | 🎧 **Headphones** (3.5 mm) | 1.0.13 | Separate output, −12 dB safety cut |
+| ✅ | 🎙️ **Built-in microphones** | 1.0.13 | Mono array, KAIT2EN mic processing (no noise suppression) |
+| ✅ | 🌙 **Sleep and wake** | 1.0.13 | Playback continues after wake |
+| ✅ | 🎛️ **16/24-bit** for exclusive-mode apps | 1.0.13 | Shared mode stays 32-bit |
 
-## Install
+## 🚧 Not yet
 
-Requirements: MacBookPro16,1 with Windows 10/11 x64 and Boot Camp drivers; Secure Boot off (macOS Recovery → Startup Security Utility); a signed package (release zip or your own build).
+| | What | Why |
+|:-:|---|---|
+| ⏳ | Automatic headphone ↔ speaker switching | The T2 does not report the jack the way we read it — under investigation; pick the output by hand meanwhile |
+| ⏳ | Headset microphone | Comes after the jack |
+| ⏳ | Hardware volume | Windows' software volume works fine meanwhile |
+| ⏳ | 44.1 / 96 kHz | 48 kHz only; Windows converts in shared mode |
+| ⏳ | Other T2 Macs | KAIT2EN has profiles for 12 models, each needs a tester |
+| 🚫 | Microsoft signature | Decided against: the driver stays **test-signed** (test mode on, Secure Boot off) |
+
+## 🚀 Quick start
 
 ```powershell
-# PowerShell as Administrator, in the package folder
-.\tools\T2Audio-Setup.ps1 -Action Prepare     # once: turns test mode on, then reboot
-.\tools\T2Audio-Setup.ps1                     # menu
+# PowerShell as Administrator, in the unpacked release folder
+.\tools\T2Audio-Setup.ps1 -Action Prepare                        # once: test mode, then reboot
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 .\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1 -ResumeAfterSleep 1
-.\tools\T2Audio-Setup.ps1 -Action Uninstall   # back to Apple's driver
 ```
 
-Details, presets and troubleshooting: [`docs/INSTALL.md`](docs/INSTALL.md).
+Step by step, including turning Secure Boot off on the Mac: **[docs/GUIDE.md](docs/GUIDE.md)**. Back to Apple's driver at any time: `-Action Uninstall`.
 
-## Where everything comes from
+## 🎛️ How the sound is made
 
-* **BCE protocol, BufferStruct layout, speaker layout, clock handling:** the Linux driver `modules/t2bce_audio` of [KAIT2EN](https://github.com/kaiT2en/KaiT2en-Fedora) (earlier [linux-t2](https://github.com/kekrby/linux-t2)). The Windows code is new, but the protocol knowledge is theirs.
-* **Speaker and microphone processing:** coefficients generated from KAIT2EN's `dsp/profiles/16_1` (`graph.json`, `XTC-side-48k.wav`, `mic.json`) by `tools/dsp/gen_kait2en_dsp.py`. The fixed-point engine (`src/T2AudioDsp.h`) is original code.
-* **Virtual bass:** the algorithm of [bankstown](https://github.com/chadmed/bankstown) (MIT), re-implemented in fixed point.
-* **Compressor and autogain options:** modelled on the defaults of [lsp-plugins](https://lsp-plug.in/) `mb_compressor` / `autogain` as used by KAIT2EN; no lsp code.
-* **Windows-specific behaviour** (how AppleUSBVHCI delivers T2 messages, the microphone registration format, the sample-rate property, power handling): reverse engineering of Apple's `AppleAudio.sys` and `AppleUSBVHCI.sys` for interoperability, documented in [`docs/analysis/`](docs/analysis/).
-* **How it was built:** the code was written by Claude (Anthropic), builds and hardware tests were run by Gemini (Google) on the owner's Mac, and the owner made every decision and every listening judgement. The full history is in [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md).
+```mermaid
+flowchart LR
+    A[Windows audio<br>stereo 48 kHz] --> B[Tone controls<br>and autogain]
+    B --> C[Virtual bass]
+    C --> D[EQ + crosstalk<br>cancellation]
+    D --> E[Multiband<br>compressor]
+    E --> F[Crossover + EQ<br>per speaker]
+    F --> G[Lookahead<br>limiter]
+    G --> H((6 speakers<br>via the T2))
+```
 
-Full credits: [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+Everything runs inside the driver, in fixed point, about 50 µs per 2 ms of audio.
 
-## Licence
+## 🙏 Where everything comes from
 
-**GPL-3.0-or-later** ([`LICENSE`](LICENSE)). The driver compiles DSP tables derived from KAIT2EN's GPL-3.0-or-later profile, whose attribution term (GPL-3.0 section 7b) must be kept: "Speaker and microphone DSP from the KAIT2EN 16_1 profile, Copyright (C) 2026 André Eikmeyer". The virtual bass follows bankstown (MIT, Copyright (C) 2023 James Calligeros). Details: [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+| Part | Source |
+|---|---|
+| T2 protocol, buffer layout, speaker layout, clock | Linux driver `modules/t2bce_audio` of [KAIT2EN](https://github.com/kaiT2en/KaiT2en-Fedora) (earlier [linux-t2](https://github.com/kekrby/linux-t2)) — our Windows code is new, the knowledge is theirs |
+| Speaker and microphone sound | KAIT2EN `dsp/profiles/16_1`, converted by `tools/dsp/gen_kait2en_dsp.py`; the fixed-point engine is ours |
+| Virtual bass | [bankstown](https://github.com/chadmed/bankstown) (MIT), re-implemented in fixed point |
+| Compressor / autogain options | modelled on [lsp-plugins](https://lsp-plug.in/) defaults as used by KAIT2EN (no lsp code) |
+| Windows-specific behaviour | reverse engineering of Apple's `AppleAudio.sys` / `AppleUSBVHCI.sys` for interoperability ([`docs/analysis/`](docs/analysis/)) |
+| The work itself | code by Claude (Anthropic), builds and hardware tests by Gemini (Google) on the owner's Mac, every decision and listening verdict by the owner |
 
-## For developers
+Full credits: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
-* [`docs/DRIVER_GUIDE.md`](docs/DRIVER_GUIDE.md) — how the driver works, every registry parameter, the log lines.
-* [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is left.
-* [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) — dated log of every change and hardware test.
-* [`GEMINI.md`](GEMINI.md) — build, signing and hardware test procedures.
+## ⚖️ Licence
 
-Build: Visual Studio 2022 + WDK, `msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64`. Host tests: `tests\*.c` (any C compiler, `-lm`). CI builds the driver and runs all tests on every push.
+**GPL-3.0-or-later** ([LICENSE](LICENSE)), because the driver contains DSP tables derived from KAIT2EN's GPL-3.0-or-later profile. Its attribution term (GPL-3.0 §7b) applies: *speaker and microphone DSP from the KAIT2EN 16_1 profile, Copyright (C) 2026 André Eikmeyer*. Virtual bass after bankstown, MIT, Copyright (C) 2023 James Calligeros.
+
+## 🛠️ For developers
+
+* [docs/DRIVER_GUIDE.md](docs/DRIVER_GUIDE.md) — architecture, every registry parameter, log lines
+* [docs/ROADMAP.md](docs/ROADMAP.md) — what is left · [GEMINI.md](GEMINI.md) — build, signing, hardware test procedures
+* Build: Visual Studio 2022 + WDK, `msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64`
+* Tests: `tests\*.c` with any C compiler (`-lm`); CI builds the driver and runs all tests on every push
