@@ -9,7 +9,8 @@
 #   packaging\T2AudioMiniport.inf / .sys / t2audiominiport.cat
 #   tools\T2Audio-Setup.ps1, tools\Restore-AppleAudioDriver.ps1
 #   certificate\<name>.cer          (only with -CertificatePath; public part only)
-#   README.md, INSTALL.md, THIRD_PARTY_LICENSES.md, LICENSE (if present)
+#   README.md, THIRD_PARTY_LICENSES.md, LICENSE (if present), assets\banner.svg
+#   docs\GUIDE.md, docs\INSTALL.md (README links keep working inside the zip)
 #   SHA256SUMS.txt
 #
 # The script refuses to package an unsigned .sys/.cat, a .sys whose INF
@@ -44,13 +45,15 @@ $version = $m.Matches[0].Groups[1].Value
 $name = "T2AudioPort-$version"
 $dest = Join-Path $OutDir $name
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-New-Item -ItemType Directory -Force -Path (Join-Path $dest 'packaging'), (Join-Path $dest 'tools') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $dest 'packaging'), (Join-Path $dest 'tools'),
+    (Join-Path $dest 'docs'), (Join-Path $dest 'assets') | Out-Null
 
 Copy-Item $inf, $sys, $cat -Destination (Join-Path $dest 'packaging')
 Copy-Item (Join-Path $root 'tools\T2Audio-Setup.ps1'), (Join-Path $root 'tools\Restore-AppleAudioDriver.ps1') `
     -Destination (Join-Path $dest 'tools')
 Copy-Item (Join-Path $root 'README.md'), (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Destination $dest
-Copy-Item (Join-Path $root 'docs\INSTALL.md') -Destination $dest
+Copy-Item (Join-Path $root 'docs\INSTALL.md'), (Join-Path $root 'docs\GUIDE.md') -Destination (Join-Path $dest 'docs')
+Copy-Item (Join-Path $root 'assets\banner.svg') -Destination (Join-Path $dest 'assets')
 $license = Join-Path $root 'LICENSE'
 if (Test-Path $license) { Copy-Item $license -Destination $dest } else { Write-Warning 'No LICENSE file: add one before a public release (see README, Licence).' }
 
