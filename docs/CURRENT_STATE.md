@@ -31,6 +31,10 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (owner decision): no Microsoft signature
+
+The owner: «подпись делать не буду» ("I won't do the signature"). The driver stays test-signed: users need `testsigning` on and Secure Boot off. ROADMAP 6.1 closed; README says so.
+
 ### 2026-10-29 (Claude): Windows Update guard in the installer; full plan for the remaining hardware work (GEMINI.md part 3)
 
 - **ROADMAP 2.7 (Windows Update may reinstall AppleAudio):** `-Action Status` now warns when the device runs AppleAudio while persistent mode is on. New opt-in `-Action UpdateGuard -Block 1|0` (menu 7): sets the documented Windows settings `ExcludeWUDriversInQualityUpdate=1` (policy) and `DriverSearching\SearchOrderConfig=0`, saving the previous values under the driver's Parameters key; `-Block 0` restores them. It affects driver updates for all devices, so it is never turned on by default. `-Action Uninstall` reminds about it.

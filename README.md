@@ -25,7 +25,7 @@ A Windows (WaveRT / PortCls) driver for the audio of the **MacBook Pro 16" 2019 
 * Hardware volume (Windows' software volume is used; it works).
 * 44.1 / 96 kHz (48 kHz only; Windows converts in shared mode).
 * Any Mac other than MacBookPro16,1.
-* A Microsoft signature: the driver is **test-signed**. You need `testsigning` on and Secure Boot off.
+* A Microsoft signature: the driver is **test-signed, and will stay so** (the owner decided not to pursue a Microsoft signature). You need `testsigning` on and Secure Boot off; Windows shows a "Test Mode" mark on the desktop.
 
 ## Install
 
