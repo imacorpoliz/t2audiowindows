@@ -31,6 +31,15 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): Gemini part 2 reviewed and merged — microphone and headphones work on hardware; open item: automatic headphone ↔ speaker switching
+
+Reviewed `docs/reports/CLAUDE_HANDOVER_PART2_FINAL.md`, `docs/analysis/RE_mic_capture.md`, `EXCERPT_20261029_part2a_mics.md`, `EXCERPT_20261029_part2b_mic_success.md` and Gemini's code (branch `gemini/part2-1.0.13.0`, merged into `diagnostics`).
+- **Proven on hardware (1.0.13.4):** speakers; **headphones** (START_IO/STOP_IO on 0x25, owner: «все работает шикарно» — "everything works great"); **microphone** (msg 18 in AppleAudio's form + `SET_PROPERTY 'nsrt'` 48000.0 + START_IO on 0x21; a WAV recording with speech, peak 0.177, RMS −37 dBFS; 141 486 frames in one run, clean STOP_IO; 0 crash-guard strikes); `ExtraFormats`.
+- **Gemini's code, reviewed:** (1) `'nsrt'` builder (66 bytes; offsets match the RE; the integer→double encoding is correct for 48000/44100/96000 and the generic path) — OK. (2) "Digital Mic" is not in BufferStruct on a cold boot; AppleAudio appends it (`FUN_140004558`) — OK, but the append had **no check that the new entry lies inside the mapped BAR1** (MapResources validated only the boot-time table): Claude added that check. (3) The D0 work item now runs only after a real power-down and never re-sends msg 18/`nsrt` while mic I/O is active — this fixed the second power-off (msg 18 during an active capture → 5 s BCE timeout → T2 watchdog). OK.
+- **Installer:** `-Action Features -Microphone 1` now sets `MicInput` and `MicStartIo` (proven).
+- **Still open:** automatic switching between headphones and speakers. The driver can already report jack changes to Windows, but has no working jack signal: the read stays 0 and no `PROPERTY_CHANGED` arrives, while AppleAudio's handler only *toggles* a flag on each notification (`RE_appleaudio_protocol.md` §4), i.e. AppleAudio does receive them. Next: GEMINI.md "▶ NEXT RUN, part 3" — J1 (the `JackProbeAll` experiment, never run so far) and J2 (RE of AppleAudio's listener payload, its `0x222020` jack handling and endpoint layout).
+- Not verified yet: resume after sleep (`ResumeAfterSleep=1` is set on the Mac but no sleep test was reported).
+
 ### 2026-10-29 (Gemini): Build 1.0.13.3 — P2-A Safe Capture Test PASS on hardware (`MicStartIo=0`)
 
 - **Step P2-A Safe Capture Test (PASS):**

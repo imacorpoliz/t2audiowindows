@@ -22,6 +22,8 @@ Goal: verify on hardware what Claude built for daily use:
 6) sleep (only with permission);
 7) T2Audio-Setup.ps1 -Action Uninstall: back to AppleAudio.
 
+PART 3 (current): GEMINI.md "▶ NEXT RUN, part 3" — rebuild 1.0.13.5 from diagnostics; J1 jack experiment (JackProbeAll=1, plug/unplug on speakers and on headphones, copy every "jack probe" and VHCI/PROPERTY_CHANGED line); J2 static RE of AppleAudio jack handling into docs/analysis/RE_jack.md (listener payload, 0x222020 handler, the toggled flags and callbacks, 0x14000330C, endpoint layout).
+
 PART 2 (only after part 1 passed, rebuild as 1.0.13.0): the "▶ NEXT RUN, part 2" block in GEMINI.md — P0 jack experiment (JackProbeAll=1, read-only, copy every "jack probe" line), P1 headphones (low volume, headphones on the desk first), P2 microphones REVISED after the power-off: first P2-RE (static analysis of AppleAudio msg 18 / buffer allocation / nsrt / capture start sequence, written to docs/analysis/RE_mic_capture.md), then P2-A with MicStartIo=0 (safe, records silence); P2-B with MicStartIo=1 only after Claude confirms the sequence and the owner accepts the risk, P3 resume after sleep (needs permission for sleep), P4 16/24-bit. Switch features with T2Audio-Setup.ps1 -Action Features; one at a time; on trouble switch all four off.
 
 The installer's UI is in Russian; GEMINI.md gives the English meaning of the strings to check.

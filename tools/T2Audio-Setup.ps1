@@ -588,7 +588,7 @@ function Invoke-Uninstall {
 # (динамики молчат, пока вставлены наушники).
 $FeatureParams = [ordered]@{
     Headphones       = @('HeadphoneOutput', 'JackEvents', 'HeadphoneAutoMute')
-    Microphone       = @('MicInput')
+    Microphone       = @('MicInput', 'MicStartIo')   # запись проверена на 1.0.13.4
     ResumeAfterSleep = @('ResumeAfterSleep')
     ExtraFormats     = @('ExtraFormats')
 }

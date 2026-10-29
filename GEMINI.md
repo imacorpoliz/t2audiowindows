@@ -156,6 +156,23 @@ PASS: «Устройство снова на AppleAudio» [device is back on App
 
 ---
 
+## ▶ NEXT RUN, part 3 — automatic headphone ↔ speaker switching (the only open owner complaint)
+
+Part 2 is done on 1.0.13.4 (speakers, headphones and the microphone work; owner: «все работает шикарно, только звук с наушников на динамики и обратно сам не переключается» — "everything works great, only the sound does not switch between headphones and speakers by itself"). The driver already tells Windows when the jack changes (`KSEVENT_PINCAPS_JACKINFOCHANGE` + jack description, `src/Topology.c`), but only once a jack read has been seen "plugged"; the read `'outp'/'jack'`, element 0, object 0x25 always returns 0, and no `PROPERTY_CHANGED` ever arrives. **We need the real jack signal.** Build 1.0.13.5 from the latest `diagnostics` first (it includes your part 2 code, plus a bounds check on the appended BufferStruct entry and `-Microphone 1` now also sets `MicStartIo`).
+
+**J1. Jack experiment on hardware (read-only, 5 min).** `JackEvents=1` is already set; add `Set-ItemProperty $p JackProbeAll 1 -Type DWord`, restart the device (`-Action Preset -Preset macos`). Then, with music playing on the **speakers**, plug and unplug the headphones 3 times (~5 s apart), and again while playing on the **Headphones** endpoint. Copy every `jack probe #… <name> (dev … obj …): value (was …)` line and every `VHCI message #… msg=…` / `PROPERTY_CHANGED` line, with the times of plugging. Then `JackProbeAll 0`.
+
+**J2. Static RE of AppleAudio.sys (REA/Ghidra), into `docs/analysis/RE_jack.md`:**
+1. `PROPERTY_LISTENER` (msg 11, sender `0x1400042C4`): the exact payload bytes (object id, element, scope, selector) for every call, which device ids it is sent to (0x25 "Codec Output"? 0x44 "Codec Input"? 0x39 "Speaker"?), and **when** (at start, after START_IO, after something else).
+2. The `0x222020` handler (`0x1400012C7`–`0x140001332`): which device ids/objects it accepts for `'outp'` and `'inpt'`; what the toggled flags `[g+0x38]`/`[g+0x39]` are read by, and what the callbacks `[g+0x08]([g+0x10])` / `[g+0x18]([g+0x20])` do (do they switch the render target between the speaker ring and the codec ring inside one endpoint? report a KS jack event? change a topology node?).
+3. `0x14000330C` (`GET_PROPERTY 'jack'` for `'outp'`): object, element, scope of the request; which device; how the reply is interpreted (offset, bit, u32 vs u8).
+4. How many render endpoints AppleAudio exposes on this Mac (one "Speakers" that follows the jack, or separate speakers + headphones) — the KS filter/pin descriptors and the topology pin categories/jack descriptions.
+5. Anything else AppleAudio sends to "Codec Output" (0x25) at start: SET_PROPERTY (which selectors), a listener on another selector (e.g. `'pfta'`, `'jkcn'`, `'jkst'`).
+
+With J1+J2 Claude will wire the real signal (a different address, the notification, or one endpoint that switches rings like AppleAudio).
+
+---
+
 ## ▶ NEXT RUN, part 2 — new features (only after part 1 passed; all off by default)
 
 Claude added (2026-10-28, commits a2c6227 → the latest `diagnostics`), **source only, CI green, never run on hardware**:

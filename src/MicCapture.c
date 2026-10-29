@@ -64,7 +64,12 @@ T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (index >= 0) {
         return index;
     }
-    if (Context->BufferStruct != NULL && Context->BufferStructDevices < T2AUDIO_MAX_DEVICES) {
+    if (Context->BufferStruct != NULL && Context->BufferStructDevices < T2AUDIO_MAX_DEVICES &&
+        Context->Bar1Mapped != NULL &&
+        (SIZE_T)((PUCHAR)&Context->BufferStruct->Devices[Context->BufferStructDevices + 1] -
+                 (PUCHAR)Context->Bar1Mapped) <= Context->Bar1Size) {
+        // (The new entry must lie inside the mapped BAR1: MapResources only
+        // validated the table up to the devices present at boot.)
         ULONG newIdx = Context->BufferStructDevices;
         volatile T2AUDIO_DEVICE_METADATA *device =
             (volatile T2AUDIO_DEVICE_METADATA *)&Context->BufferStruct->Devices[newIdx];
