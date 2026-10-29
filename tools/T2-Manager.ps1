@@ -1,7 +1,7 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    T2 Audio Manager & Rollback Utility
+    T2 Audio Control Center & Rollback Utility
     MacBook Pro 16" (2019, Apple T2) - Windows 10/11 x64
 #>
 
@@ -95,9 +95,9 @@ function Invoke-RestoreSnapshot {
         $drv = if ($content.DriverType) { $content.DriverType } else { "Unknown" }
         Write-Host ("   [{0}] {1} (Driver: {2}, Date: {3})" -f ($i + 1), $s.Name, $drv, $s.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor White
     }
-    Write-Host "   [0] Cancel (Отмена)" -ForegroundColor Gray
+    Write-Host "   [0] Cancel" -ForegroundColor Gray
     Write-Host ""
-    $pick = Read-Host "   Выберите снимок для восстановления (1-$($snaps.Count), 0)"
+    $pick = Read-Host "   Select snapshot to restore (1-$($snaps.Count), 0)"
     if ($pick -eq "0" -or -not ($pick -match "^\d+$") -or [int]$pick -gt $snaps.Count) {
         Write-Info "Restore cancelled."
         return
@@ -130,7 +130,7 @@ function Invoke-RestoreSnapshot {
 }
 
 # -------------------------------------------------------------
-# 1-Click Rollback to AppleAudio (Guaranteed OEM INF Clean)
+# 1-Click Rollback to AppleAudio (Guaranteed Clean PnP Switch)
 # -------------------------------------------------------------
 function Invoke-RollbackToApple {
     Write-Header "Rollback to Apple Official Driver (AppleAudio.sys)"
@@ -318,34 +318,34 @@ function Show-MainMenu {
     $menu = @"
 
    ROLLBACK & DRIVER SWITCHING:
-     [1] Rollback to official AppleAudio.sys (Откат на официальный драйвер Apple)
-     [2] Switch / Restore T2AudioPort (Включить кастомный T2AudioPort)
-     [3] Save manual settings snapshot (Сохранить слепок настроек)
-     [R] Restore snapshot (Восстановить настройки из слепка)
+     [1] Rollback to official AppleAudio.sys
+     [2] Switch / Restore T2AudioPort (Custom DSP + Headphone Jack + Mic)
+     [3] Save manual settings snapshot
+     [R] Restore settings snapshot
 
    SOUND PRESETS & TONE:
-     [4] Preset 'macos' (Рекомендованный звук macOS: баланс и чистота)
-     [5] Preset 'bass' (Глубокий плотный бас)
-     [6] Preset 'bright' (Кристальные высокие частоты)
-     [7] Preset 'movie' (Кинотеатральный объемный звук)
-     [8] Preset 'voice' (Четкая речь для звонков и видео)
-     [9] Preset 'night' (Ночной режим без громких всплесков)
+     [4] Preset 'macos' (Recommended macOS sound: balanced & clean)
+     [5] Preset 'bass' (Deep punchy bass)
+     [6] Preset 'bright' (Crystal clear treble)
+     [7] Preset 'movie' (Cinematic spatial audio)
+     [8] Preset 'voice' (Optimized speech clarity for calls & video)
+     [9] Preset 'night' (Night mode: compressed dynamic range)
 
    HARDWARE TESTS & DIAGNOSTICS:
-     [T] Sound Test (Проверка стереодинамиков: левый / правый / оба)
-     [M] Mic Test (Запись 5 сек речи и воспроизведение)
-     [D] Doctor (Полная проверка работоспособности системы)
+     [T] Sound Test (Test stereo speakers: Left / Right / Both)
+     [M] Mic Test (Record 5s audio and playback test)
+     [D] Doctor (Comprehensive system & driver diagnostic)
 
    SAFETY & RECOVERY:
-     [V] Reset Driver Verifier (Снять верификатор Microsoft)
-     [G] Reset Crash Guard (Сбросить счетчик сбоев)
-     [K] Create Desktop Shortcut (Создать ярлык управления на рабочем столе)
+     [V] Reset Driver Verifier (Remove Microsoft Driver Verifier)
+     [G] Reset Crash Guard (Reset watchdog failure counter)
+     [K] Create Desktop Shortcut (Place shortcut on Desktop)
 
-     [0] Exit (Выход)
+     [0] Exit
 
 "@
     Write-Host $menu
-    $choice = Read-Host "   Выберите действие (0-9, R, T, M, D, V, G, K)"
+    $choice = Read-Host "   Select action (0-9, R, T, M, D, V, G, K)"
     switch ($choice.ToUpper()) {
         "1" { Invoke-RollbackToApple }
         "2" { Invoke-SwitchToT2Audio }
@@ -364,7 +364,7 @@ function Show-MainMenu {
         "G" { Reset-CrashGuard }
         "K" { New-ManagerShortcut }
         "0" { return }
-        default { Write-Warn "Неизвестный выбор." }
+        default { Write-Warn "Unknown option." }
     }
 }
 
@@ -372,7 +372,7 @@ function Show-MainMenu {
 # Dispatch
 # -------------------------------------------------------------
 if (-not (Test-Admin)) {
-    Write-Fail "Запустите PowerShell от имени администратора!"
+    Write-Fail "Please run PowerShell as Administrator!"
     exit 1
 }
 
