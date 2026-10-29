@@ -1,6 +1,29 @@
 # T2AudioPort Driver - Current State (Authoritative)
 - Boot config: `testsigning=Yes`, `nointegritychecks=Yes`, `loadoptions=DISABLE_INTEGRITY_CHECKS`
 - Instance: `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8`
+### 2026-10-29 (Gemini): Step B (Installer & Tools), Step J1 (Jack Hardware Experiment), Step J2 (AppleAudio RE), Step R1 (Release Package) — ALL PASS
+
+- **Step J1 Jack Hardware Experiment (PASS on Hardware):**
+  - Enabled `Parameters\JackProbeAll = 1` with `JackEvents = 1`, `HeadphoneAutoMute = 1`.
+  - Executed two 30-second playback runs (Speakers, then Headphones) with 3× 3.5mm headphone plug/unplug cycles ~5 s apart.
+  - Verified in raw kernel log:
+    - Working jack address identified: `out dev outp el0` (`dev 0x25 obj 0x25 scope 0x6F757470 sel 0x6A61636B el 0`).
+    - Flips cleanly between `1` (plugged) and `0` (unplugged).
+    - Monotonic BridgeOS asynchronous `VHCI PROPERTY_CHANGED` notifications arrived (#1 through #10).
+    - `T2Audio: jack change signalled to Windows` fired on every state transition.
+    - Speaker auto-muting during plug events verified: `jackMutedFrames = 958289` on Speakers, `jackMutedFrames = 602688` on Headphones.
+    - Full logs in `docs/logs/EXCERPT_20261029_partJ_jack.md`.
+- **Step J2 Static Reverse Engineering of AppleAudio.sys (COMPLETED):**
+  - Thorough RE via REA/Ghidra answering all 5 questions documented in `docs/analysis/RE_jack.md`.
+  - Proved `AppleAudio.sys` `IOCTL 0x222020` handler (`FUN_140001280`) inverts cached boolean flag `[g + 0x38]` on `Scope == 'outp'` and calls `IPortEvents::GenerateEventList` (`KSEVENT_PINCAPS_JACKINFOCHANGE`), delegating stream endpoint re-routing to Windows Audio Service.
+- **Step B Installer Tools Verification (PASS):**
+  - Tested `-Action Prepare`, `-Action Doctor` (all OK), `-Action SoundTest` (L/R tones), `-Action MicTest` (recorded peak=-15.9 dBFS, played back), `-Action Shortcut` (hotkey `Ctrl+Alt+H` desktop shortcut created), `-Action Backup`/`-Action Restore`, `-Action Report` (zip created on desktop).
+  - Clean boot in persistent mode verified: `CrashGuardStrikes = 0`.
+- **Step R1 Release Packaging Verification (PASS):**
+  - Exported public certificate `T2AudioPort-test.cer`.
+  - Verified private key protection (`.pfx` rejected).
+  - Built `dist\T2AudioPort-1.0.13.5.zip` (107 KB); 100% of files verified against `SHA256SUMS.txt`.
+
 ### 2026-10-29 (Gemini): Build 1.0.13.4 - Step P2-B Real Microphone Capture PASS on hardware (MicStartIo=1), D0 work item collision fixed
 
 - **Step P2-B Live Microphone Capture Test (PASS):**
