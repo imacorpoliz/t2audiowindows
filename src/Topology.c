@@ -225,10 +225,11 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
 static BOOLEAN
 T2AudioTopologyJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    // With JackEvents enabled (1), return the actual hardware plug state.
-    // Without JackEvents (0), the jack always reads "connected" so the endpoint
-    // remains accessible for manual selection.
-    if (Context == NULL || !Context->JackEvents) {
+    // With JackEvents enabled (1), return the actual hardware plug state once
+    // the read has been verified (JackSeenPlugged).
+    // Without JackEvents (0), or until the jack read is verified, the jack reads
+    // "connected" so the endpoint remains accessible for manual selection.
+    if (Context == NULL || !Context->JackEvents || !Context->JackSeenPlugged) {
         return TRUE;
     }
     KdPrint(("T2Audio: TopologyJackConnected returning %s (plugged=%ld)\n",
@@ -258,8 +259,8 @@ T2AudioTopologyBasicSupport(_Inout_ PPCPROPERTY_REQUEST Request)
         Request->ValueSize = sizeof(ULONG);
         return STATUS_SUCCESS;
     }
-    Request->ValueSize = 0;
-    return STATUS_BUFFER_TOO_SMALL;
+    Request->ValueSize = sizeof(KSPROPERTY_DESCRIPTION);
+    return STATUS_BUFFER_OVERFLOW;
 }
 
 static NTSTATUS
@@ -318,8 +319,10 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
 
         RtlZeroMemory(jack2, sizeof(*jack2));
         jack2->DeviceStateInfo = 0;
-        // Presence detection when JackEvents is enabled (hardware tracks jack state)
-        jack2->JackCapabilities = (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents)
+        // Presence detection when JackEvents is enabled and verified on hardware
+        jack2->JackCapabilities = (instance->DeviceContext != NULL &&
+                                   instance->DeviceContext->JackEvents &&
+                                   instance->DeviceContext->JackSeenPlugged)
                                       ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;

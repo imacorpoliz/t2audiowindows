@@ -49,7 +49,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dest 'packaging'), (Join-P
     (Join-Path $dest 'docs'), (Join-Path $dest 'assets') | Out-Null
 
 Copy-Item $inf, $sys, $cat -Destination (Join-Path $dest 'packaging')
-Copy-Item (Join-Path $root 'tools\T2Audio-Setup.ps1'), (Join-Path $root 'tools\Restore-AppleAudioDriver.ps1') `
+Copy-Item (Join-Path $root 'tools\T2Audio-Setup.ps1'), (Join-Path $root 'tools\Restore-AppleAudioDriver.ps1'), `
+    (Join-Path $root 'tools\T2-Manager.ps1'), (Join-Path $root 'tools\Measure-AudioCpu.ps1') `
     -Destination (Join-Path $dest 'tools')
 Copy-Item (Join-Path $root 'README.md'), (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Destination $dest
 Copy-Item (Join-Path $root 'docs\INSTALL.md'), (Join-Path $root 'docs\GUIDE.md') -Destination (Join-Path $dest 'docs')

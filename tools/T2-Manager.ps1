@@ -6,33 +6,33 @@
 #>
 
 param(
-    [ValidateSet('Menu', 'RollbackToApple', 'SwitchToT2Audio', 'Preset', 'Doctor', 'SoundTest', 'MicTest', 'ResetVerifier', 'ResetGuard', 'Backup', 'Shortcut', 'Status')]
-    [string]$Action = 'Menu',
-    [string]$PresetName = 'macos',
+    [ValidateSet("Menu", "RollbackToApple", "SwitchToT2Audio", "Preset", "Doctor", "SoundTest", "MicTest", "ResetVerifier", "ResetGuard", "Backup", "Restore", "Shortcut", "Status")]
+    [string]$Action = "Menu",
+    [string]$PresetName = "macos",
     [switch]$Force
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 
 # Paths
 $ScriptDir    = $PSScriptRoot
-$ProjectRoot  = if (Test-Path (Join-Path $ScriptDir 'T2AudioPort')) { $ScriptDir } else { Split-Path -Parent $ScriptDir }
-$T2PortDir    = Join-Path $ProjectRoot 'T2AudioPort'
-$AppleDir     = Join-Path $ProjectRoot 'MBP-Audio-driver'
-$AppleInf     = Join-Path $AppleDir 'appleaudio.inf'
-$T2SetupScript= Join-Path $T2PortDir 'tools\T2Audio-Setup.ps1'
-$BackupDir    = Join-Path $ProjectRoot 'backups'
-$HwIdPattern  = 'VEN_106B&DEV_1803'
+$ProjectRoot  = if (Test-Path (Join-Path $ScriptDir "T2AudioPort")) { $ScriptDir } else { Split-Path -Parent $ScriptDir }
+$T2PortDir    = Join-Path $ProjectRoot "T2AudioPort"
+$AppleDir     = Join-Path $ProjectRoot "MBP-Audio-driver"
+$AppleInf     = Join-Path $AppleDir "appleaudio.inf"
+$T2SetupScript= Join-Path $T2PortDir "tools\T2Audio-Setup.ps1"
+$BackupDir    = Join-Path $ProjectRoot "backups"
+$HwIdPattern  = "VEN_106B&DEV_1803"
 
 if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null }
 
 function Write-Header($text) {
-    Write-Host ''
-    Write-Host ('=' * 66) -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host ("=" * 66) -ForegroundColor Cyan
     Write-Host "   $text" -ForegroundColor Cyan
-    Write-Host ('=' * 66) -ForegroundColor Cyan
+    Write-Host ("=" * 66) -ForegroundColor Cyan
 }
 function Write-Ok($m)   { Write-Host "   [OK] $m" -ForegroundColor Green }
 function Write-Info($m) { Write-Host "   $m" -ForegroundColor Gray }
@@ -49,59 +49,139 @@ function Get-T2AudioDevice {
 
 function Get-CurrentDriverType {
     $dev = Get-T2AudioDevice
-    if (-not $dev) { return 'None' }
+    if (-not $dev) { return "None" }
     $svc = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\$($dev.InstanceId)" -ErrorAction SilentlyContinue).Service
-    if ($svc -like '*T2Audio*') { return 'T2AudioPort' }
-    if ($svc -like '*AppleAudio*') { return 'AppleAudio' }
+    if ($svc -like "*T2Audio*") { return "T2AudioPort" }
+    if ($svc -like "*AppleAudio*") { return "AppleAudio" }
     return $svc
 }
 
 # -------------------------------------------------------------
-# Snapshot & Backup
+# Snapshot & Backup / Restore
 # -------------------------------------------------------------
 function Save-Snapshot {
-    $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $ts = (Get-Date).ToString("yyyyMMdd-HHmmss")
     $file = Join-Path $BackupDir "snapshot-$ts.json"
-    $params = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters' -ErrorAction SilentlyContinue
+    $paramDict = [ordered]@{}
+    $reg = Get-Item "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters" -ErrorAction SilentlyContinue
+    if ($reg) {
+        foreach ($v in $reg.GetValueNames()) {
+            $paramDict[$v] = $reg.GetValue($v)
+        }
+    }
     
     $data = [PSCustomObject]@{
         Timestamp   = $ts
         DriverType  = (Get-CurrentDriverType)
-        Parameters  = $params
+        Parameters  = $paramDict
     }
-    $data | ConvertTo-Json -Depth 5 | Out-File $file -Encoding utf8
+    $data | ConvertTo-Json | Out-File $file -Encoding utf8
     Write-Ok "Backup snapshot saved: $(Split-Path -Leaf $file)"
     return $file
 }
 
+function Invoke-RestoreSnapshot {
+    Write-Header "Restore Audio Settings from Snapshot"
+    $snaps = Get-ChildItem -Path $BackupDir -Filter "snapshot-*.json" | Sort-Object LastWriteTime -Descending
+    if (-not $snaps -or $snaps.Count -eq 0) {
+        Write-Warn "No snapshots found in $BackupDir."
+        return
+    }
+
+    Write-Host ""
+    for ($i = 0; $i -lt $snaps.Count; $i++) {
+        $s = $snaps[$i]
+        $content = Get-Content $s.FullName -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $drv = if ($content.DriverType) { $content.DriverType } else { "Unknown" }
+        Write-Host ("   [{0}] {1} (Driver: {2}, Date: {3})" -f ($i + 1), $s.Name, $drv, $s.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")) -ForegroundColor White
+    }
+    Write-Host "   [0] Cancel (Отмена)" -ForegroundColor Gray
+    Write-Host ""
+    $pick = Read-Host "   Выберите снимок для восстановления (1-$($snaps.Count), 0)"
+    if ($pick -eq "0" -or -not ($pick -match "^\d+$") -or [int]$pick -gt $snaps.Count) {
+        Write-Info "Restore cancelled."
+        return
+    }
+
+    $targetSnap = $snaps[[int]$pick - 1]
+    Write-Info "Restoring: $($targetSnap.Name)..."
+    $data = Get-Content $targetSnap.FullName -Raw | ConvertFrom-Json
+    
+    if ($data.Parameters) {
+        $paramPath = "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters"
+        if (-not (Test-Path $paramPath)) {
+            New-Item -Path $paramPath -Force | Out-Null
+        }
+        foreach ($prop in $data.Parameters.PSObject.Properties) {
+            if ($prop.Name -notmatch "^PS") {
+                Set-ItemProperty -Path $paramPath -Name $prop.Name -Value $prop.Value -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Ok "Registry parameters restored."
+    }
+
+    $dev = Get-T2AudioDevice
+    if ($dev) {
+        Write-Info "Restarting audio device to apply changes..."
+        Restart-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+    Write-Ok "Snapshot $($targetSnap.Name) applied successfully!"
+}
+
 # -------------------------------------------------------------
-# 1-Click Rollback to AppleAudio
+# 1-Click Rollback to AppleAudio (Guaranteed OEM INF Clean)
 # -------------------------------------------------------------
 function Invoke-RollbackToApple {
     Write-Header "Rollback to Apple Official Driver (AppleAudio.sys)"
     Save-Snapshot | Out-Null
 
-    if (-not (Test-Path $AppleInf)) {
-        Write-Fail "Original Apple driver package not found at: $AppleInf"
-        return
+    Write-Info "1. Disarming T2AudioMiniport production mode..."
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters" -Name "EnableProduction" -Value 0 -ErrorAction SilentlyContinue
+
+    Write-Info "2. Cleaning T2AudioMiniport driver store packages..."
+    $infs = Get-ChildItem -Path "$env:WINDIR\INF\oem*.inf" -File -ErrorAction SilentlyContinue | Where-Object {
+        Select-String -LiteralPath $_.FullName -Pattern "T2AudioMiniport" -SimpleMatch -Quiet
+    }
+    if ($infs) {
+        foreach ($inf in $infs) {
+            Write-Info "   Deleting $($inf.Name)..."
+            $null = pnputil /delete-driver $inf.Name /uninstall /force
+        }
+        Write-Ok "T2AudioMiniport OEM packages removed from driver store."
+    } else {
+        Write-Info "   No conflicting T2AudioMiniport packages found."
     }
 
-    Write-Info "Installing official AppleAudio driver package..."
-    $null = pnputil /add-driver $AppleInf /install
-    
-    # Disable T2AudioMiniport production mode so it does not conflict
-    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters' -Name 'EnableProduction' -Value 0 -ErrorAction SilentlyContinue
+    if (Test-Path $AppleInf) {
+        Write-Info "3. Staging and installing Apple official driver package..."
+        $null = pnputil /add-driver $AppleInf /install
+    } else {
+        Write-Warn "   AppleAudio INF not found at $AppleInf; rescanning existing driver store."
+    }
 
-    Start-Sleep -Seconds 2
+    Write-Info "4. Rescanning Plug and Play devices..."
     $null = pnputil /scan-devices
-    Start-Sleep -Seconds 1
+
+    Write-Info "5. Verifying active driver..."
+    $timeout = 15
+    $switched = $false
+    for ($i = 0; $i -lt $timeout; $i++) {
+        Start-Sleep -Seconds 1
+        $cur = Get-CurrentDriverType
+        $dev = Get-T2AudioDevice
+        if ($cur -eq "AppleAudio" -and $dev.Status -eq "OK") {
+            $switched = $true
+            break
+        }
+    }
 
     $cur = Get-CurrentDriverType
     $dev = Get-T2AudioDevice
-    if ($cur -eq 'AppleAudio' -and $dev.Status -eq 'OK') {
-        Write-Ok "Device successfully restored to AppleAudio (Status: OK)."
+    if ($switched -or $cur -eq "AppleAudio") {
+        Write-Ok "Device successfully rolled back to official AppleAudio (Status: $($dev.Status))!"
     } else {
-        Write-Warn "Driver switched. Current driver: $cur, Device Status: $($dev.Status). A reboot may be needed."
+        Write-Warn "Current driver: $cur, Device Status: $($dev.Status). A system reboot may be required to finish switching."
     }
 }
 
@@ -109,7 +189,7 @@ function Invoke-RollbackToApple {
 # 1-Click Switch / Restore to T2AudioPort
 # -------------------------------------------------------------
 function Invoke-SwitchToT2Audio {
-    Write-Header "Switching to T2AudioPort 1.0.13.8 (Custom DSP + Headphone Jack)"
+    Write-Header "Switching to T2AudioPort (Custom DSP + Headphone Jack + Mic)"
     Save-Snapshot | Out-Null
 
     if (-not (Test-Path $T2SetupScript)) {
@@ -124,8 +204,8 @@ function Invoke-SwitchToT2Audio {
     Start-Sleep -Seconds 1
     $cur = Get-CurrentDriverType
     $dev = Get-T2AudioDevice
-    if ($cur -eq 'T2AudioPort' -and $dev.Status -eq 'OK') {
-        Write-Ok "T2AudioPort 1.0.13.8 is active, verified, and running (Status: OK)!"
+    if ($cur -eq "T2AudioPort" -and $dev.Status -eq "OK") {
+        Write-Ok "T2AudioPort is active, verified, and running (Status: OK)!"
     } else {
         Write-Warn "Current driver: $cur, Device Status: $($dev.Status)"
     }
@@ -183,7 +263,7 @@ function Reset-CrashGuard {
 # Desktop Shortcut
 # -------------------------------------------------------------
 function New-ManagerShortcut {
-    $desktop = [Environment]::GetFolderPath('Desktop')
+    $desktop = [Environment]::GetFolderPath("Desktop")
     $linkPath = Join-Path $desktop "T2 Audio Control Center.lnk"
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($linkPath)
@@ -201,30 +281,30 @@ function New-ManagerShortcut {
 function Show-StatusSummary {
     $dev = Get-T2AudioDevice
     $drv = Get-CurrentDriverType
-    $params = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters' -ErrorAction SilentlyContinue
+    $params = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters" -ErrorAction SilentlyContinue
 
     Write-Host ""
     Write-Host "   ====================================================" -ForegroundColor DarkCyan
     Write-Host "            T2 AUDIO CONTROL & STATUS MONITOR          " -ForegroundColor Cyan
     Write-Host "   ====================================================" -ForegroundColor DarkCyan
-    Write-Host ("   Driver in use:      {0}" -f $drv) -ForegroundColor $(if ($drv -eq 'T2AudioPort') { 'Green' } else { 'Yellow' })
+    Write-Host ("   Driver in use:      {0}" -f $drv) -ForegroundColor $(if ($drv -eq "T2AudioPort") { "Green" } else { "Yellow" })
     Write-Host ("   Hardware Status:    {0}" -f ($dev.Status)) -ForegroundColor Green
     
-    if ($drv -eq 'T2AudioPort') {
-        $preset = if ($params.SpeakerDsp -eq 3) { 'macos' } elseif ($params.SpeakerDsp -eq 4) { 'bass/custom' } else { 'default' }
-        $jack = if ($params.JackEvents -eq 1) { 'ENABLED (Auto-Switch)' } else { 'DISABLED' }
-        $mic = if ($params.MicInput -eq 1) { 'ENABLED (3-Mic Array)' } else { 'DISABLED' }
+    if ($drv -eq "T2AudioPort") {
+        $preset = if ($params.SpeakerDsp -eq 3) { "macos" } elseif ($params.SpeakerDsp -eq 4) { "bass/custom" } else { "default" }
+        $jack = if ($params.JackEvents -eq 1) { "ENABLED (Auto-Switch)" } else { "DISABLED" }
+        $mic = if ($params.MicInput -eq 1) { "ENABLED (3-Mic Array)" } else { "DISABLED" }
         $strikes = if ($params.CrashGuardStrikes) { $params.CrashGuardStrikes } else { 0 }
 
         Write-Host ("   Active Preset:      {0}" -f $preset) -ForegroundColor White
         Write-Host ("   Headphone Auto-Jack:{0}" -f $jack) -ForegroundColor White
         Write-Host ("   Microphone Input:   {0}" -f $mic) -ForegroundColor White
-        Write-Host ("   Crash Guard:        {0} strikes" -f $strikes) -ForegroundColor $(if ($strikes -eq 0) { 'Green' } else { 'Red' })
+        Write-Host ("   Crash Guard:        {0} strikes" -f $strikes) -ForegroundColor $(if ($strikes -eq 0) { "Green" } else { "Red" })
     }
 
     $verf = verifier /querysettings 2>&1 | Out-String
-    $verfStatus = if ($verf -match 'T2AudioMiniport.sys') { 'ARMED for T2Audio' } else { 'Inactive' }
-    Write-Host ("   Driver Verifier:    {0}" -f $verfStatus) -ForegroundColor $(if ($verfStatus -match 'ARMED') { 'Yellow' } else { 'Gray' })
+    $verfStatus = if ($verf -match "T2AudioMiniport.sys") { "ARMED for T2Audio" } else { "Inactive" }
+    Write-Host ("   Driver Verifier:    {0}" -f $verfStatus) -ForegroundColor $(if ($verfStatus -match "ARMED") { "Yellow" } else { "Gray" })
     Write-Host "   ====================================================" -ForegroundColor DarkCyan
 }
 
@@ -235,12 +315,13 @@ function Show-MainMenu {
     Clear-Host
     Show-StatusSummary
 
-    $menu = @'
+    $menu = @"
 
    ROLLBACK & DRIVER SWITCHING:
-     [1] Rollback to official AppleAudio.sys (Откат на драйвер Apple)
-     [2] Switch / Restore T2AudioPort 1.0.13.8 (Включить T2AudioPort)
+     [1] Rollback to official AppleAudio.sys (Откат на официальный драйвер Apple)
+     [2] Switch / Restore T2AudioPort (Включить кастомный T2AudioPort)
      [3] Save manual settings snapshot (Сохранить слепок настроек)
+     [R] Restore snapshot (Восстановить настройки из слепка)
 
    SOUND PRESETS & TONE:
      [4] Preset 'macos' (Рекомендованный звук macOS: баланс и чистота)
@@ -262,26 +343,27 @@ function Show-MainMenu {
 
      [0] Exit (Выход)
 
-'@
+"@
     Write-Host $menu
-    $choice = Read-Host "   Выберите действие (0-9, T, M, D, V, G, K)"
+    $choice = Read-Host "   Выберите действие (0-9, R, T, M, D, V, G, K)"
     switch ($choice.ToUpper()) {
-        '1' { Invoke-RollbackToApple }
-        '2' { Invoke-SwitchToT2Audio }
-        '3' { Save-Snapshot }
-        '4' { Set-SoundPreset 'macos' }
-        '5' { Set-SoundPreset 'bass' }
-        '6' { Set-SoundPreset 'bright' }
-        '7' { Set-SoundPreset 'movie' }
-        '8' { Set-SoundPreset 'voice' }
-        '9' { Set-SoundPreset 'night' }
-        'T' { Invoke-SoundTest }
-        'M' { Invoke-MicTest }
-        'D' { Invoke-Doctor }
-        'V' { Reset-DriverVerifier }
-        'G' { Reset-CrashGuard }
-        'K' { New-ManagerShortcut }
-        '0' { return }
+        "1" { Invoke-RollbackToApple }
+        "2" { Invoke-SwitchToT2Audio }
+        "3" { Save-Snapshot }
+        "R" { Invoke-RestoreSnapshot }
+        "4" { Set-SoundPreset "macos" }
+        "5" { Set-SoundPreset "bass" }
+        "6" { Set-SoundPreset "bright" }
+        "7" { Set-SoundPreset "movie" }
+        "8" { Set-SoundPreset "voice" }
+        "9" { Set-SoundPreset "night" }
+        "T" { Invoke-SoundTest }
+        "M" { Invoke-MicTest }
+        "D" { Invoke-Doctor }
+        "V" { Reset-DriverVerifier }
+        "G" { Reset-CrashGuard }
+        "K" { New-ManagerShortcut }
+        "0" { return }
         default { Write-Warn "Неизвестный выбор." }
     }
 }
@@ -295,16 +377,17 @@ if (-not (Test-Admin)) {
 }
 
 switch ($Action) {
-    'Menu'           { Show-MainMenu }
-    'RollbackToApple'{ Invoke-RollbackToApple }
-    'SwitchToT2Audio'{ Invoke-SwitchToT2Audio }
-    'Preset'         { Set-SoundPreset $PresetName }
-    'Doctor'         { Invoke-Doctor }
-    'SoundTest'      { Invoke-SoundTest }
-    'MicTest'        { Invoke-MicTest }
-    'ResetVerifier'  { Reset-DriverVerifier }
-    'ResetGuard'     { Reset-CrashGuard }
-    'Backup'         { Save-Snapshot }
-    'Shortcut'       { New-ManagerShortcut }
-    'Status'         { Show-StatusSummary }
+    "Menu"           { Show-MainMenu }
+    "RollbackToApple"{ Invoke-RollbackToApple }
+    "SwitchToT2Audio"{ Invoke-SwitchToT2Audio }
+    "Preset"         { Set-SoundPreset $PresetName }
+    "Doctor"         { Invoke-Doctor }
+    "SoundTest"      { Invoke-SoundTest }
+    "MicTest"        { Invoke-MicTest }
+    "ResetVerifier"  { Reset-DriverVerifier }
+    "ResetGuard"     { Reset-CrashGuard }
+    "Backup"         { Save-Snapshot }
+    "Restore"        { Invoke-RestoreSnapshot }
+    "Shortcut"       { New-ManagerShortcut }
+    "Status"         { Show-StatusSummary }
 }

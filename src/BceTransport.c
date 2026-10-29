@@ -1527,6 +1527,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
                                                T2AUDIO_PROP_JACK_PLUGGED, &plugged);
             InterlockedExchange(&Context->HeadphoneJackPlugged,
                                 (NT_SUCCESS(jackStatus) && plugged != 0) ? 1 : 0);
+            if (NT_SUCCESS(jackStatus) && plugged != 0) {
+                Context->JackSeenPlugged = TRUE;
+            }
             KdPrint(("T2Audio: BCE probe: headphone jack device 0x%I64X: %s (status 0x%08X)\n",
                      deviceList[i],
                      !NT_SUCCESS(jackStatus) ? "unknown" : (plugged ? "PLUGGED" : "unplugged"),
