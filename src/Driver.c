@@ -287,6 +287,53 @@ T2AudioCrashGuardSetArmed(
     KdPrint(("T2Audio: crash guard %s\n", Armed ? "armed" : "disarmed (clean end of session)"));
 }
 
+VOID
+T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG oldDsp;
+    LONG oldBass;
+    LONG oldTreble;
+    LONG oldClarity;
+    ULONG oldGain;
+    ULONG dspGain;
+    ULONG tweetTrim;
+    ULONG woofLimit;
+
+    if (Context == NULL) {
+        return;
+    }
+
+    oldDsp = Context->SpeakerDsp;
+    oldBass = Context->BassDb;
+    oldTreble = Context->TrebleDb;
+    oldClarity = Context->ClarityDb;
+    oldGain = Context->DspGainDb;
+
+    Context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 3);
+    
+    dspGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspGainDb", 6);
+    Context->DspGainDb = (dspGain > 12) ? 12 : dspGain;
+
+    tweetTrim = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TweeterTrimDb", 0);
+    Context->TweeterTrimDb = (tweetTrim > 12) ? 12 : tweetTrim;
+
+    woofLimit = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"WooferLimitDb", 0);
+    Context->WooferLimitDb = (woofLimit > 12) ? 12 : woofLimit;
+
+    Context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
+    Context->BassDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"BassDb", 0));
+    Context->TrebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
+    Context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
+    Context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
+
+    if (oldDsp != Context->SpeakerDsp || oldBass != Context->BassDb ||
+        oldTreble != Context->TrebleDb || oldClarity != Context->ClarityDb ||
+        oldGain != Context->DspGainDb) {
+        KdPrint(("T2Audio: live DSP params updated on the fly: Dsp=%u Bass=%ld Treble=%ld Clarity=%ld Gain=%u\n",
+                 Context->SpeakerDsp, Context->BassDb, Context->TrebleDb, Context->ClarityDb, Context->DspGainDb));
+    }
+}
+
 static NTSTATUS
 T2AudioStartDeviceInner(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -517,29 +564,8 @@ T2AudioStartDeviceInner(
     // Default 3 (KAIT2EN chain + virtual bass + multiband compressor), the
     // level the owner approved on hardware (2026-10-28, 1.0.11.0); 0 is the
     // plain path.
-    context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 3);
-    // Make-up gain for the DSP path (see T2AudioDsp.h); clamped to 0..12 dB.
-    context->DspGainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspGainDb", 6);
-    if (context->DspGainDb > 12) {
-        context->DspGainDb = 12;
-    }
-    context->TweeterTrimDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TweeterTrimDb", 0);
-    if (context->TweeterTrimDb > 12) {
-        context->TweeterTrimDb = 12;
-    }
-    context->WooferLimitDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"WooferLimitDb", 0);
-    if (context->WooferLimitDb > 12) {
-        context->WooferLimitDb = 12;
-    }
-    // Autogain in front of the DSP chain (T2AudioDsp.h, KAIT2EN "Norm");
-    // 0/1, default 0 (off: the chain is unchanged).
-    context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
-    // Tone controls: a DWORD holding a signed dB value (PowerShell writes -3
-    // as 0xFFFFFFFD), clamped to +-12; and the compressor detector style.
-    context->BassDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"BassDb", 0));
-    context->TrebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
-    context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
-    context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
+    // Read live DSP settings (can also be reloaded on the fly while running)
+    T2AudioReloadLiveParameters(context);
 
     // Groundwork for headphones and microphones (docs/ROADMAP.md sections 4-5),
     // all 0/1 and off by default: ExtendedProbe logs every BCE device and the

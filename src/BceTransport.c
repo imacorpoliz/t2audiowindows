@@ -773,6 +773,11 @@ T2AudioJackWorkRoutine(
 
     PAGED_CODE();
 
+    // Reload live DSP parameters from registry on the fly
+    if (context != NULL) {
+        T2AudioReloadLiveParameters(context);
+    }
+
     // Clear first: a notification arriving during the read queues another
     // pass, so the last state always wins.
     InterlockedExchange(&context->JackWorkPending, 0);
@@ -914,10 +919,10 @@ T2AudioStartJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     InterlockedExchange(&Context->JackPollStop, 0);
     KeInitializeTimer(&Context->JackPollTimer);
     KeInitializeDpc(&Context->JackPollDpc, T2AudioJackPollDpc, Context);
-    due.QuadPart = -10000000ll; // 1 s
-    KeSetTimerEx(&Context->JackPollTimer, due, 1000, &Context->JackPollDpc);
+    due.QuadPart = -5000000ll; // 500 ms
+    KeSetTimerEx(&Context->JackPollTimer, due, 500, &Context->JackPollDpc);
     Context->JackPollStarted = TRUE;
-    KdPrint(("T2Audio: jack poll started (every 1000 ms)\n"));
+    KdPrint(("T2Audio: background monitor started (every 500 ms)\n"));
 }
 
 // PnP stop/removal (PASSIVE): stop the poll and wait for a queued re-read,
@@ -1546,10 +1551,10 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (Context->MicInput && Context->BceMicDeviceId != 0) {
         T2AudioQueryMicStream(Context);
     }
-    if (Context->JackEvents && Context->BceHeadphoneDeviceId != 0) {
+    if (Context->BceHeadphoneDeviceId != 0 && Context->JackEvents) {
         (VOID)T2AudioRegisterJackListener(Context);
-        T2AudioStartJackPoll(Context);
     }
+    T2AudioStartJackPoll(Context);
 
     Context->BceProbed = TRUE;
     KdPrint(("T2Audio: BCE probe done; speaker id 0x%I64X stream 0x%I64X format=%u\n",

@@ -360,6 +360,7 @@ NTSTATUS T2AudioMapResources(
 
 VOID T2AudioUnmapResources(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioCrashGuardSetArmed(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ BOOLEAN Armed);
+VOID T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 NTSTATUS T2AudioFindOutputBuffer(
     _In_ const T2AUDIO_BUFFER_STRUCT *BufferStruct,

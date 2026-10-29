@@ -39,6 +39,11 @@ function Write-Info($m) { Write-Host "   $m" -ForegroundColor Gray }
 function Write-Warn($m) { Write-Host "   [WARN] $m" -ForegroundColor Yellow }
 function Write-Fail($m) { Write-Host "   [ERROR] $m" -ForegroundColor Red }
 
+function Pause-Menu {
+    Write-Host ""
+    $null = Read-Host "   Press Enter to return to menu..."
+}
+
 function Test-Admin {
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
@@ -54,6 +59,44 @@ function Get-CurrentDriverType {
     if ($svc -like "*T2Audio*") { return "T2AudioPort" }
     if ($svc -like "*AppleAudio*") { return "AppleAudio" }
     return $svc
+}
+
+# Preset definitions for instant on-the-fly switching
+$PresetDefinitions = [ordered]@{
+    "macos"   = @{ Title = "Like macOS (Balanced & Clean)"; BassDb = 0;  TrebleDb = 0; ClarityDb = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0; CompStyle = 0; SpeakerDsp = 3 }
+    "bass"    = @{ Title = "Deep Punchy Bass Boost";       BassDb = 6;  TrebleDb = 0; ClarityDb = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 2; DspAutoGain = 0; CompStyle = 1; SpeakerDsp = 4 }
+    "bright"  = @{ Title = "Crystal Clear Treble & Air";   BassDb = 0;  TrebleDb = 5; ClarityDb = 3; DspGainDb = 6; TweeterTrimDb = 3; WooferLimitDb = 0; DspAutoGain = 0; CompStyle = 0; SpeakerDsp = 3 }
+    "movie"   = @{ Title = "Cinematic Dynamic Spatial";    BassDb = 3;  TrebleDb = 3; ClarityDb = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 1; CompStyle = 1; SpeakerDsp = 3 }
+    "voice"   = @{ Title = "Speech Clarity for Calls";     BassDb = -4; TrebleDb = 2; ClarityDb = 5; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 1; CompStyle = 0; SpeakerDsp = 3 }
+    "night"   = @{ Title = "Night Mode (Compressed Range)";BassDb = -5; TrebleDb = 0; ClarityDb = 2; DspGainDb = 3; TweeterTrimDb = 0; WooferLimitDb = 6; DspAutoGain = 1; CompStyle = 1; SpeakerDsp = 4 }
+}
+
+# -------------------------------------------------------------
+# Quick Preset Switcher (Instant On-The-Fly)
+# -------------------------------------------------------------
+function Set-SoundPreset([string]$name) {
+    Write-Header "Applying Sound Preset: $name"
+    $key = $name.ToLower()
+    $p = $PresetDefinitions[$key]
+    if (-not $p) {
+        Write-Fail "Unknown preset: $name"
+        return
+    }
+
+    $paramPath = "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters"
+    if (-not (Test-Path $paramPath)) {
+        New-Item -Path $paramPath -Force | Out-Null
+    }
+
+    foreach ($k in $p.Keys) {
+        if ($k -ne "Title") {
+            Set-ItemProperty -Path $paramPath -Name $k -Value $p[$k] -Type DWord -Force
+        }
+    }
+
+    Write-Ok "Preset '$name' ($($p.Title)) applied in real-time!"
+    Write-Info "Active tuning: Bass=$($p.BassDb) dB | Treble=$($p.TrebleDb) dB | Clarity=$($p.ClarityDb) dB | Gain=$($p.DspGainDb) dB"
+    Write-Info "Driver live DSP updates parameters within 500 ms without stopping audio."
 }
 
 # -------------------------------------------------------------
@@ -120,12 +163,6 @@ function Invoke-RestoreSnapshot {
         Write-Ok "Registry parameters restored."
     }
 
-    $dev = Get-T2AudioDevice
-    if ($dev) {
-        Write-Info "Restarting audio device to apply changes..."
-        Restart-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-    }
     Write-Ok "Snapshot $($targetSnap.Name) applied successfully!"
 }
 
@@ -212,19 +249,6 @@ function Invoke-SwitchToT2Audio {
 }
 
 # -------------------------------------------------------------
-# Quick Preset Switcher
-# -------------------------------------------------------------
-function Set-SoundPreset([string]$name) {
-    Write-Header "Applying Sound Preset: $name"
-    if (Test-Path $T2SetupScript) {
-        powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Preset -Preset $name
-        Write-Ok "Sound preset '$name' applied successfully!"
-    } else {
-        Write-Fail "T2Audio-Setup.ps1 not found."
-    }
-}
-
-# -------------------------------------------------------------
 # Diagnostics & Verifier
 # -------------------------------------------------------------
 function Invoke-SoundTest {
@@ -291,12 +315,24 @@ function Show-StatusSummary {
     Write-Host ("   Hardware Status:    {0}" -f ($dev.Status)) -ForegroundColor Green
     
     if ($drv -eq "T2AudioPort") {
-        $preset = if ($params.SpeakerDsp -eq 3) { "macos" } elseif ($params.SpeakerDsp -eq 4) { "bass/custom" } else { "default" }
+        $preset = if ($params.BassDb -eq 6) { "bass" } `
+                  elseif ($params.TrebleDb -eq 5) { "bright" } `
+                  elseif ($params.BassDb -eq 3 -and $params.TrebleDb -eq 3) { "movie" } `
+                  elseif ($params.ClarityDb -eq 5) { "voice" } `
+                  elseif ($params.WooferLimitDb -eq 6 -and $params.BassDb -eq -5) { "night" } `
+                  else { "macos (standard)" }
+
+        $bass = if ($null -ne $params.BassDb) { "$($params.BassDb) dB" } else { "0 dB" }
+        $treble = if ($null -ne $params.TrebleDb) { "$($params.TrebleDb) dB" } else { "0 dB" }
+        $clarity = if ($null -ne $params.ClarityDb) { "$($params.ClarityDb) dB" } else { "0 dB" }
+        $gain = if ($null -ne $params.DspGainDb) { "$($params.DspGainDb) dB" } else { "6 dB" }
+
         $jack = if ($params.JackEvents -eq 1) { "ENABLED (Auto-Switch)" } else { "DISABLED" }
         $mic = if ($params.MicInput -eq 1) { "ENABLED (3-Mic Array)" } else { "DISABLED" }
         $strikes = if ($params.CrashGuardStrikes) { $params.CrashGuardStrikes } else { 0 }
 
         Write-Host ("   Active Preset:      {0}" -f $preset) -ForegroundColor White
+        Write-Host ("   Tone Tuning:        Bass {0} | Treble {1} | Clarity {2} | Gain {3}" -f $bass, $treble, $clarity, $gain) -ForegroundColor Cyan
         Write-Host ("   Headphone Auto-Jack:{0}" -f $jack) -ForegroundColor White
         Write-Host ("   Microphone Input:   {0}" -f $mic) -ForegroundColor White
         Write-Host ("   Crash Guard:        {0} strikes" -f $strikes) -ForegroundColor $(if ($strikes -eq 0) { "Green" } else { "Red" })
@@ -309,13 +345,14 @@ function Show-StatusSummary {
 }
 
 # -------------------------------------------------------------
-# Interactive Menu
+# Interactive Menu (Continuous Loop)
 # -------------------------------------------------------------
 function Show-MainMenu {
-    Clear-Host
-    Show-StatusSummary
+    while ($true) {
+        Clear-Host
+        Show-StatusSummary
 
-    $menu = @"
+        $menu = @"
 
    ROLLBACK & DRIVER SWITCHING:
      [1] Rollback to official AppleAudio.sys
@@ -323,13 +360,13 @@ function Show-MainMenu {
      [3] Save manual settings snapshot
      [R] Restore settings snapshot
 
-   SOUND PRESETS & TONE:
-     [4] Preset 'macos' (Recommended macOS sound: balanced & clean)
-     [5] Preset 'bass' (Deep punchy bass)
-     [6] Preset 'bright' (Crystal clear treble)
-     [7] Preset 'movie' (Cinematic spatial audio)
-     [8] Preset 'voice' (Optimized speech clarity for calls & video)
-     [9] Preset 'night' (Night mode: compressed dynamic range)
+   SOUND PRESETS (Instant On-The-Fly Switching):
+     [4] Preset 'macos'  (Balanced & clean Apple tone)
+     [5] Preset 'bass'   (Deep punchy bass boost)
+     [6] Preset 'bright' (Crystal clear treble & air)
+     [7] Preset 'movie'  (Cinematic dynamic audio)
+     [8] Preset 'voice'  (Optimized speech clarity for calls & video)
+     [9] Preset 'night'  (Night mode: compressed dynamic range)
 
    HARDWARE TESTS & DIAGNOSTICS:
      [T] Sound Test (Test stereo speakers: Left / Right / Both)
@@ -344,27 +381,34 @@ function Show-MainMenu {
      [0] Exit
 
 "@
-    Write-Host $menu
-    $choice = Read-Host "   Select action (0-9, R, T, M, D, V, G, K)"
-    switch ($choice.ToUpper()) {
-        "1" { Invoke-RollbackToApple }
-        "2" { Invoke-SwitchToT2Audio }
-        "3" { Save-Snapshot }
-        "R" { Invoke-RestoreSnapshot }
-        "4" { Set-SoundPreset "macos" }
-        "5" { Set-SoundPreset "bass" }
-        "6" { Set-SoundPreset "bright" }
-        "7" { Set-SoundPreset "movie" }
-        "8" { Set-SoundPreset "voice" }
-        "9" { Set-SoundPreset "night" }
-        "T" { Invoke-SoundTest }
-        "M" { Invoke-MicTest }
-        "D" { Invoke-Doctor }
-        "V" { Reset-DriverVerifier }
-        "G" { Reset-CrashGuard }
-        "K" { New-ManagerShortcut }
-        "0" { return }
-        default { Write-Warn "Unknown option." }
+        Write-Host $menu
+        $choice = Read-Host "   Select action (0-9, R, T, M, D, V, G, K)"
+        if ($choice -eq "0") {
+            Write-Info "Exiting T2 Audio Control Center. Goodbye!"
+            break
+        }
+        switch ($choice.ToUpper()) {
+            "1" { Invoke-RollbackToApple; Pause-Menu }
+            "2" { Invoke-SwitchToT2Audio; Pause-Menu }
+            "3" { Save-Snapshot; Pause-Menu }
+            "R" { Invoke-RestoreSnapshot; Pause-Menu }
+            "4" { Set-SoundPreset "macos"; Start-Sleep -Milliseconds 700 }
+            "5" { Set-SoundPreset "bass"; Start-Sleep -Milliseconds 700 }
+            "6" { Set-SoundPreset "bright"; Start-Sleep -Milliseconds 700 }
+            "7" { Set-SoundPreset "movie"; Start-Sleep -Milliseconds 700 }
+            "8" { Set-SoundPreset "voice"; Start-Sleep -Milliseconds 700 }
+            "9" { Set-SoundPreset "night"; Start-Sleep -Milliseconds 700 }
+            "T" { Invoke-SoundTest; Pause-Menu }
+            "M" { Invoke-MicTest; Pause-Menu }
+            "D" { Invoke-Doctor; Pause-Menu }
+            "V" { Reset-DriverVerifier; Pause-Menu }
+            "G" { Reset-CrashGuard; Pause-Menu }
+            "K" { New-ManagerShortcut; Pause-Menu }
+            default {
+                Write-Warn "Unknown option: '$choice'"
+                Start-Sleep -Seconds 1
+            }
+        }
     }
 }
 
