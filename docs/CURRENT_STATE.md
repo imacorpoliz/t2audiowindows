@@ -5,6 +5,22 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Gemini): Part 2 on hardware — 1.0.13.0 built, ExtraFormats=1 verified, Microphone registration and BufferStruct write (msg 18) PASS
+
+Tested on MacBookPro16,1 running Windows 11 with driver version 1.0.13.0 (`T2AudioMiniport.sys` SHA256 `D5B742D81E8115E2602B8DC251DBB5C18875971331D9597927C25766356B090B`):
+- **Build & Tests:** Built Release x64 with WDK MSBuild (0 errors). All 7 host tests passed on MSVC (`BceProtocolLogicTest`, `T2AudioBufferLogicTest`, `T2AudioSpeakerLogicTest`, `T2AudioPipelineTest`, `T2AudioDspTest`, `T2AudioCrashGuardTest`, `T2AudioMicTest`). Driver and catalog signed and installed cleanly (`-Action Install -Preset macos -Force`).
+- **Baseline Audio:** Confirmed speaker playback with lookahead limiter and new timing metrics: `reAims=1`, `maxCopyUs=2518`, `maxRenderUs=2517`, `slowRenders=1/1447`, zero dropouts.
+- **P4 (16/24-bit Formats):** Enabled `ExtraFormats=1`. Device restarted, playback confirmed stable.
+- **P2 (Microphone Array Registration):**
+  - Enabled `MicInput=1`. Driver allocated contiguous host physical memory (`pa=0x47EECB000`, size `0x30C00` = 16 640 frames).
+  - Wrote page ranges into `BufferStruct.devices[3].input_streams[0]`.
+  - Sent BCE message 18 (`SET_INPUT_STREAM_ADDRESS_RANGES`) to device `0x21` ("Digital Mic").
+  - **T2 chip / bridgeOS accepted registration:** `status=0x00000000` (reply 256 bytes).
+  - Kernel log: `audio path ENABLED for microphones 0x21 (0x00000000)`.
+  - Windows created active audio capture endpoint: `Microphone Array (Apple T2 Audio Device (6-channel Native Driver))` status OK.
+  - Teardown verified: `mic ring released` cleanly.
+- Documented in `docs/logs/EXCERPT_20261029_part2_mics.md`.
+
 ### 2026-10-29 (Claude): Gemini step 4f/5/5a reviewed — jack read stuck at 0, owner keeps `macos`; jack experiment, safe jack reporting, copy-time measurement (source only)
 
 Reviewed `docs/logs/EXCERPT_20261028_step5_presets.md` (merged from `gemini/install-1.0.12.0`; the installer's UTF-8 BOM, which that branch had dropped, is restored — without it Windows PowerShell 5.1 garbles the Russian strings).
