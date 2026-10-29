@@ -5,6 +5,15 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): microphone power-off analysed — msg 18 fixed to AppleAudio's form, DMA common buffer, START_IO behind a second gate (source only)
+
+Reviewed `docs/logs/EXCERPT_20261029_part2_mics.md`.
+- **What happened:** with `MicInput=1` the ring was registered (msg 18 acknowledged, endpoint created); when Voice Recorder started (capture RUN → START_IO on device 0x21) the Mac **powered off** (Event 41, BugcheckCode 0 = no Windows bugcheck). A Windows hang in our DPC would normally give a bugcheck (0x133); a power-off without one points at the T2 itself, which controls the Mac's power.
+- **Likely cause (Gemini's RE, not proven):** our msg 18 was kaiT2en's bare 21-byte form; AppleAudio sends 837 bytes with the input stream id (0x22) and a range record. kaiT2en's bare form works on Linux, where the host owns the T2 completely (remote access mode 2); on Windows AppleUSBVHCI sets mode 1, and AppleAudio's form is the one to copy. **Second possible cause, also fixed:** the ring address was `MmGetPhysicalAddress` of contiguous memory; with DMA remapping the T2 needs the device-logical address, so the ring is now a common buffer of a DMA adapter of our PCI device.
+- **Changes:** msg 18 built by `T2AudioBceBuildSetInputRanges` (837 bytes, host-tested; the BCE send limit raised from 128 to 1024 bytes); ring via `IoGetDmaAdapter` + `AllocateCommonBuffer` (log prints logical vs physical); **a capture RUN sends START_IO only with the new `Parameters\MicStartIo=1`** (default 0: the endpoint records silence, the T2 input DMA is never started), so `-Action Features -Microphone 1` alone can no longer power the Mac off.
+- **Open:** `'nsrt'` (SET_PROPERTY 48000.0) that AppleAudio sends, the exact capture start/stop sequence and AppleAudio's allocation method — Gemini's static RE first (GEMINI.md, P2-RE), then P2-A (MicStartIo=0, safe), and P2-B (MicStartIo=1) only with the owner's explicit consent.
+- Also from the report: P4 (16/24-bit) PASS; the speaker baseline on 1.0.13.0 has `maxRenderUs=2517` but `slowRenders=1/1447`: one slow pass in a run (likely the first), all others under 500 µs — not a steady load; to be watched.
+
 ### 2026-10-29 (Gemini): Part 2 on hardware — 1.0.13.0 built, ExtraFormats=1 verified; Mic crash on Voice Recorder & BCE Message 18 root cause RE'd
 
 Tested on MacBookPro16,1 running Windows 11 with driver version 1.0.13.0 (`T2AudioMiniport.sys` SHA256 `D5B742D81E8115E2602B8DC251DBB5C18875971331D9597927C25766356B090B`):
