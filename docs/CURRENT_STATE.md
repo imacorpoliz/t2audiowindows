@@ -5,6 +5,20 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Gemini): Build 1.0.13.3 — BufferStruct dynamic device append matching AppleAudio FUN_140004558
+
+- **Critical Bug Discovered via ExtendedProbe & Ghidra RE:**
+  - `ExtendedProbe=1` on bare metal showed `BufferStruct` at boot only contains 3 output devices: `Bridge Loopback` (0), `Speaker` (1), and `Codec Output` (2). `NumDevices = 3`. Firmware NEVER pre-populates `"Digital Mic"`.
+  - Static decompilation of `AppleAudio.sys` `FUN_140004558` revealed that `AppleAudio` dynamically appends `"Digital Mic"` to `BufferStruct`, sets `NumInputStreams = 1`, and increments `BufferStruct->NumDevices` (`NumDevices++`) before sending Message 18.
+  - In our 1.0.13.0–1.0.13.2 driver, `Driver.c` gated filter registration on `T2AudioMicPresentInBufferStruct(context)` which only checked existing entries. On a cold boot, `"Digital Mic"` was not present, so the microphone filters and subdevices were never registered with Windows!
+- **Fix Implemented in 1.0.13.3:**
+  - Implemented `T2AudioMicFindOrAddDeviceLocked`: if `"Digital Mic"` is not present, it appends a new device entry, copies `"Digital Mic"`, and increments `Context->BufferStructDevices` and `BufferStruct->NumDevices` exactly as `AppleAudio.sys` `FUN_140004558` does.
+  - `T2AudioMicPresentInBufferStruct` now returns `TRUE` whenever `BufferStruct` has capacity (< `T2AUDIO_MAX_DEVICES`), allowing PortCls to register `TopologyMic` and `WaveMic`.
+  - Built Release x64 with MSBuild (0 errors, 92 warnings). `T2AudioMiniport.sys` SHA256: `359949490948D74D40CDFCE4C14795B53FAE38A2144ED2D8A49243F9FF82CAF3`.
+  - Generated and signed catalog with `T2AudioPort Test Certificate` (SHA1 `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`).
+  - Installed via `T2Audio-Setup.ps1 -Action Install -Preset macos -Force`.
+  - Windows PnP flags `DEVPKEY_Device_IsRebootRequired: True` (Exit code 3010) due to updating driver package over active stack. A single reboot will complete the installation, activate the Microphone Array capture endpoint, and allow safe testing under `MicStartIo=0`.
+
 ### 2026-10-29 (Gemini): Build 1.0.13.2 — BCE SET_PROPERTY 'nsrt' (Message 9) implemented, 7 host tests PASS, driver signed & installed
 
 - **P2-RE Findings Implemented:**

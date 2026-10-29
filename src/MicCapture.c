@@ -51,21 +51,45 @@ T2AudioMicFindDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     return -1;
 }
 
+// Find existing "Digital Mic" or append a new device entry to BufferStruct,
+// exactly matching AppleAudio.sys FUN_140004558 (which appends "Digital Mic"
+// and increments NumDevices if not present at boot).
+// Caller holds HardwareLock with HardwareReady set.
+static LONG
+T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    static const CHAR name[] = "Digital Mic";
+    LONG index = T2AudioMicFindDeviceLocked(Context);
+
+    if (index >= 0) {
+        return index;
+    }
+    if (Context->BufferStruct != NULL && Context->BufferStructDevices < T2AUDIO_MAX_DEVICES) {
+        ULONG newIdx = Context->BufferStructDevices;
+        volatile T2AUDIO_DEVICE_METADATA *device =
+            (volatile T2AUDIO_DEVICE_METADATA *)&Context->BufferStruct->Devices[newIdx];
+
+        RtlZeroMemory((PVOID)device, sizeof(*device));
+        RtlCopyMemory((PVOID)device->Name, name, sizeof(name));
+        Context->BufferStructDevices++;
+        Context->BufferStruct->NumDevices = Context->BufferStructDevices;
+        _mm_sfence();
+        KdPrint(("T2Audio: BufferStruct added device[%u] 'Digital Mic' (NumDevices=%u)\n",
+                 newIdx, Context->BufferStructDevices));
+        return (LONG)newIdx;
+    }
+    return -1;
+}
+
 BOOLEAN
 T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    KIRQL oldIrql;
-    LONG index = -1;
-
-    if (Context == NULL) {
+    if (Context == NULL || !Context->HardwareReady || Context->BufferStruct == NULL) {
         return FALSE;
     }
-    KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
-    if (Context->HardwareReady) {
-        index = T2AudioMicFindDeviceLocked(Context);
-    }
-    KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
-    return (index >= 0) ? TRUE : FALSE;
+    // AppleAudio.sys dynamically appends "Digital Mic" to BufferStruct (FUN_140004558)
+    // if not already present. As long as BufferStruct has space, mic is supported.
+    return (Context->BufferStructDevices < T2AUDIO_MAX_DEVICES) ? TRUE : FALSE;
 }
 
 // Write (Address != 0) or clear (Address == 0) input_streams[0] of the mic
@@ -79,7 +103,7 @@ T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 A
 
     KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
     if (Context->HardwareReady) {
-        index = T2AudioMicFindDeviceLocked(Context);
+        index = (Address != 0) ? T2AudioMicFindOrAddDeviceLocked(Context) : T2AudioMicFindDeviceLocked(Context);
         if (index >= 0) {
             volatile T2AUDIO_DEVICE_METADATA *device =
                 (volatile T2AUDIO_DEVICE_METADATA *)&Context->BufferStruct->Devices[index];
