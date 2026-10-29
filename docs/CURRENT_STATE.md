@@ -31,6 +31,14 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): sleep verified by the owner; installer in English; README and INSTALL rewritten for release
+
+- **Sleep:** the owner tested sleep and wake with the driver running: «проверку после сна я сделал все работает» ("I did the after-sleep check, everything works"). ROADMAP 2.1 → ✅.
+- **Installer in English** (owner's request, release preparation): every message, prompt and preset title of `tools/T2Audio-Setup.ps1` translated; behaviour unchanged except one fix — with the headphone endpoint there are two T2 render endpoints, and `Get-T2Endpoint` (used by Install, Balance, Status) now prefers the one whose description contains "Speaker" instead of taking the first. The install confirmation word is now `INSTALL`. `GEMINI.md` notes the change; older steps keep the former Russian quotes with their English translation.
+- **README** rewritten short: what is verified on hardware, what does not work yet (automatic headphone switching, headset mic, hardware volume, 44.1/96 kHz, other Macs, Microsoft signature), install, where every part comes from, and the licence situation. **INSTALL.md** rewritten for users (features now marked verified).
+- **THIRD_PARTY_LICENSES.md:** the old note "the driver does NOT contain any copied GPL code" was no longer true since the DSP tables (derived from KAIT2EN's GPL-3.0-or-later profile) — replaced by an accurate note; added the KAIT2EN microphone profile, lsp-plugins (reference only) and the reverse engineering of Apple's drivers.
+- **Release blockers left for the owner:** a top-level `LICENSE` (a built driver must be GPL-3.0-or-later), and whether to pursue a Microsoft signature. Technical: automatic headphone switching (GEMINI.md part 3).
+
 ### 2026-10-29 (Claude): Gemini part 2 reviewed and merged — microphone and headphones work on hardware; open item: automatic headphone ↔ speaker switching
 
 Reviewed `docs/reports/CLAUDE_HANDOVER_PART2_FINAL.md`, `docs/analysis/RE_mic_capture.md`, `EXCERPT_20261029_part2a_mics.md`, `EXCERPT_20261029_part2b_mic_success.md` and Gemini's code (branch `gemini/part2-1.0.13.0`, merged into `diagnostics`).

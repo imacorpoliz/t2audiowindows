@@ -1,119 +1,90 @@
-# Installing T2AudioPort for daily use
-
-> **Status:** experimental. Persistent mode and the installer were built on 2026-10-28.
-> **Not yet tested on hardware**; the test plan is in `GEMINI.md` ("▶ NEXT RUN").
-> The sound path (`SpeakerDsp=3`, preset "Как на Mac" / "Like on a Mac") was verified by the owner on 1.0.11.0.
->
-> The installer's menus and messages are in Russian. This guide gives the English meaning.
+# Installing T2AudioPort
 
 ## Requirements
 
-* A MacBookPro16,1 running Windows 10/11 x64, with Apple's Boot Camp driver (`AppleAudio`) installed.
-* `testsigning` on (`bcdedit /set testsigning on`, reboot; Secure Boot off in the Startup Security Utility).
-* A signed package in `packaging\`: `T2AudioMiniport.inf`, `T2AudioMiniport.sys`, `t2audiominiport.cat` (build and signing: `GEMINI.md` §2), and the project's test certificate in the trusted stores.
+* MacBookPro16,1 (MacBook Pro 16", 2019) with Windows 10/11 x64 and the Boot Camp drivers (`AppleAudio`).
+* Test signing: `bcdedit /set testsigning on`, then reboot. Secure Boot must be off (macOS Recovery → Startup Security Utility).
+* A signed package in `packaging\`: `T2AudioMiniport.inf`, `T2AudioMiniport.sys`, `t2audiominiport.cat`, with the signing certificate in the trusted stores (build and signing: `GEMINI.md` section 2).
 
 ## Install
 
-PowerShell **as Administrator**, from the repository root:
+PowerShell **as Administrator**, in the repository folder:
 
 ```powershell
 .\tools\T2Audio-Setup.ps1
 ```
 
-The menu offers:
+Menu:
 
-1. **Install / update** («Установить / обновить»): asks for a preset, binds the driver to the device, turns persistent mode on, unmutes the T2 speakers and sets the volume to 30 %.
-2. **Change the sound preset** («Сменить пресет звука»): restarts the device (sound drops for a couple of seconds).
-3. **Reset the crash guard** («Сбросить защиту от падений»): if the driver stopped starting after two failures.
-4. **Restore the Apple driver** («Вернуть драйвер Apple»): removes T2AudioPort; the device goes back to `AppleAudio`.
+1. **Install / update T2AudioPort** — asks for a preset, binds the driver, turns persistent mode on, unmutes the T2 speakers at 30 % volume.
+2. **Change the sound preset** — restarts the device (sound stops for a few seconds).
+3. **Reset the crash guard** — if the driver stopped loading after two failures.
+4. **Restore AppleAudio** — removes T2AudioPort; the device goes back to Apple's driver.
+5. **Adjust the tone** — bass / treble / clarity on top of the preset.
+6. **Optional features** — headphones, microphones, sound after sleep, 16/24-bit.
 
-Without the menu:
+The same without the menu:
 
 ```powershell
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 .\tools\T2Audio-Setup.ps1 -Action Preset -Preset bright
+.\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2 -ClarityDb 1
+.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1 -ResumeAfterSleep 1 -ExtraFormats 1
+.\tools\T2Audio-Setup.ps1 -Action Balance -Volume 0.3
 .\tools\T2Audio-Setup.ps1 -Action Status
 .\tools\T2Audio-Setup.ps1 -Action ResetGuard
 .\tools\T2Audio-Setup.ps1 -Action Uninstall
 ```
 
+`-Force` skips the confirmation prompts.
+
 ## Presets
 
-| Preset | Contents | Purpose |
+| Preset | What it does |
+|---|---|
+| `macos` ★ | Apple-style EQ for the six speakers, virtual bass, multiband compressor. **The one the owner approved.** |
+| `macos-precise` | Same, compressor measures like macOS (RMS, soft knee); the owner preferred `macos` |
+| `bright` | Tweeters +3 dB |
+| `loud` | More gain, woofer rattle protection |
+| `maxvolume` | Woofers limited 6 dB lower, for loud music with bass |
+| `even` | Slow loudness autogain: quiet tracks up, loud ones down |
+| `bass` | Bass +4 dB; **rattles on kick drums at high volume** on this Mac |
+| `voice` | Clearer speech, less bass, even loudness |
+| `movie` | Even loudness, dialogue and bass slightly up |
+| `night` | Quiet and even, less bass |
+| `warm` | No compressor |
+| `natural` | EQ and crossover only |
+| `raw` | No processing (comparison only) |
+
+`-Action Tune` changes only bass (shelf 150 Hz), treble (shelf 6 kHz), clarity (peak 2.5 kHz) and the compressor style; choosing a preset resets them.
+
+## Optional features
+
+All verified on hardware (2026-10-29), all off until you turn them on:
+
+| Feature | Switch | Notes |
 |---|---|---|
-| `macos` ★ | `SpeakerDsp=3`, `DspGainDb=6` | Apple's EQ for the 6 speakers, virtual bass, compressor. **Verified by the owner.** |
-| `bright` | `macos` + `TweeterTrimDb=3` | More "air", if the sound seems muffled |
-| `loud` | `SpeakerDsp=4`, `DspGainDb=9`, `WooferLimitDb=3` | Louder; woofer rattle protection |
-| `maxvolume` | `SpeakerDsp=4`, `DspGainDb=6`, `WooferLimitDb=6` | Loud music with bass, without hum |
-| `macos-precise` | `macos` + `CompStyle=1` | The compressor measures the level like macOS (RMS, soft knee): gentler on peaks |
-| `even` | `macos` + `DspAutoGain=1` | Even loudness (K-weighted, LUFS): quiet recordings up to +6 dB louder, loud ones up to −12 dB quieter |
-| `bass` | `SpeakerDsp=4`, `WooferLimitDb=2`, `BassDb=4`, `CompStyle=1` | More bass at medium volume, with rattle protection |
-| `voice` | `macos` + `BassDb=-3`, `ClarityDb=4`, `DspAutoGain=1` | Podcasts and calls: clearer speech, even loudness |
-| `movie` | `macos` + `BassDb=2`, `ClarityDb=2`, `DspAutoGain=1`, `CompStyle=1` | Films: even loudness, dialogue and bass a little up |
-| `night` | `SpeakerDsp=4`, `DspGainDb=3`, `WooferLimitDb=6`, `DspAutoGain=1`, `BassDb=-4`, `ClarityDb=2`, `CompStyle=1` | Quiet and even: less bass and peaks, speech stays clear |
-| `warm` | `SpeakerDsp=2` | No compressor: more dynamics, slightly quieter |
-| `natural` | `SpeakerDsp=1` | Apple's EQ and crossover only |
-| `raw` | `SpeakerDsp=0` | No processing, for comparison (flat, no bass) |
+| Headphones | `-Headphones 1` | A separate "Headphones" output (−12 dB safety cut). Windows does **not** switch automatically yet: pick it in the sound menu. |
+| Microphones | `-Microphone 1` | "Microphone Array", mono 48 kHz. |
+| Sound after sleep | `-ResumeAfterSleep 1` | Playback continues after wake without restarting the player. |
+| 16/24-bit | `-ExtraFormats 1` | For exclusive-mode apps; shared mode stays 32-bit. |
 
-Only `macos` is verified on hardware; the others are starting points for
-listening. `macos-precise`, `bass`, `voice`, `movie` and `night` use the
-parameters added in 1.0.12.0 (`BassDb`, `TrebleDb`, `ClarityDb`, `CompStyle`);
-a 1.0.11.0 driver ignores them.
-
-### One side quieter than the other
-
-`.\tools\T2Audio-Setup.ps1 -Action Status` shows the T2 endpoint's per-channel
-levels (`L=… R=…`) and warns if they differ. `-Action Balance -Volume 0.3`
-sets both channels equal (Windows keeps a balance per device, under Sound
-settings → device properties → Levels → Balance, even across reinstalls).
-`-Action Install` does the same at the end.
-
-### Experimental features (driver 1.0.13.0+, off by default, not yet verified on hardware)
-
-```powershell
-.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1       # headphone output + jack tracking + speaker auto-mute
-.\tools\T2Audio-Setup.ps1 -Action Features -Microphone 1       # built-in microphones
-.\tools\T2Audio-Setup.ps1 -Action Features -ResumeAfterSleep 1 # sound comes back after sleep by itself
-.\tools\T2Audio-Setup.ps1 -Action Features -ExtraFormats 1     # 16/24-bit for exclusive-mode apps
-.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0   # all off
-```
-
-Menu item 6 does the same interactively; `-Action Status` lists what is on. The
-registry values behind them are described in `docs/DRIVER_GUIDE.md` §8.3
-(`HeadphoneOutput`, `JackEvents`, `HeadphoneAutoMute`, `MicInput`,
-`ResumeAfterSleep`, `ExtraFormats`).
-
-### Tone on top of a preset
-
-`-Action Tune` (menu item 5) changes only the tone values and keeps the rest
-of the preset. Whole dB from −12 to +12; a parameter left out is not changed.
-
-```powershell
-.\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2 -ClarityDb 1
-.\tools\T2Audio-Setup.ps1 -Action Tune -CompStyle 1
-```
-
-`BassDb` is a shelf at 150 Hz, `TrebleDb` a shelf at 6 kHz, `ClarityDb` a peak
-at 2.5 kHz (speech). Choosing a preset again resets all four. After a change the
-installer restarts the device, as with `-Action Preset`. `-Action Status` shows
-the current tone.
-
-The values live in `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`
-(each one is described in `docs/DRIVER_GUIDE.md` §8.3).
+`0` turns a feature off; `-Action Status` lists them.
 
 ## Crash guard
 
-Before starting a hardware session the driver sets the registry flag `CrashGuardArmed=1` (and flushes it to disk). It clears the flag on a clean end: device stop, a transition to D1–D3 (idle, sleep, hibernation), Windows shutdown. If the flag is still set at boot, the previous session was cut short (BSOD, hang, power button): that is a "strike". **After two strikes in a row the driver stops starting**; there is no sound, but Windows boots normally. Then either:
+The driver marks each hardware session in the registry and clears the mark on a clean end (device stop, sleep, shutdown). If the mark is still there at boot, the previous session ended abnormally (BSOD, hang, power loss). **After two such ends in a row the driver stops loading**; Windows boots normally, without T2 sound. Then:
 
-1. `.\tools\T2Audio-Setup.ps1 -Action Uninstall` to go back to AppleAudio, or
-2. find the cause (minidump in `C:\Windows\Minidump`) and run `-Action ResetGuard`.
+1. `-Action Uninstall` to go back to AppleAudio, or
+2. look at the cause (minidump in `C:\Windows\Minidump`) and run `-Action ResetGuard`.
 
-In Safe Mode the driver never starts.
+The driver never loads in Safe Mode.
 
-## Known limitations
+## Troubleshooting
 
-* **Headphones are not supported.** Sound always goes to the speakers. The driver only reads the jack state so far (`docs/HEADPHONES.md`). For headphones use Bluetooth/USB, or "Restore the Apple driver".
-* Microphones are not supported.
-* A Windows Update may bring `AppleAudio` back (it is Microsoft-signed). Run the installer again in that case.
-* Sleep and wake with the driver running are not yet tested on hardware.
-* Volume is software only (the Windows slider scales the samples); hardware volume is planned (`docs/ROADMAP.md`).
+* **One side quieter:** `-Action Status` shows the L/R levels; `-Action Balance -Volume 0.3` evens them (Windows keeps a balance per device, even across reinstalls).
+* **No sound after install:** check that "Speakers (Apple T2 Audio Device …)" is the default output and not muted.
+* **Windows Update brought AppleAudio back:** run `-Action Install` again.
+* **Everything else:** `-Action Uninstall` restores Apple's driver; `tools\Restore-AppleAudioDriver.ps1` downloads it from Boot Camp if needed.
+
+Registry values behind all of this: `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`, described in `docs/DRIVER_GUIDE.md` section 8.3.

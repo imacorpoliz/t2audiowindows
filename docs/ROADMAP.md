@@ -14,12 +14,13 @@ Who: **G** = Gemini on the Windows/Mac machine (build, hardware tests, reverse e
 | Sound on all 6 speakers through a stereo endpoint | ✅ (Stage E, 1.0.8.0) |
 | Speaker DSP (KAIT2EN EQ, XTC, virtual bass, multiband compressor) | ✅ level 3 approved by the owner (1.0.11.0) |
 | Copy timing (no underruns, max gap ~3 ms), start-of-stream click fix | ✅ |
-| Lookahead limiter, autogain (`DspAutoGain`), buzz compressor (`SpeakerDsp=4`), trims | 🟡 |
-| Persistent mode (start on every boot) + crash guard, installer with presets | 🟡 |
-| Headphone jack state (read at probe only) | 🟡 |
-| Sleep / hibernate / wake | 🟡 (STOP_IO on power-down exists; resume path unverified) |
-| Headphone output, jack auto-switch | ⬜ |
-| Built-in microphones (3-mic array), headset microphone | ⬜ |
+| Lookahead limiter, autogain (`DspAutoGain`), buzz compressor (`SpeakerDsp=4`), trims, tone controls, presets | ✅ (1.0.12, presets and CPU load verified; owner keeps `macos`) |
+| Persistent mode (start on every boot) + crash guard, installer | ✅ (1.0.12; installer in English since 2026-10-29) |
+| Sleep / wake, sound back after sleep (`ResumeAfterSleep`) | ✅ (1.0.13, tested by the owner 2026-10-29) |
+| Headphone output | ✅ (1.0.13) |
+| Jack detection → automatic headphone/speaker switching | ⬜ (no working jack signal yet; GEMINI.md part 3) |
+| Built-in microphones (3-mic array) | ✅ (1.0.13) |
+| Headset microphone | ⬜ |
 | Hardware volume / mute | ⬜ (software volume works) |
 | Production signing (no test mode) | ⬜ (needs an owner decision) |
 | Other T2 Mac models | ⬜ |
@@ -48,7 +49,7 @@ Nothing below can be trusted for daily use until this passes. The steps are in `
 
 | # | Item | Who | Notes |
 |---|---|---|---|
-| 2.1 | 🟡 **Implemented behind `ResumeAfterSleep` (2026-10-28), awaiting the hardware test (GEMINI.md part 2, P3).** **Resume after sleep while a stream is RUN.** If the audio engine keeps the stream in RUN through sleep, the driver stops I/O on power-down but only restarts it on the next `SetState(RUN)` (`RE_appleaudio_protocol.md` §7, open item): silence until the app restarts playback. Fix: on D0, if a stream is in RUN, re-zero the ring, re-anchor and send START_IO from a PASSIVE work item. | C, then G | Only after §1.6 shows the actual behaviour. |
+| 2.1 | ✅ **Verified by the owner on hardware (2026-10-29): sound comes back after sleep (`ResumeAfterSleep=1`).** Resume after sleep while a stream is RUN. | C, then G | |
 | 2.2 | **Hibernate and Fast Startup** (a kernel hibernation on shutdown): check that the crash guard sees a clean end and that the device comes back. | G | Same test as 2.1 with `shutdown /h` and with Fast Startup on. |
 | 2.3 | **Long-run clock** (`GEMINI.md` §7 E2/E3): 10+ minutes with `ClockRateTracking=0` and `=1`. Decide whether to make rate tracking the default (it removes the rare re-aim every ~18 min). | G, then C | |
 | 2.4 | **Driver Verifier** (standard + IRQL checks) on the persistent setup with sound. | G | `GEMINI.md` §7 S5. |
@@ -108,7 +109,7 @@ Two input devices: `"Digital Mic"` (`0x21`, the 3-microphone array) and `"Codec 
 |---|---|---|---|
 | 6.1 | **Signing.** Today the driver needs `testsigning` on and Secure Boot off. For an install without test mode the package needs a Microsoft signature: an EV code-signing certificate (an organisation, a yearly cost) + attestation signing through the Windows Hardware Dev Center. Alternative: stay with test signing for personal use. | O | Decision; nothing to build until then. |
 | 6.2 | **Licence.** The DSP tables are generated from kaiT2en's GPL-3.0-or-later graph, so a distributed driver binary carries GPL-3.0 obligations (`THIRD_PARTY_LICENSES.md`). Decide the repository licence and, if needed, an offer of source with every binary. | O | |
-| 6.3 | **Installer polish:** English UI option (today Russian only), an offline package layout (driver + installer in one folder), clear messages when Windows Update brings back AppleAudio (2.7). | C | |
+| 6.3 | ✅ **English UI done (2026-10-29).** **Installer polish:** English UI, an offline package layout (driver + installer in one folder), clear messages when Windows Update brings back AppleAudio (2.7). | C | |
 | 6.4 | **Release process:** versioned packages built in CI (S2), the signed `.sys`/`.cat` stored outside git (in `imacorpoliz/mbp` or releases), a changelog from `CURRENT_STATE.md`. | C, G | |
 
 ---

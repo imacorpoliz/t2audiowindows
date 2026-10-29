@@ -154,6 +154,8 @@ PASS: «Устройство снова на AppleAudio» [device is back on App
 
 **If something does not work:** `.\tools\T2Audio-Setup.ps1 -Action Uninstall`, logs, an entry in `CURRENT_STATE.md`, tell the owner. Do not fix code; "proven" means verified only.
 
+> **Installer language (2026-10-29):** `tools/T2Audio-Setup.ps1` is now in **English** (owner's request, release preparation). Older steps below quote its former Russian output with an English translation in brackets; the English messages are those translations (e.g. «T2AudioPort установлен и работает» is now "T2AudioPort is installed and running", «Защита от падений: в порядке» is "Crash guard: OK", the confirmation word is `INSTALL`).
+
 ---
 
 ## ▶ NEXT RUN, part 3 — automatic headphone ↔ speaker switching (the only open owner complaint)

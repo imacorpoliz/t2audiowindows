@@ -1,25 +1,25 @@
-﻿# T2AudioPort - установщик и настройка звука (MacBookPro16,1).
+﻿# T2AudioPort - installer and sound settings (MacBookPro16,1).
 #
-# Меню (запуск без параметров) или параметры:
-#   .\T2Audio-Setup.ps1                                  # интерактивное меню
-#   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # установить, постоянный режим
-#   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # сменить пресет звука
-#   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # тембр поверх пресета
-#   .\T2Audio-Setup.ps1 -Action Balance -Volume 0.3      # выровнять баланс L/R
-#   .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1   # экспериментальные функции
+# Menu (run without parameters) or parameters:
+#   .\T2Audio-Setup.ps1                                  # interactive menu
+#   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # install, persistent mode
+#   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # change the sound preset
+#   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # tone on top of the preset
+#   .\T2Audio-Setup.ps1 -Action Balance -Volume 0.3      # even out the L/R balance
+#   .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1   # optional features
 #   .\T2Audio-Setup.ps1 -Action Status
-#   .\T2Audio-Setup.ps1 -Action ResetGuard               # сбросить защиту от падений
-#   .\T2Audio-Setup.ps1 -Action Uninstall                # вернуть AppleAudio
+#   .\T2Audio-Setup.ps1 -Action ResetGuard               # reset the crash guard
+#   .\T2Audio-Setup.ps1 -Action Uninstall                # go back to AppleAudio
 #
-# Постоянный режим: драйвер стартует при каждой загрузке Windows
-# (Parameters\EnableProduction=1) под защитой от падений: если две сессии
-# подряд оборвались без штатного завершения (BSOD, зависание, выключение
-# кнопкой), драйвер сам перестаёт стартовать до сброса этим скриптом.
-# В безопасном режиме драйвер не стартует никогда.
+# Persistent mode: the driver starts on every Windows boot
+# (Parameters\EnableProduction=1) under a crash guard: if two sessions in a
+# row end without a clean shutdown (BSOD, hang, power button), the driver
+# stops starting until this script resets the guard. It never starts in
+# Safe Mode.
 #
-# Нужны права администратора, включённый testsigning и подписанный пакет
-# в packaging\ (T2AudioMiniport.inf/.sys/.cat), как его собирает GEMINI.md §2.
-# Файл сохранён в UTF-8 с BOM (иначе Windows PowerShell 5.1 искажает кириллицу).
+# Needs administrator rights, testsigning on and a signed package in
+# packaging\ (T2AudioMiniport.inf/.sys/.cat), built as in GEMINI.md section 2.
+# Saved as UTF-8 with BOM (Windows PowerShell 5.1 needs it for the symbols).
 
 [CmdletBinding()]
 param(
@@ -29,24 +29,24 @@ param(
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
     [string]$Preset = 'macos',
 
-    # -Action Tune: тембр в дБ (-12..+12) поверх текущего пресета; не указан = не менять.
-    # Бас = полка 150 Гц, высокие = полка 6 кГц, разборчивость = пик 2,5 кГц.
+    # -Action Tune: tone in dB (-12..+12) on top of the current preset; omitted = unchanged.
+    # Bass = shelf at 150 Hz, treble = shelf at 6 kHz, clarity = peak at 2.5 kHz.
     [ValidateRange(-12, 12)] [Nullable[int]]$BassDb,
     [ValidateRange(-12, 12)] [Nullable[int]]$TrebleDb,
     [ValidateRange(-12, 12)] [Nullable[int]]$ClarityDb,
-    # Компрессор: 0 = быстрый пиковый (как раньше), 1 = точный как в macOS (RMS, мягкое колено).
+    # Compressor: 0 = fast peak (default), 1 = like macOS (RMS, soft knee).
     [ValidateRange(0, 1)] [Nullable[int]]$CompStyle,
 
-    # -Action Features: экспериментальные функции (1 = включить, 0 = выключить; не указан = не менять).
-    [ValidateRange(0, 1)] [Nullable[int]]$Headphones,      # выход на наушники (+ слежение за гнездом)
-    [ValidateRange(0, 1)] [Nullable[int]]$Microphone,      # встроенные микрофоны
-    [ValidateRange(0, 1)] [Nullable[int]]$ResumeAfterSleep,# звук сам возвращается после сна
-    [ValidateRange(0, 1)] [Nullable[int]]$ExtraFormats,    # 16/24 бит для монопольного режима
+    # -Action Features: optional features (1 = on, 0 = off; omitted = unchanged).
+    [ValidateRange(0, 1)] [Nullable[int]]$Headphones,      # headphone output (+ jack tracking)
+    [ValidateRange(0, 1)] [Nullable[int]]$Microphone,      # built-in microphones
+    [ValidateRange(0, 1)] [Nullable[int]]$ResumeAfterSleep,# sound comes back after sleep by itself
+    [ValidateRange(0, 1)] [Nullable[int]]$ExtraFormats,    # 16/24-bit for exclusive-mode apps
 
-    # Громкость точки T2 после установки (0..1); -1 = не трогать.
+    # T2 speaker volume after install (0..1); -1 = leave unchanged.
     [double]$Volume = 0.3,
 
-    # Без вопросов-подтверждений.
+    # No confirmation prompts.
     [switch]$Force
 )
 
@@ -64,16 +64,15 @@ $SysPath      = Join-Path $PackageDir 'T2AudioMiniport.sys'
 $CatPath      = Join-Path $PackageDir 't2audiominiport.cat'
 
 # ---------------------------------------------------------------------------
-# Пресеты звука. Значения - DWORD в Parameters; отсутствующее значение =
-# значение по умолчанию в драйвере. Каждый пресет перечисляет только отличия
-# от значений по умолчанию (= 'macos'); при установке пишутся все значения.
-# Проверен на железе владельцем только 'macos' (2026-10-28, 1.0.11.0);
-# остальные - варианты для подбора на слух. BassDb/TrebleDb/ClarityDb/
-# CompStyle понимает драйвер начиная с 1.0.12.0 (старый их просто не читает).
+# Sound presets. Values are DWORDs in Parameters; a missing value = the
+# driver default. Each preset lists only its differences from the defaults
+# (= 'macos'); installing writes all values. Only 'macos' is approved by the
+# owner by ear (2026-10-28); the others are starting points for listening.
+# BassDb/TrebleDb/ClarityDb/CompStyle need driver 1.0.12.0 or later.
 # ---------------------------------------------------------------------------
 $PresetValueNames = @('SpeakerDsp', 'DspGainDb', 'TweeterTrimDb', 'WooferLimitDb', 'DspAutoGain',
                       'BassDb', 'TrebleDb', 'ClarityDb', 'CompStyle')
-# Значения драйвера по умолчанию (если в реестре значения нет).
+# Driver defaults (used when the registry has no value).
 $ParamDefaults = @{ SpeakerDsp = 3; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0;
                     BassDb = 0; TrebleDb = 0; ClarityDb = 0; CompStyle = 0 }
 
@@ -84,54 +83,54 @@ function New-PresetValues([hashtable]$changes) {
 }
 
 $Presets = [ordered]@{
-    'macos'         = @{ Title = 'Как на Mac (рекомендуется)';
-                         Text  = 'Эквалайзер Apple для 6 динамиков, виртуальный бас, многополосный компрессор.';
+    'macos'         = @{ Title = 'Like macOS (recommended)';
+                         Text  = 'Apple EQ for the 6 speakers, virtual bass, multiband compressor.';
                          Values = (New-PresetValues @{ }); Verified = $true }
-    'macos-precise' = @{ Title = 'Как на Mac, точный компрессор';
-                         Text  = 'То же, но компрессор считает уровень как macOS (RMS, мягкое колено): мягче на пиках, ровнее на басе.';
+    'macos-precise' = @{ Title = 'Like macOS, precise compressor';
+                         Text  = 'Same, but the compressor measures like macOS (RMS, soft knee).';
                          Values = (New-PresetValues @{ CompStyle = 1 }); Verified = $false }
-    'bright'        = @{ Title = 'Ярче';
-                         Text  = 'Как на Mac, но твитеры на 3 дБ громче: больше «воздуха» и деталей.';
+    'bright'        = @{ Title = 'Brighter';
+                         Text  = 'Like macOS with the tweeters 3 dB louder: more air and detail.';
                          Values = (New-PresetValues @{ TweeterTrimDb = 3 }); Verified = $false }
-    'loud'          = @{ Title = 'Громче';
-                         Text  = 'Сильнее компенсация громкости и защита вуферов от дребезга; лимитер держит пики.';
+    'loud'          = @{ Title = 'Louder';
+                         Text  = 'More make-up gain and woofer rattle protection; the limiter holds the peaks.';
                          Values = (New-PresetValues @{ SpeakerDsp = 4; DspGainDb = 9; WooferLimitDb = 3 }); Verified = $false }
-    'maxvolume'     = @{ Title = 'Максимальная громкость без гула';
-                         Text  = 'Для громкой музыки с басом: вуферы ограничены на 6 дБ ниже, защита от дребезга.';
+    'maxvolume'     = @{ Title = 'Maximum volume without hum';
+                         Text  = 'For loud music with bass: woofers limited 6 dB lower, rattle protection.';
                          Values = (New-PresetValues @{ SpeakerDsp = 4; WooferLimitDb = 6 }); Verified = $false }
-    'even'          = @{ Title = 'Ровная громкость';
-                         Text  = 'Как на Mac плюс автоусиление по громкости (LUFS): тихие записи до +6 дБ, громкие до -12 дБ, медленно.';
+    'even'          = @{ Title = 'Even loudness';
+                         Text  = 'Like macOS plus slow loudness autogain (LUFS): quiet tracks up to +6 dB, loud ones down to -12 dB.';
                          Values = (New-PresetValues @{ DspAutoGain = 1 }); Verified = $false }
-    'bass'          = @{ Title = 'Больше баса';
-                         Text  = 'Бас +4 дБ (полка 150 Гц) с защитой вуферов от дребезга. Для музыки на средней громкости.';
+    'bass'          = @{ Title = 'More bass';
+                         Text  = 'Bass +4 dB (150 Hz shelf) with rattle protection; may rattle on kicks at high volume.';
                          Values = (New-PresetValues @{ SpeakerDsp = 4; WooferLimitDb = 2; BassDb = 4; CompStyle = 1 }); Verified = $false }
-    'voice'         = @{ Title = 'Голос (подкасты, звонки)';
-                         Text  = 'Разборчивость +4 дБ (2,5 кГц), бас -3 дБ, ровная громкость.';
+    'voice'         = @{ Title = 'Voice (podcasts, calls)';
+                         Text  = 'Clarity +4 dB (2.5 kHz), bass -3 dB, even loudness.';
                          Values = (New-PresetValues @{ BassDb = -3; ClarityDb = 4; DspAutoGain = 1 }); Verified = $false }
-    'movie'         = @{ Title = 'Кино';
-                         Text  = 'Ровная громкость, диалоги +2 дБ, бас +2 дБ, точный компрессор.';
+    'movie'         = @{ Title = 'Movie';
+                         Text  = 'Even loudness, dialogue +2 dB, bass +2 dB, precise compressor.';
                          Values = (New-PresetValues @{ BassDb = 2; ClarityDb = 2; DspAutoGain = 1; CompStyle = 1 }); Verified = $false }
-    'night'         = @{ Title = 'Ночь (тихо и ровно)';
-                         Text  = 'Меньше баса и пиков, ровная громкость: не будит соседей, речь остаётся понятной.';
+    'night'         = @{ Title = 'Night (quiet and even)';
+                         Text  = 'Less bass and fewer peaks, even loudness; speech stays clear.';
                          Values = (New-PresetValues @{ SpeakerDsp = 4; DspGainDb = 3; WooferLimitDb = 6; DspAutoGain = 1; BassDb = -4; ClarityDb = 2; CompStyle = 1 }); Verified = $false }
-    'warm'          = @{ Title = 'Мягкий';
-                         Text  = 'Эквалайзер Mac и виртуальный бас, без компрессора: больше динамики, чуть тише.';
+    'warm'          = @{ Title = 'Warm';
+                         Text  = 'Mac EQ and virtual bass, no compressor: more dynamics, a little quieter.';
                          Values = (New-PresetValues @{ SpeakerDsp = 2 }); Verified = $false }
-    'natural'       = @{ Title = 'Естественный';
-                         Text  = 'Только эквалайзер и разделение на динамики Mac, без виртуального баса и компрессора.';
+    'natural'       = @{ Title = 'Natural';
+                         Text  = 'Only the Mac EQ and crossover, no virtual bass or compressor.';
                          Values = (New-PresetValues @{ SpeakerDsp = 1 }); Verified = $false }
-    'raw'           = @{ Title = 'Без обработки (для сравнения)';
-                         Text  = 'Сырой путь: вуферы на полном диапазоне, твитеры через ФВЧ 3 кГц. Звучит плоско, баса мало.';
+    'raw'           = @{ Title = 'No processing (for comparison)';
+                         Text  = 'Plain path: full-range woofers, tweeters high-passed at 3 kHz. Sounds flat.';
                          Values = (New-PresetValues @{ SpeakerDsp = 0 }); Verified = $false }
 }
 
 # ---------------------------------------------------------------------------
-# Вывод
+# Output
 # ---------------------------------------------------------------------------
 function Write-Banner {
     Write-Host ''
     Write-Host '  ╔══════════════════════════════════════════════════════════╗' -ForegroundColor Cyan
-    Write-Host '  ║          T2AudioPort  ·  звук Apple T2 для Windows       ║' -ForegroundColor Cyan
+    Write-Host '  ║        T2AudioPort  ·  Apple T2 audio for Windows        ║' -ForegroundColor Cyan
     Write-Host '  ║                  MacBook Pro 16" (2019)                  ║' -ForegroundColor DarkCyan
     Write-Host '  ╚══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
 }
@@ -143,12 +142,12 @@ function Write-Fail($m) { Write-Host "   ✗ $m" -ForegroundColor Red }
 
 function Confirm-Action($prompt) {
     if ($Force) { return $true }
-    $a = Read-Host "  $prompt [д/н]"
-    return ($a -match '^(д|да|y|yes)$')
+    $a = Read-Host "  $prompt [y/n]"
+    return ($a -match '^(y|yes)$')
 }
 
 # ---------------------------------------------------------------------------
-# Системные проверки
+# System checks
 # ---------------------------------------------------------------------------
 function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -206,8 +205,8 @@ function Wait-DeviceService($expected, [int]$seconds = 20) {
 }
 
 # ---------------------------------------------------------------------------
-# Громкость точки T2 (Windows хранит громкость и Mute для каждой точки;
-# тестовые прогоны оставляли точку T2 заглушённой).
+# T2 speaker endpoint volume (Windows keeps volume and mute per endpoint;
+# test runs used to leave the T2 endpoint muted).
 # ---------------------------------------------------------------------------
 $code = @'
 using System;
@@ -303,40 +302,48 @@ function Get-T2Endpoint {
     $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
     if (-not (Test-Path $root)) { return $null }
     $prop = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
+    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    $first = $null
+    # The driver can expose two T2 outputs (speakers and headphones): prefer
+    # the speakers, fall back to the first T2 endpoint.
     foreach ($k in Get-ChildItem $root) {
         $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
         if ($st -ne 1) { continue }
         $props = Join-Path $k.PSPath 'Properties'
         if (-not (Test-Path $props)) { continue }
-        $v = (Get-ItemProperty -Path $props -ErrorAction SilentlyContinue).$prop
-        if ($v -and $v.StartsWith($HardwareId)) { return '{0.0.0.00000000}.' + $k.PSChildName }
+        $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
+        $v = $all.$prop
+        if (-not ($v -and $v.StartsWith($HardwareId))) { continue }
+        $id = '{0.0.0.00000000}.' + $k.PSChildName
+        if ("$($all.$descProp)" -match 'Speaker') { return $id }
+        if (-not $first) { $first = $id }
     }
-    return $null
+    return $first
 }
 
 function Set-T2Volume([double]$level) {
     if ($level -lt 0) { return }
     $ep = $null
     for ($i = 0; $i -lt 10 -and -not $ep; $i++) { $ep = Get-T2Endpoint; if (-not $ep) { Start-Sleep -Seconds 1 } }
-    if (-not $ep) { Write-Warn 'Точка T2 ещё не появилась в Windows; громкость не изменена.'; return }
+    if (-not $ep) { Write-Warn 'The T2 speaker endpoint has not appeared in Windows yet; volume unchanged.'; return }
     try {
         if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
         $r = [T2Setup.Volume]::Set($ep, [float]$level)
-        Write-Ok "Динамики T2: Mute снят, громкость $([int]($level * 100)) %, баланс L/R выровнен ($r)"
+        Write-Ok "T2 speakers: unmuted, volume $([int]($level * 100)) %, L/R balance evened ($r)"
     } catch {
-        Write-Warn "Не удалось выставить громкость: $_"
+        Write-Warn "Could not set the volume: $_"
     }
 }
 
 # ---------------------------------------------------------------------------
-# Действия
+# Actions
 # ---------------------------------------------------------------------------
 function Show-Presets {
-    Write-Section 'Пресеты звука'
+    Write-Section 'Sound presets'
     $i = 1
     foreach ($k in $Presets.Keys) {
         $p = $Presets[$k]
-        $mark = if ($p.Verified) { ' ★ проверен' } else { '' }
+        $mark = if ($p.Verified) { ' ★ approved' } else { '' }
         Write-Host ("   {0}. {1,-34}{2}" -f $i, $p.Title, $mark) -ForegroundColor White
         Write-Host ("      {0}" -f $p.Text) -ForegroundColor DarkGray
         $i++
@@ -346,11 +353,11 @@ function Show-Presets {
 function Select-PresetInteractive {
     Show-Presets
     $keys = @($Presets.Keys)
-    $a = Read-Host "  Номер пресета (Enter = 1)"
+    $a = Read-Host "  Preset number (Enter = 1)"
     if (-not $a) { return $keys[0] }
     $n = 0
     if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $keys.Count) { return $keys[$n - 1] }
-    Write-Warn 'Нет такого номера; выбран «Как на Mac».'
+    Write-Warn 'No such number; using "Like macOS".'
     return $keys[0]
 }
 
@@ -368,11 +375,11 @@ function Get-CurrentPresetName {
 function Write-PresetValues($name) {
     $p = $Presets[$name]
     foreach ($n in $PresetValueNames) { Set-Param $n $p.Values[$n] }
-    Write-Ok "Пресет «$($p.Title)»: $(($PresetValueNames | ForEach-Object { "$_=$($p.Values[$_])" }) -join ', ')"
+    Write-Ok "Preset '$($p.Title)': $(($PresetValueNames | ForEach-Object { "$_=$($p.Values[$_])" }) -join ', ')"
 }
 
-# Текущее значение параметра с учётом значения по умолчанию (DWORD читается
-# как Int32, поэтому -3 дБ возвращается как -3).
+# Current value of a parameter, or its default (a DWORD reads as Int32 in
+# PowerShell 7 and as UInt32 elsewhere; both give -3 for -3 dB).
 function Get-EffectiveParam($name) {
     $v = Get-Param $name
     if ($null -eq $v) { return [int]$ParamDefaults[$name] }
@@ -384,157 +391,157 @@ function Format-Db([int]$v) { if ($v -gt 0) { "+$v" } else { "$v" } }
 
 function Restart-T2Device {
     $d = Get-T2Device
-    if (-not $d) { Write-Fail 'Устройство T2 не найдено.'; return $false }
+    if (-not $d) { Write-Fail 'T2 device not found.'; return $false }
     if ((Get-DeviceService $d) -ne $ServiceName) {
-        Write-Info 'Драйвер T2AudioPort сейчас не активен - настройка применится после установки.'
+        Write-Info 'T2AudioPort is not active right now - the setting applies after installation.'
         return $true
     }
-    Write-Info 'Перезапуск устройства, чтобы драйвер прочитал настройки (звук пропадёт на пару секунд)...'
+    Write-Info 'Restarting the device so the driver reads the settings (sound stops for a few seconds)...'
     $r = Invoke-Pnp @('/restart-device', $d.InstanceId)
     $d = Wait-DeviceService $ServiceName
-    if ($d -and $d.Status -eq 'OK') { Write-Ok 'Устройство перезапущено.'; return $true }
-    Write-Warn "Устройство после перезапуска: $($d.Status) (pnputil код $($r.Code)). Возможно, нужна перезагрузка."
+    if ($d -and $d.Status -eq 'OK') { Write-Ok 'Device restarted.'; return $true }
+    Write-Warn "Device after restart: $($d.Status) (pnputil code $($r.Code)). A reboot may be needed."
     return $false
 }
 
 function Invoke-Status {
-    Write-Section 'Состояние'
+    Write-Section 'Status'
     $d = Get-T2Device
-    if (-not $d) { Write-Fail 'Аудиоустройство Apple T2 (VEN_106B&DEV_1803) не найдено.'; return }
+    if (-not $d) { Write-Fail 'Apple T2 audio device (VEN_106B&DEV_1803) not found.'; return }
     $svc = Get-DeviceService $d
     $ver = Get-DeviceDriverVersion $d
-    $drv = switch ($svc) { 'T2AudioMiniport' { 'T2AudioPort' } 'AppleAudio' { 'AppleAudio (драйвер Apple)' } default { "$svc" } }
+    $drv = switch ($svc) { 'T2AudioMiniport' { 'T2AudioPort' } 'AppleAudio' { 'AppleAudio (Apple driver)' } default { "$svc" } }
     $color = if ($d.Status -eq 'OK') { 'Green' } else { 'Yellow' }
-    Write-Host ("   Драйвер:        {0}  {1}" -f $drv, $ver) -ForegroundColor White
-    Write-Host ("   Устройство:     {0}" -f $d.Status) -ForegroundColor $color
+    Write-Host ("   Driver:         {0}  {1}" -f $drv, $ver) -ForegroundColor White
+    Write-Host ("   Device:         {0}" -f $d.Status) -ForegroundColor $color
     $prod = Get-Param 'EnableProduction'
-    Write-Host ("   Постоянный режим: {0}" -f $(if ($prod -eq 1) { 'включён' } else { 'выключен' })) -ForegroundColor White
+    Write-Host ("   Persistent mode: {0}" -f $(if ($prod -eq 1) { 'on' } else { 'off' })) -ForegroundColor White
     $cur = Get-CurrentPresetName
-    $pn = if ($cur) { $Presets[$cur].Title } else { 'свои значения / по умолчанию' }
-    Write-Host ("   Пресет:         {0}" -f $pn) -ForegroundColor White
-    Write-Host ("   Тембр:          бас {0} дБ, высокие {1} дБ, разборчивость {2} дБ, компрессор {3}" -f `
+    $pn = if ($cur) { $Presets[$cur].Title } else { 'custom / defaults' }
+    Write-Host ("   Preset:         {0}" -f $pn) -ForegroundColor White
+    Write-Host ("   Tone:           bass {0} dB, treble {1} dB, clarity {2} dB, compressor {3}" -f `
         (Format-Db (Get-EffectiveParam 'BassDb')), (Format-Db (Get-EffectiveParam 'TrebleDb')), `
-        (Format-Db (Get-EffectiveParam 'ClarityDb')), $(if ((Get-EffectiveParam 'CompStyle') -eq 1) { 'точный (как macOS)' } else { 'быстрый' })) -ForegroundColor White
+        (Format-Db (Get-EffectiveParam 'ClarityDb')), $(if ((Get-EffectiveParam 'CompStyle') -eq 1) { 'precise (like macOS)' } else { 'fast' })) -ForegroundColor White
     $strikes = Get-Param 'CrashGuardStrikes'; $armed = Get-Param 'CrashGuardArmed'
     if ($strikes -ge 2) {
-        Write-Fail "Защита от падений СРАБОТАЛА ($strikes обрыва подряд): драйвер не стартует. Пункт «Сбросить защиту» после разбора причины."
+        Write-Fail "Crash guard TRIPPED ($strikes unclean ends in a row): the driver does not start. Use 'Reset crash guard' once the cause is known."
     } elseif ($strikes -ge 1) {
-        Write-Warn "Прошлая сессия завершилась нештатно (обрывов подряд: $strikes)."
+        Write-Warn "The last session did not end cleanly (unclean ends in a row: $strikes)."
     } else {
-        Write-Host '   Защита от падений: в порядке' -ForegroundColor White
+        Write-Host '   Crash guard:    OK' -ForegroundColor White
     }
     $ep = Get-T2Endpoint
     if ($ep) {
         try {
             if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
             $vol = [T2Setup.Volume]::Get($ep)
-            Write-Host ("   Громкость T2:   {0}" -f $vol) -ForegroundColor White
+            Write-Host ("   T2 volume:      {0}" -f $vol) -ForegroundColor White
             if ($vol -match 'L=([\d.,]+) R=([\d.,]+)') {
                 $l = [double]($Matches[1] -replace ',', '.'); $r = [double]($Matches[2] -replace ',', '.')
-                if ([math]::Abs($l - $r) -gt 0.02) { Write-Warn 'Баланс L/R неравный (Параметры звука, Уровни, Баланс). Выровнять: .\T2Audio-Setup.ps1 -Action Balance' }
+                if ([math]::Abs($l - $r) -gt 0.02) { Write-Warn 'L/R balance is uneven (Sound settings, Levels, Balance). Fix: .\T2Audio-Setup.ps1 -Action Balance' }
             }
         } catch { }
     }
     Show-Features
-    $ts = if (Test-TestSigning) { 'включён' } else { 'ВЫКЛЮЧЕН' }
+    $ts = if (Test-TestSigning) { 'on' } else { 'OFF' }
     Write-Host ("   testsigning:    {0}" -f $ts) -ForegroundColor White
-    if (Test-Path $TestSession) { Write-Warn 'Есть тестовая сессия агента (TestSession) - она удалится при перезагрузке.' }
+    if (Test-Path $TestSession) { Write-Warn 'A test-agent session (TestSession) exists - it is removed at reboot.' }
 }
 
 function Invoke-Install {
-    Write-Section 'Установка T2AudioPort'
+    Write-Section 'Installing T2AudioPort'
     $model = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model
     if ($model -and $model -ne 'MacBookPro16,1') {
-        Write-Warn "Модель $model, а DSP настроен для MacBookPro16,1."
-        if (-not (Confirm-Action 'Всё равно продолжить?')) { return }
+        Write-Warn "This is a $model; the sound processing is tuned for MacBookPro16,1."
+        if (-not (Confirm-Action 'Continue anyway?')) { return }
     }
     if (-not (Test-TestSigning)) {
-        Write-Fail 'testsigning выключен: тестовую подпись драйвера Windows не примет.'
-        Write-Info  'Включение: bcdedit /set testsigning on, затем перезагрузка (Secure Boot должен быть выключен).'
+        Write-Fail 'testsigning is off: Windows will not accept the test-signed driver.'
+        Write-Info  'Enable it: bcdedit /set testsigning on, then reboot (Secure Boot must be off).'
         return
     }
     foreach ($f in @($InfPath, $SysPath, $CatPath)) {
-        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Нет файла пакета: $f (соберите и подпишите по GEMINI.md §2)"; return }
+        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Package file missing: $f (build and sign it as in GEMINI.md section 2)"; return }
     }
     $sig = Get-AuthenticodeSignature -LiteralPath $SysPath
-    if (-not $sig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys не подписан.'; return }
+    if (-not $sig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys is not signed.'; return }
     $hash = (Get-FileHash -LiteralPath $SysPath -Algorithm SHA256).Hash
     $infVer = (Select-String -LiteralPath $InfPath -Pattern '^DriverVer\s*=\s*(.+)$').Matches | Select-Object -First 1
-    Write-Ok "Пакет: $(if ($infVer) { $infVer.Groups[1].Value } else { '?' }), SHA256 $($hash.Substring(0, 16))…"
+    Write-Ok "Package: $(if ($infVer) { $infVer.Groups[1].Value } else { '?' }), SHA256 $($hash.Substring(0, 16))…"
 
     $d = Get-T2Device
-    if (-not $d) { Write-Fail 'Аудиоустройство Apple T2 не найдено.'; return }
+    if (-not $d) { Write-Fail 'Apple T2 audio device not found.'; return }
 
     Write-Host ''
-    Write-Warn 'Драйвер экспериментальный. После установки он будет стартовать при каждой загрузке.'
-    Write-Info 'Если две сессии подряд оборвутся (BSOD, зависание), драйвер сам перестанет стартовать;'
-    Write-Info 'вернуть Apple-драйвер можно этим же скриптом (пункт «Вернуть AppleAudio») или в безопасном режиме.'
+    Write-Warn 'This driver is experimental. Once installed it starts on every boot.'
+    Write-Info 'If two sessions in a row end uncleanly (BSOD, hang), it stops starting by itself;'
+    Write-Info 'the Apple driver comes back with this script ("Restore AppleAudio") or from Safe Mode.'
     if (-not $Force) {
-        $a = Read-Host "  Напишите УСТАНОВИТЬ для продолжения"
-        if ($a -ne 'УСТАНОВИТЬ') { Write-Warn 'Отменено.'; return }
+        $a = Read-Host "  Type INSTALL to continue"
+        if ($a -ne 'INSTALL') { Write-Warn 'Cancelled.'; return }
     }
 
-    if (Test-Path $TestSession) { Remove-Item -Path $TestSession -Recurse -Force; Write-Info 'Тестовая сессия агента удалена.' }
+    if (Test-Path $TestSession) { Remove-Item -Path $TestSession -Recurse -Force; Write-Info 'Test-agent session removed.' }
     Unregister-ScheduledTask -TaskName 'T2Audio-AutoCapture-AfterBoot' -Confirm:$false -ErrorAction SilentlyContinue
 
-    # Настройки до привязки: драйвер читает их при старте.
+    # Settings before binding: the driver reads them at start.
     Write-PresetValues $Preset
     Set-Param 'EnableProduction' 1
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
-    Write-Ok 'Постоянный режим включён, защита от падений сброшена.'
+    Write-Ok 'Persistent mode on, crash guard reset.'
 
-    # Отключение устройства перед привязкой избавляет от Code 14 (перезагрузки).
-    Write-Info 'Привязка драйвера к устройству...'
+    # Disabling the device before binding avoids Code 14 (reboot required).
+    Write-Info 'Binding the driver to the device...'
     $null = Invoke-Pnp @('/disable-device', $d.InstanceId)
     $r = Invoke-Pnp @('/add-driver', $InfPath, '/install')
     $null = Invoke-Pnp @('/enable-device', $d.InstanceId)
     if ($r.Code -ne 0 -and $r.Code -ne 3010) {
-        Write-Fail "pnputil /add-driver вернул $($r.Code)."
+        Write-Fail "pnputil /add-driver returned $($r.Code)."
         Write-Info ($r.Out.Trim())
         return
     }
     $d = Wait-DeviceService $ServiceName 30
     if ($d -and $d.Status -eq 'OK' -and (Get-DeviceService $d) -eq $ServiceName) {
-        Write-Ok 'T2AudioPort установлен и работает.'
+        Write-Ok 'T2AudioPort is installed and running.'
         Set-T2Volume $Volume
         Write-Host ''
-        Write-Info 'Выберите «Динамики» Apple T2 устройством вывода в параметрах звука, если Windows не сделала этого сама.'
-        Write-Info 'Пресет можно сменить в любой момент: .\T2Audio-Setup.ps1 -Action Preset -Preset bright'
+        Write-Info 'Pick the Apple T2 "Speakers" as the output in Sound settings if Windows did not do it by itself.'
+        Write-Info 'Change the preset any time: .\T2Audio-Setup.ps1 -Action Preset -Preset bright'
     } elseif ($r.Code -eq 3010) {
-        Write-Warn 'Windows просит перезагрузку, чтобы завершить установку.'
+        Write-Warn 'Windows asks for a reboot to finish the installation.'
     } else {
-        Write-Fail "Устройство не запустилось: $($d.Status), драйвер $(Get-DeviceService $d)."
-        Write-Info 'Проверьте testsigning и подпись; откат - пункт «Вернуть AppleAudio».'
+        Write-Fail "The device did not start: $($d.Status), driver $(Get-DeviceService $d)."
+        Write-Info 'Check testsigning and the signature; to roll back use "Restore AppleAudio".'
     }
 }
 
 function Invoke-Preset {
-    Write-Section 'Смена пресета'
+    Write-Section 'Changing the preset'
     Write-PresetValues $Preset
     $null = Restart-T2Device
 }
 
 function Read-DbInteractive($label, $name) {
     $cur = Get-EffectiveParam $name
-    $a = Read-Host ("  {0}, дБ от -12 до +12 (сейчас {1}; Enter = не менять)" -f $label, (Format-Db $cur))
+    $a = Read-Host ("  {0}, dB from -12 to +12 (now {1}; Enter = unchanged)" -f $label, (Format-Db $cur))
     if (-not $a) { return $null }
     $n = 0
     if ([int]::TryParse($a.Trim().TrimStart('+'), [ref]$n) -and $n -ge -12 -and $n -le 12) { return $n }
-    Write-Warn 'Нужно целое число от -12 до +12; не меняю.'
+    Write-Warn 'Needs a whole number from -12 to +12; unchanged.'
     return $null
 }
 
-# Тембр поверх текущего пресета: меняет только указанные значения.
+# Tone on top of the current preset: changes only the given values.
 function Invoke-Tune([switch]$Interactive) {
-    Write-Section 'Тембр'
+    Write-Section 'Tone'
     $changes = [ordered]@{}
     if ($Interactive) {
-        foreach ($pair in @(@('Бас (150 Гц)', 'BassDb'), @('Высокие (6 кГц)', 'TrebleDb'), @('Разборчивость (2,5 кГц)', 'ClarityDb'))) {
+        foreach ($pair in @(@('Bass (150 Hz)', 'BassDb'), @('Treble (6 kHz)', 'TrebleDb'), @('Clarity (2.5 kHz)', 'ClarityDb'))) {
             $v = Read-DbInteractive $pair[0] $pair[1]
             if ($null -ne $v) { $changes[$pair[1]] = $v }
         }
-        $c = Read-Host '  Компрессор: 0 = быстрый, 1 = точный как macOS (Enter = не менять)'
+        $c = Read-Host '  Compressor: 0 = fast, 1 = precise like macOS (Enter = unchanged)'
         if ($c -eq '0' -or $c -eq '1') { $changes['CompStyle'] = [int]$c }
     } else {
         if ($null -ne $BassDb)    { $changes['BassDb'] = $BassDb }
@@ -543,74 +550,74 @@ function Invoke-Tune([switch]$Interactive) {
         if ($null -ne $CompStyle) { $changes['CompStyle'] = $CompStyle }
     }
     if ($changes.Count -eq 0) {
-        Write-Info 'Ничего не изменено. Пример: .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2'
+        Write-Info 'Nothing changed. Example: .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb -2'
         return
     }
     foreach ($k in $changes.Keys) { Set-Param $k $changes[$k] }
-    Write-Ok "Тембр: $(($changes.Keys | ForEach-Object { "$_=$($changes[$_])" }) -join ', ')"
+    Write-Ok "Tone: $(($changes.Keys | ForEach-Object { "$_=$($changes[$_])" }) -join ', ')"
     $null = Restart-T2Device
 }
 
 function Invoke-ResetGuard {
-    Write-Section 'Сброс защиты от падений'
+    Write-Section 'Resetting the crash guard'
     $s = Get-Param 'CrashGuardStrikes'
-    Write-Info "Обрывов подряд сейчас: $(if ($null -eq $s) { 0 } else { $s })"
-    if (-not (Confirm-Action 'Сбросить и разрешить драйверу стартовать?')) { return }
+    Write-Info "Unclean ends in a row now: $(if ($null -eq $s) { 0 } else { $s })"
+    if (-not (Confirm-Action 'Reset and let the driver start?')) { return }
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
-    Write-Ok 'Сброшено.'
+    Write-Ok 'Reset.'
     $null = Restart-T2Device
 }
 
 function Invoke-Uninstall {
-    Write-Section 'Возврат драйвера Apple (AppleAudio)'
-    if (-not (Confirm-Action 'Удалить T2AudioPort и вернуть AppleAudio?')) { return }
+    Write-Section 'Restoring the Apple driver (AppleAudio)'
+    if (-not (Confirm-Action 'Remove T2AudioPort and restore AppleAudio?')) { return }
     if (Test-Path $ParamsPath) { Set-Param 'EnableProduction' 0 }
     if (Test-Path $TestSession) { Remove-Item -Path $TestSession -Recurse -Force }
     $infs = @(Get-OemInfsForT2)
-    if ($infs.Count -eq 0) { Write-Info 'Пакет T2AudioPort в хранилище драйверов не найден.' }
+    if ($infs.Count -eq 0) { Write-Info 'No T2AudioPort package in the driver store.' }
     foreach ($inf in $infs) {
         $r = Invoke-Pnp @('/delete-driver', $inf, '/uninstall', '/force')
-        if ($r.Code -eq 0) { Write-Ok "Удалён $inf" } else { Write-Warn "pnputil /delete-driver ${inf}: код $($r.Code)" }
+        if ($r.Code -eq 0) { Write-Ok "Removed $inf" } else { Write-Warn "pnputil /delete-driver ${inf}: code $($r.Code)" }
     }
     $null = Invoke-Pnp @('/scan-devices')
     $d = Wait-DeviceService 'AppleAudio' 30
     if ($d -and (Get-DeviceService $d) -eq 'AppleAudio' -and $d.Status -eq 'OK') {
-        Write-Ok 'Устройство снова на AppleAudio.'
+        Write-Ok 'The device is back on AppleAudio.'
     } else {
-        Write-Warn "Сейчас: $($d.Status), драйвер $(Get-DeviceService $d)."
-        Write-Info 'Если AppleAudio не вернулся сам: перезагрузка или .\Restore-AppleAudioDriver.ps1 (скачивает драйвер из Boot Camp).'
+        Write-Warn "Now: $($d.Status), driver $(Get-DeviceService $d)."
+        Write-Info 'If AppleAudio did not come back by itself: reboot, or .\Restore-AppleAudioDriver.ps1 (downloads the Boot Camp driver).'
     }
 }
 
-# Экспериментальные функции драйвера 1.0.12.0+ (все выключены по умолчанию).
-# Наушники = HeadphoneOutput + JackEvents (слежение за гнездом) + HeadphoneAutoMute
-# (динамики молчат, пока вставлены наушники).
+# Optional driver features (1.0.13.x; all off by default, all verified on
+# hardware 2026-10-29). Headphones = HeadphoneOutput + JackEvents (jack
+# tracking) + HeadphoneAutoMute (speakers silent while headphones are in).
 $FeatureParams = [ordered]@{
     Headphones       = @('HeadphoneOutput', 'JackEvents', 'HeadphoneAutoMute')
-    Microphone       = @('MicInput', 'MicStartIo')   # запись проверена на 1.0.13.4
+    Microphone       = @('MicInput', 'MicStartIo')   # recording verified on 1.0.13.4
     ResumeAfterSleep = @('ResumeAfterSleep')
     ExtraFormats     = @('ExtraFormats')
 }
 $FeatureTitles = @{
-    Headphones = 'Наушники (выход 3,5 мм, автопереключение)'; Microphone = 'Встроенные микрофоны'
-    ResumeAfterSleep = 'Звук после сна без перезапуска'; ExtraFormats = 'Форматы 16/24 бит'
+    Headphones = 'Headphones (3.5 mm output)'; Microphone = 'Built-in microphones'
+    ResumeAfterSleep = 'Sound back after sleep by itself'; ExtraFormats = '16/24-bit formats'
 }
 
 function Show-Features {
     foreach ($f in $FeatureParams.Keys) {
         $on = ((Get-Param $FeatureParams[$f][0]) -eq 1)
-        Write-Host ("   {0,-46} {1}" -f $FeatureTitles[$f], $(if ($on) { 'вкл' } else { 'выкл' })) -ForegroundColor White
+        Write-Host ("   {0,-46} {1}" -f $FeatureTitles[$f], $(if ($on) { 'on' } else { 'off' })) -ForegroundColor White
     }
 }
 
 function Invoke-Features([switch]$Interactive) {
-    Write-Section 'Экспериментальные функции (не проверены на железе)'
+    Write-Section 'Optional features'
     $changes = [ordered]@{}
     if ($Interactive) {
         foreach ($f in $FeatureParams.Keys) {
             $cur = ((Get-Param $FeatureParams[$f][0]) -eq 1)
-            $a = Read-Host ("  {0} (сейчас {1}): 1 = вкл, 0 = выкл, Enter = не менять" -f $FeatureTitles[$f], $(if ($cur) { 'вкл' } else { 'выкл' }))
+            $a = Read-Host ("  {0} (now {1}): 1 = on, 0 = off, Enter = unchanged" -f $FeatureTitles[$f], $(if ($cur) { 'on' } else { 'off' }))
             if ($a -eq '0' -or $a -eq '1') { $changes[$f] = [int]$a }
         }
     } else {
@@ -621,14 +628,14 @@ function Invoke-Features([switch]$Interactive) {
     }
     if ($changes.Count -eq 0) {
         Show-Features
-        Write-Info 'Ничего не изменено. Пример: .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1'
+        Write-Info 'Nothing changed. Example: .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1'
         return
     }
     foreach ($f in $changes.Keys) {
         foreach ($n in $FeatureParams[$f]) { Set-Param $n $changes[$f] }
-        Write-Ok ("{0}: {1}" -f $FeatureTitles[$f], $(if ($changes[$f] -eq 1) { 'включено' } else { 'выключено' }))
+        Write-Ok ("{0}: {1}" -f $FeatureTitles[$f], $(if ($changes[$f] -eq 1) { 'on' } else { 'off' }))
     }
-    Write-Warn 'Если что-то пошло не так: .\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0'
+    Write-Warn 'If something goes wrong: .\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0'
     $null = Restart-T2Device
 }
 
@@ -636,15 +643,15 @@ function Show-Menu {
     while ($true) {
         Write-Banner
         Invoke-Status
-        Write-Section 'Что сделать?'
-        Write-Host '   1. Установить / обновить T2AudioPort' -ForegroundColor White
-        Write-Host '   2. Сменить пресет звука' -ForegroundColor White
-        Write-Host '   3. Сбросить защиту от падений' -ForegroundColor White
-        Write-Host '   4. Вернуть драйвер Apple (удалить T2AudioPort)' -ForegroundColor White
-        Write-Host '   5. Подстроить тембр (бас / высокие / разборчивость)' -ForegroundColor White
-        Write-Host '   6. Экспериментальные функции (наушники, микрофоны, сон)' -ForegroundColor White
-        Write-Host '   0. Выход' -ForegroundColor White
-        $c = Read-Host "`n  Выбор"
+        Write-Section 'What to do?'
+        Write-Host '   1. Install / update T2AudioPort' -ForegroundColor White
+        Write-Host '   2. Change the sound preset' -ForegroundColor White
+        Write-Host '   3. Reset the crash guard' -ForegroundColor White
+        Write-Host '   4. Restore AppleAudio (remove T2AudioPort)' -ForegroundColor White
+        Write-Host '   5. Adjust the tone (bass / treble / clarity)' -ForegroundColor White
+        Write-Host '   6. Optional features (headphones, microphones, sleep, formats)' -ForegroundColor White
+        Write-Host '   0. Exit' -ForegroundColor White
+        $c = Read-Host "`n  Choice"
         switch ($c) {
             '1' { $script:Preset = Select-PresetInteractive; Invoke-Install }
             '2' { $script:Preset = Select-PresetInteractive; Invoke-Preset }
@@ -653,21 +660,21 @@ function Show-Menu {
             '5' { Invoke-Tune -Interactive }
             '6' { Invoke-Features -Interactive }
             '0' { return }
-            default { Write-Warn 'Нет такого пункта.' }
+            default { Write-Warn 'No such item.' }
         }
-        Read-Host "`n  Enter - в меню" | Out-Null
+        Read-Host "`n  Enter - back to the menu" | Out-Null
     }
 }
 
 # ---------------------------------------------------------------------------
-if (-not (Test-Admin)) { Write-Fail 'Запустите PowerShell от имени администратора.'; exit 1 }
+if (-not (Test-Admin)) { Write-Fail 'Run PowerShell as administrator.'; exit 1 }
 switch ($Action) {
     'Menu'       { Show-Menu }
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
     'Features'   { Write-Banner; Invoke-Features }
-    'Balance'    { Write-Banner; Write-Section 'Баланс'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
+    'Balance'    { Write-Banner; Write-Section 'Balance'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
     'Uninstall'  { Write-Banner; Invoke-Uninstall }

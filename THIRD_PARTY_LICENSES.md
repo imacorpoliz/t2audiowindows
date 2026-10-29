@@ -67,9 +67,43 @@ building the driver with MSBuild) follows the approach of that project's
 
 ---
 
-## Note on Clean Room Implementation
+## Note on what is original and what is derived
 
-This Windows driver does NOT contain any copied GPL code. All implementation is original, written for the Windows Driver Model (WDM) and PortCls framework. Protocol constants and structure definitions are derived from publicly documented reverse engineering research.
+The driver code (WDM / PortCls, the BCE transport, the WaveRT streams, the
+fixed-point DSP engine, the microphone capture) is original and contains no
+copied source code. Protocol constants and structure layouts come from the
+KAIT2EN / linux-t2 research and from our own reverse engineering of Apple's
+Windows drivers (below). **However, the DSP coefficient tables
+(`src/T2AudioDspProfile16_1.h`) and the microphone chain constants
+(`src/T2AudioMicLogic.h`) are derived from KAIT2EN's GPL-3.0-or-later DSP
+profile**, so a built driver must be distributed under GPL-3.0-or-later
+(see the KAIT2EN section above). An earlier version of this note said the
+driver contained no GPL-derived material; that stopped being true when the
+DSP was added (2026-10-28).
+
+## KAIT2EN microphone profile
+
+`src/T2AudioMicLogic.h` implements `dsp/profiles/16_1/mic.json` of KAIT2EN
+(beam = 0.5·mic0 + 0.5·mic1, the 48 kHz high-pass biquad, the +39 dB output
+gain), Copyright (C) 2026 André Eikmeyer, GPL-3.0-or-later with the
+attribution term of KAIT2EN `LICENSING.md`.
+
+## lsp-plugins (reference only)
+
+The `CompStyle=1` compressor detector (RMS over 10 ms, ±6 dB soft knee) and
+the K-weighted autogain follow the documented behaviour and defaults of
+lsp-plugins `mb_compressor` and `autogain` (LGPL-3.0) as configured in the
+KAIT2EN graph. No lsp-plugins code was used; the K-weighting coefficients are
+the public ITU-R BS.1770 values.
+
+## Reverse engineering of Apple's Windows drivers
+
+How AppleUSBVHCI delivers T2 messages (IOCTL 0x222020), the microphone
+registration message (837-byte `SET_INPUT_STREAM_ADDRESS_RANGES`), the
+`'nsrt'` sample-rate property, the BufferStruct entry AppleAudio appends for
+the microphone, and the power handling were learned by static analysis of
+`AppleAudio.sys` and `AppleUSBVHCI.sys` (Ghidra) for interoperability, and
+are documented in `docs/analysis/`. No Apple code is included.
 
 ## bankstown (virtual bass)
 
