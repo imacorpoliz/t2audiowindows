@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="240" viewBox="0 0 960 240" role="img" aria-label="T2AudioPort — Apple T2 audio for Windows">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.5" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="240" rx="20" fill="url(#bg)"/>
+  <!-- six speakers: woofer, woofer, tweeter on each side -->
+  <g fill="none" stroke="#334155" stroke-width="2">
+    <circle cx="96" cy="88" r="26"/><circle cx="96" cy="88" r="10"/>
+    <circle cx="96" cy="156" r="26"/><circle cx="96" cy="156" r="10"/>
+    <circle cx="160" cy="122" r="14"/><circle cx="160" cy="122" r="5"/>
+    <circle cx="864" cy="88" r="26"/><circle cx="864" cy="88" r="10"/>
+    <circle cx="864" cy="156" r="26"/><circle cx="864" cy="156" r="10"/>
+    <circle cx="800" cy="122" r="14"/><circle cx="800" cy="122" r="5"/>
+  </g>
+  <!-- waveform -->
+  <path d="M200 206 C 240 188, 260 224, 300 206 S 360 190, 400 206 S 460 222, 500 206 S 560 190, 600 206 S 660 222, 700 206 S 740 192, 760 206"
+        fill="none" stroke="url(#wave)" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+  <text x="480" y="92" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="44" font-weight="700" fill="#f8fafc">T2AudioPort</text>
+  <text x="480" y="134" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="20" fill="#cbd5e1">Apple T2 audio for Windows · MacBook Pro 16" (2019)</text>
+  <text x="480" y="166" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="15" fill="#94a3b8">6 speakers · headphones · microphones · KAIT2EN sound</text>
+</svg>

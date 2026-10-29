@@ -31,6 +31,31 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): installer tools (Doctor, Switch + Ctrl+Alt+H, tests, backup, report); ideas list
+
+The owner asked for a more thoughtful installer with useful functions, and what else owning the driver makes possible.
+- **New actions in `tools/T2Audio-Setup.ps1`:** `Doctor` (model, Windows, Secure Boot, test mode, BitLocker, driver, certificate trust, crash guard, the three endpoints vs the enabled features, default output/input, mute and balance, Kernel-Power 41 and minidumps of the last 7 days — a fix line for every problem); `Switch -To Speakers|Headphones|Toggle` (default output via `IPolicyConfig`, the interim answer to the missing automatic switching); `Shortcut` (desktop shortcut with hotkey **Ctrl+Alt+H** running Switch hidden, without admin); `SoundTest` (quiet tones left/right/both on the default T2 output, generated in memory); `MicTest` (5 s recording from the T2 microphone via winmm MCI, peak/RMS, playback); `Backup`/`Restore` (settings JSON on the desktop; crash guard and persistent mode excluded); `Report` (zip on the desktop: Doctor+Status transcript, Parameters export, device/driver list, T2/power events, minidump list, setupapi lines — no dumps or personal files). Switch/SoundTest/MicTest/Shortcut run without admin; everything else still requires it.
+- **Menu regrouped** into Setup / Sound / Maintenance (1–9 and letters D, R, B, L, K, G, C).
+- The C# part (endpoint ids, default device, WAV generation/analysis, MCI recording) is compiled by CI; the script has not been run on Windows yet — GEMINI part 3, B step 5 tests every new action.
+- **ROADMAP §9 (new): ideas** — live settings without a device restart, a tray app, microphone array geometry for Windows' own beamforming/noise suppression, headphone EQ/crossfeed, loudness at low volume, level-dependent anti-rattle, virtual surround for 5.1, a low-latency mode, other T2 Macs.
+
+### 2026-10-29 (Claude): colourful README, step-by-step user guide for the release
+
+- **README** redesigned (owner: «сделай readme красочнее»): SVG banner (`assets/banner.svg`, rendered and checked), badges (CI, beta, model, Windows, WaveRT, licence), feature tables with status icons, a quick start, a mermaid diagram of the sound chain, credits table, licence. Content unchanged in substance and still honest: beta, one machine, what does not work.
+- **New `docs/GUIDE.md`** (owner: «подготовь гайд к будущему установщику»): for end users installing from a release zip — before-you-start checklist (model, BitLocker key, restore point), turning Secure Boot off in the Startup Security Utility, unblocking the downloaded files and the per-window execution policy, `-Action Prepare` + restart, `-Action Install` with the expected English messages (certificate prompt, `INSTALL`), picking the output, optional features (headphones switch manually for now), presets, keeping it working (Windows Update, crash guard), uninstall incl. turning test mode and Secure Boot back, troubleshooting table, FAQ. The messages quoted are the installer's actual strings.
+
+### 2026-10-29 (Claude): licence GPL-3.0-or-later; installer prepares test mode and can turn it off
+
+The owner agreed («делай») to the three proposals after deciding against a Microsoft signature:
+- **`LICENSE`** = GPL-3.0-or-later (text from KAIT2EN `LICENSES/GPL-3.0-or-later.txt`), required because the driver compiles KAIT2EN's GPL-3.0-or-later DSP profile. Its section 7(b) attribution is shown in the README and, as the "Appropriate Legal Notices" of an interactive program, in the installer banner (KAIT2EN 16_1 profile © André Eikmeyer; bankstown © James Calligeros, MIT). ROADMAP 6.2 closed.
+- **`-Action Prepare`** (menu 8): checks Secure Boot (`Confirm-SecureBootUEFI`; if on, explains the Startup Security Utility), offers to suspend BitLocker for one reboot (a boot-configuration change otherwise triggers the recovery-key prompt), runs `bcdedit /set testsigning on`, asks for a reboot. `-Action Install` now points to it when test mode is off.
+- **`-Action Uninstall`** offers (default no, skipped with `-Force`) to turn test mode off again after AppleAudio is back, with the same BitLocker handling.
+- Not run on Windows here (no PowerShell host); CI parses the script; GEMINI.md part 3, B checks Prepare read-only.
+
+### 2026-10-29 (owner decision): no Microsoft signature
+
+The owner: «подпись делать не буду» ("I won't do the signature"). The driver stays test-signed: users need `testsigning` on and Secure Boot off. ROADMAP 6.1 closed; README says so.
+
 ### 2026-10-29 (Claude): Windows Update guard in the installer; full plan for the remaining hardware work (GEMINI.md part 3)
 
 - **ROADMAP 2.7 (Windows Update may reinstall AppleAudio):** `-Action Status` now warns when the device runs AppleAudio while persistent mode is on. New opt-in `-Action UpdateGuard -Block 1|0` (menu 7): sets the documented Windows settings `ExcludeWUDriversInQualityUpdate=1` (policy) and `DriverSearching\SearchOrderConfig=0`, saving the previous values under the driver's Parameters key; `-Block 0` restores them. It affects driver updates for all devices, so it is never turned on by default. `-Action Uninstall` reminds about it.

@@ -2,6 +2,7 @@
 #
 # Menu (run without parameters) or parameters:
 #   .\T2Audio-Setup.ps1                                  # interactive menu
+#   .\T2Audio-Setup.ps1 -Action Prepare                  # turn on test mode (once, then reboot)
 #   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # install, persistent mode
 #   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # change the sound preset
 #   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # tone on top of the preset
@@ -9,6 +10,14 @@
 #   .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1   # optional features
 #   .\T2Audio-Setup.ps1 -Action UpdateGuard -Block 1     # keep Windows Update from restoring AppleAudio
 #   .\T2Audio-Setup.ps1 -Action Status
+#   .\T2Audio-Setup.ps1 -Action Doctor                   # check everything, with fixes
+#   .\T2Audio-Setup.ps1 -Action Switch -To Headphones    # default output (no admin needed)
+#   .\T2Audio-Setup.ps1 -Action Shortcut                 # desktop shortcut Ctrl+Alt+H: speakers <-> headphones
+#   .\T2Audio-Setup.ps1 -Action SoundTest                # left / right / both test tones
+#   .\T2Audio-Setup.ps1 -Action MicTest                  # record 5 s, show the level, play it back
+#   .\T2Audio-Setup.ps1 -Action Backup  [-File x.json]   # save your settings
+#   .\T2Audio-Setup.ps1 -Action Restore [-File x.json]   # load them again
+#   .\T2Audio-Setup.ps1 -Action Report                   # zip for a bug report (on the desktop)
 #   .\T2Audio-Setup.ps1 -Action ResetGuard               # reset the crash guard
 #   .\T2Audio-Setup.ps1 -Action Uninstall                # go back to AppleAudio
 #
@@ -24,7 +33,9 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Prepare', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status',
+                 'Doctor', 'Switch', 'Shortcut', 'SoundTest', 'MicTest', 'Backup', 'Restore', 'Report',
+                 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
@@ -47,6 +58,13 @@ param(
     # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
     # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
     [ValidateRange(0, 1)] [Nullable[int]]$Block,
+
+    # -Action Switch: which T2 output becomes the Windows default.
+    [ValidateSet('Speakers', 'Headphones', 'Toggle')]
+    [string]$To = 'Toggle',
+
+    # -Action Backup / Restore: the settings file (default: Desktop\T2AudioPort-settings.json).
+    [string]$File = '',
 
     # T2 speaker volume after install (0..1); -1 = leave unchanged.
     [double]$Volume = 0.3,
@@ -138,6 +156,9 @@ function Write-Banner {
     Write-Host '  ║        T2AudioPort  ·  Apple T2 audio for Windows        ║' -ForegroundColor Cyan
     Write-Host '  ║                  MacBook Pro 16" (2019)                  ║' -ForegroundColor DarkCyan
     Write-Host '  ╚══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
+    # Legal notice (GPL-3.0 section 7b attribution term of the KAIT2EN profile).
+    Write-Host '   GPL-3.0-or-later. Speaker/mic DSP from the KAIT2EN 16_1 profile (C) André Eikmeyer;' -ForegroundColor DarkGray
+    Write-Host '   virtual bass after bankstown (C) James Calligeros, MIT. See THIRD_PARTY_LICENSES.md.' -ForegroundColor DarkGray
 }
 function Write-Section($t) { Write-Host ''; Write-Host "  ── $t " -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "   ✓ $m" -ForegroundColor Green }
@@ -215,6 +236,9 @@ function Wait-DeviceService($expected, [int]$seconds = 20) {
 # ---------------------------------------------------------------------------
 $code = @'
 using System;
+using System.IO;
+using System.Text;
+using System.Threading;
 using System.Runtime.InteropServices;
 
 namespace T2Setup {
@@ -223,12 +247,125 @@ namespace T2Setup {
 [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDeviceEnumerator {
     [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
-    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr endpoint);
+    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
     [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
 }
 [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDevice {
     [PreserveSig] int Activate(ref Guid iid, CLSCTX clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+    [PreserveSig] int OpenPropertyStore(int access, out IntPtr store);
+    [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    [PreserveSig] int GetState(out int state);
+}
+// Undocumented but stable since Vista: what Sound settings itself uses to set
+// the default device (also in tools/Set-DefaultAudioDevice.ps1).
+[Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPolicyConfig {
+    [PreserveSig] int GetMixFormat([MarshalAs(UnmanagedType.LPWStr)] string device, out IntPtr format);
+    [PreserveSig] int GetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string device, [MarshalAs(UnmanagedType.Bool)] bool isDefault, out IntPtr format);
+    [PreserveSig] int ResetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string device);
+    [PreserveSig] int SetDeviceFormat([MarshalAs(UnmanagedType.LPWStr)] string device, IntPtr endpointFormat, IntPtr mixFormat);
+    [PreserveSig] int GetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string device, [MarshalAs(UnmanagedType.Bool)] bool isDefault, IntPtr defaultPeriod, IntPtr minimumPeriod);
+    [PreserveSig] int SetProcessingPeriod([MarshalAs(UnmanagedType.LPWStr)] string device, IntPtr period);
+    [PreserveSig] int GetShareMode([MarshalAs(UnmanagedType.LPWStr)] string device, IntPtr mode);
+    [PreserveSig] int SetShareMode([MarshalAs(UnmanagedType.LPWStr)] string device, IntPtr mode);
+    [PreserveSig] int GetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string device, [MarshalAs(UnmanagedType.Bool)] bool fxStore, IntPtr key, IntPtr value);
+    [PreserveSig] int SetPropertyValue([MarshalAs(UnmanagedType.LPWStr)] string device, [MarshalAs(UnmanagedType.Bool)] bool fxStore, IntPtr key, IntPtr value);
+    [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string device, int role);
+    [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string device, [MarshalAs(UnmanagedType.Bool)] bool visible);
+}
+[ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")] public class CPolicyConfigClient { }
+
+public static class Endpoints {
+    // flow 0 = render, 1 = capture; role 0 = console, 1 = multimedia, 2 = communications.
+    public static string DefaultId(int flow, int role) {
+        var en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(MMDeviceEnumerator));
+        IMMDevice d;
+        if (en.GetDefaultAudioEndpoint(flow, role, out d) != 0 || d == null) return null;
+        string id;
+        return d.GetId(out id) == 0 ? id : null;
+    }
+    // Make the endpoint the default for all three roles; returns the first failing HRESULT or 0.
+    public static int SetDefault(string id) {
+        var p = (IPolicyConfig)Activator.CreateInstance(typeof(CPolicyConfigClient));
+        for (int role = 0; role < 3; role++) {
+            int hr = p.SetDefaultEndpoint(id, role);
+            if (hr != 0) return hr;
+        }
+        return 0;
+    }
+}
+
+public static class Wav {
+    static void Header(BinaryWriter w, int dataBytes, int channels) {
+        w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + dataBytes);
+        w.Write(Encoding.ASCII.GetBytes("WAVEfmt ")); w.Write(16); w.Write((short)1);
+        w.Write((short)channels); w.Write(48000); w.Write(48000 * 2 * channels);
+        w.Write((short)(2 * channels)); w.Write((short)16);
+        w.Write(Encoding.ASCII.GetBytes("data")); w.Write(dataBytes);
+    }
+    // 48 kHz 16-bit stereo tone; mask 1 = left, 2 = right, 3 = both; 20 ms fades.
+    public static byte[] Tone(double freq, double seconds, int mask, double amplitude) {
+        int frames = (int)(48000 * seconds), fade = 960;
+        var ms = new MemoryStream();
+        var w = new BinaryWriter(ms);
+        Header(w, frames * 4, 2);
+        for (int i = 0; i < frames; i++) {
+            double env = Math.Min(1.0, Math.Min(i, frames - 1 - i) / (double)fade);
+            short v = (short)(Math.Sin(2 * Math.PI * freq * i / 48000.0) * amplitude * env * 32767);
+            w.Write((mask & 1) != 0 ? v : (short)0);
+            w.Write((mask & 2) != 0 ? v : (short)0);
+        }
+        w.Flush();
+        return ms.ToArray();
+    }
+    // "peak=-12.3 dBFS rms=-34.5 dBFS 5.0 s" for a 16-bit PCM file.
+    public static string Analyze(string path) {
+        byte[] b = File.ReadAllBytes(path);
+        int pos = 12, channels = 1, rate = 48000;
+        while (pos + 8 <= b.Length) {
+            string id = Encoding.ASCII.GetString(b, pos, 4);
+            int len = BitConverter.ToInt32(b, pos + 4);
+            if (id == "fmt ") { channels = BitConverter.ToInt16(b, pos + 10); rate = BitConverter.ToInt32(b, pos + 12); }
+            if (id == "data") {
+                int end = Math.Min(b.Length, pos + 8 + len);
+                double peak = 0, sum = 0; long n = 0;
+                for (int i = pos + 8; i + 1 < end; i += 2) {
+                    double v = BitConverter.ToInt16(b, i) / 32768.0;
+                    peak = Math.Max(peak, Math.Abs(v)); sum += v * v; n++;
+                }
+                if (n == 0) return "empty recording";
+                Func<double, string> db = x => x <= 0 ? "-inf" : (20 * Math.Log10(x)).ToString("0.0");
+                return "peak=" + db(peak) + " dBFS rms=" + db(Math.Sqrt(sum / n)) + " dBFS " +
+                       (n / (double)channels / rate).ToString("0.0") + " s";
+            }
+            pos += 8 + len + (len & 1);
+        }
+        return "no audio data";
+    }
+}
+
+// Records from the default input device through winmm (MCI): simple and
+// present on every Windows; 48 kHz 16-bit mono.
+public static class Mci {
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    static extern int mciSendString(string command, StringBuilder ret, int retLength, IntPtr callback);
+    static string Run(string cmd) {
+        var sb = new StringBuilder(256);
+        int e = mciSendString(cmd, sb, sb.Capacity, IntPtr.Zero);
+        return e == 0 ? null : ("MCI error " + e + " on: " + cmd);
+    }
+    public static string Record(string path, int seconds) {
+        Run("close t2rec");
+        string err = Run("open new type waveaudio alias t2rec");
+        if (err != null) return err;
+        Run("set t2rec bitspersample 16 channels 1 samplespersec 48000 bytespersec 96000 alignment 2");
+        err = Run("record t2rec");
+        if (err == null) { Thread.Sleep(seconds * 1000); err = Run("stop t2rec"); }
+        if (err == null) err = Run("save t2rec \"" + path + "\"");
+        Run("close t2rec");
+        return err;
+    }
 }
 [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IAudioEndpointVolume {
@@ -467,7 +604,7 @@ function Invoke-Install {
     }
     if (-not (Test-TestSigning)) {
         Write-Fail 'testsigning is off: Windows will not accept the test-signed driver.'
-        Write-Info  'Enable it: bcdedit /set testsigning on, then reboot (Secure Boot must be off).'
+        Write-Info  'Run .\T2Audio-Setup.ps1 -Action Prepare (turns test mode on), reboot, then install.'
         return
     }
     foreach ($f in @($InfPath, $SysPath, $CatPath)) {
@@ -550,6 +687,50 @@ function Install-PackageCertificate($signer) {
     return $true
 }
 
+# Changing the boot configuration makes BitLocker ask for the recovery key at
+# the next boot unless protection is suspended for one reboot.
+function Suspend-BitLockerForBootChange {
+    $bl = $null
+    try { $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop } catch { return $true }
+    if (-not $bl -or $bl.ProtectionStatus -ne 'On') { return $true }
+    Write-Warn "BitLocker protects $($env:SystemDrive): changing the boot settings would ask for the recovery key at the next boot."
+    if (-not (Confirm-Action 'Suspend BitLocker for one reboot (it resumes by itself)?')) {
+        Write-Info 'Not changed. Have the recovery key ready, or suspend BitLocker yourself first.'
+        return $false
+    }
+    Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 1 | Out-Null
+    Write-Ok 'BitLocker suspended for one reboot.'
+    return $true
+}
+
+function Get-SecureBootState {
+    try { if (Confirm-SecureBootUEFI -ErrorAction Stop) { return 'on' } else { return 'off' } } catch { return 'unknown' }
+}
+
+# Test mode once per computer: the driver is test-signed (no Microsoft
+# signature, owner's decision 2026-10-29).
+function Invoke-Prepare {
+    Write-Section 'Preparing Windows for a test-signed driver'
+    $model = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model
+    Write-Info "Model: $model"
+    $sb = Get-SecureBootState
+    if ($sb -eq 'on') {
+        Write-Fail 'Secure Boot is on: Windows refuses test mode while it is.'
+        Write-Info 'Turn it off on the Mac: restart into macOS Recovery (Cmd+R), Utilities > Startup Security Utility,'
+        Write-Info 'Secure Boot: "No Security". Then come back to Windows and run -Action Prepare again.'
+        return
+    }
+    Write-Ok "Secure Boot: $sb"
+    if (Test-TestSigning) { Write-Ok 'Test mode is already on. Next: -Action Install.'; return }
+    Write-Info 'Test mode lets Windows load drivers signed with a test certificate; Windows shows'
+    Write-Info '"Test Mode" in a desktop corner while it is on. -Action Uninstall can turn it off again.'
+    if (-not (Confirm-Action 'Turn test mode on?')) { return }
+    if (-not (Suspend-BitLockerForBootChange)) { return }
+    $out = & bcdedit.exe /set testsigning on 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Fail "bcdedit failed: $($out.Trim())"; return }
+    Write-Ok 'Test mode on. Reboot Windows, then run: .\T2Audio-Setup.ps1 -Action Install -Preset macos'
+}
+
 function Invoke-Preset {
     Write-Section 'Changing the preset'
     Write-PresetValues $Preset
@@ -619,6 +800,14 @@ function Invoke-Uninstall {
     $d = Wait-DeviceService 'AppleAudio' 30
     if ($d -and (Get-DeviceService $d) -eq 'AppleAudio' -and $d.Status -eq 'OK') {
         Write-Ok 'The device is back on AppleAudio.'
+        if (Test-TestSigning) {
+            Write-Info 'Test mode is still on. Turn it off only if no other test-signed driver needs it.'
+            if ((-not $Force) -and (Confirm-Action 'Turn test mode off (takes effect after a reboot)?') -and
+                (Suspend-BitLockerForBootChange)) {
+                $out = & bcdedit.exe /set testsigning off 2>&1 | Out-String
+                if ($LASTEXITCODE -eq 0) { Write-Ok 'Test mode off after the next reboot.' } else { Write-Warn "bcdedit failed: $($out.Trim())" }
+            }
+        }
     } else {
         Write-Warn "Now: $($d.Status), driver $(Get-DeviceService $d)."
         Write-Info 'If AppleAudio did not come back by itself: reboot, or .\Restore-AppleAudioDriver.ps1 (downloads the Boot Camp driver).'
@@ -674,6 +863,255 @@ function Invoke-Features([switch]$Interactive) {
     $null = Restart-T2Device
 }
 
+
+# ---------------------------------------------------------------------------
+# Endpoints, switching, tests, backup, diagnostics
+# ---------------------------------------------------------------------------
+function Add-T2Code { if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code } }
+
+# All T2 endpoints Windows knows: Id, Flow (Render/Capture), Kind (Speakers /
+# Headphones / Microphone / other), Name, State (Active, Unplugged, Disabled).
+function Get-T2Endpoints {
+    $hwProp = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
+    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    $nameProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},14'
+    $states = @{ 1 = 'Active'; 2 = 'Disabled'; 4 = 'Not present'; 8 = 'Unplugged' }
+    foreach ($flow in 'Render', 'Capture') {
+        $root = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow"
+        if (-not (Test-Path $root)) { continue }
+        foreach ($k in Get-ChildItem $root) {
+            $props = Join-Path $k.PSPath 'Properties'
+            if (-not (Test-Path $props)) { continue }
+            $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
+            $hw = $all.$hwProp
+            if (-not ($hw -and $hw.StartsWith($HardwareId))) { continue }
+            $desc = "$($all.$descProp)"
+            $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
+            $kind = if ($flow -eq 'Capture') { 'Microphone' } elseif ($desc -match 'Headphone') { 'Headphones' } elseif ($desc -match 'Speaker') { 'Speakers' } else { $desc }
+            [pscustomobject]@{
+                Id    = $(if ($flow -eq 'Render') { '{0.0.0.00000000}.' } else { '{0.0.1.00000000}.' }) + $k.PSChildName
+                Flow  = $flow
+                Kind  = $kind
+                Name  = "$($all.$nameProp)"
+                State = $(if ($states.ContainsKey([int]$st)) { $states[[int]$st] } else { "state $st" })
+            }
+        }
+    }
+}
+
+# Manual speakers <-> headphones switch until the jack is detected (ROADMAP 4.5).
+function Invoke-Switch {
+    Add-T2Code
+    $eps = @(Get-T2Endpoints | Where-Object { $_.Flow -eq 'Render' -and $_.State -eq 'Active' })
+    $spk = $eps | Where-Object Kind -eq 'Speakers' | Select-Object -First 1
+    $hp = $eps | Where-Object Kind -eq 'Headphones' | Select-Object -First 1
+    if (-not $spk) { Write-Fail 'The T2 speaker output is not active.'; return }
+    if (-not $hp -and $To -ne 'Speakers') { Write-Fail 'No T2 headphone output: -Action Features -Headphones 1 first.'; return }
+    $target = switch ($To) {
+        'Speakers'   { $spk }
+        'Headphones' { $hp }
+        default      { if ([T2Setup.Endpoints]::DefaultId(0, 1) -eq $hp.Id) { $spk } else { $hp } }
+    }
+    $hr = [T2Setup.Endpoints]::SetDefault($target.Id)
+    if ($hr -eq 0) { Write-Ok "Default output: $($target.Kind) ($($target.Name))" } else { Write-Fail ("Could not switch: 0x{0:X8}" -f $hr) }
+}
+
+# Desktop shortcut with a hotkey for Invoke-Switch (runs without admin rights).
+function New-SwitchShortcut {
+    $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'T2 Speakers - Headphones.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($lnk)
+    $sc.TargetPath = Join-Path $PSHOME 'powershell.exe'
+    $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action Switch -To Toggle"
+    $sc.WorkingDirectory = $PSScriptRoot
+    $sc.IconLocation = "$env:SystemRoot\System32\mmres.dll,0"
+    $sc.Hotkey = 'Ctrl+Alt+H'
+    $sc.Description = 'Switch the default output between the T2 speakers and headphones'
+    $sc.Save()
+    Write-Ok "Shortcut created: $lnk (hotkey Ctrl+Alt+H)"
+}
+
+function Invoke-SoundTest {
+    Add-T2Code
+    Write-Section 'Sound test'
+    $def = [T2Setup.Endpoints]::DefaultId(0, 1)
+    $t2 = @(Get-T2Endpoints | Where-Object { $_.Flow -eq 'Render' -and $_.State -eq 'Active' })
+    $cur = $t2 | Where-Object Id -eq $def | Select-Object -First 1
+    if (-not $cur) {
+        Write-Warn 'The default output is not a T2 device.'
+        $spk = $t2 | Where-Object Kind -eq 'Speakers' | Select-Object -First 1
+        if (-not $spk -or -not (Confirm-Action 'Make the T2 speakers the default output for the test?')) { return }
+        $null = [T2Setup.Endpoints]::SetDefault($spk.Id); $cur = $spk
+    }
+    Write-Info "Playing on: $($cur.Kind) ($($cur.Name)). Quiet tones, about -20 dBFS."
+    foreach ($t in @(@('left', 1, 440), @('right', 2, 440), @('both', 3, 660))) {
+        Write-Host ("   ♪ {0}" -f $t[0]) -ForegroundColor White
+        $ms = New-Object System.IO.MemoryStream (, [T2Setup.Wav]::Tone($t[2], 1.2, $t[1], 0.1))
+        (New-Object System.Media.SoundPlayer $ms).PlaySync()
+        Start-Sleep -Milliseconds 300
+    }
+    Write-Ok 'Done. Left only on the left, right only on the right? If not: -Action Balance, then -Action Report.'
+}
+
+function Invoke-MicTest {
+    Add-T2Code
+    Write-Section 'Microphone test'
+    $mic = Get-T2Endpoints | Where-Object { $_.Flow -eq 'Capture' -and $_.State -eq 'Active' } | Select-Object -First 1
+    if (-not $mic) { Write-Fail 'No active T2 microphone: -Action Features -Microphone 1 first.'; return }
+    if ([T2Setup.Endpoints]::DefaultId(1, 1) -ne $mic.Id) {
+        if (-not (Confirm-Action "Make '$($mic.Name)' the default microphone for the test?")) { return }
+        $null = [T2Setup.Endpoints]::SetDefault($mic.Id)
+    }
+    $wav = Join-Path $env:TEMP 'T2AudioPort-mictest.wav'
+    Write-Info 'Recording 5 seconds - say something at a normal distance...'
+    $err = [T2Setup.Mci]::Record($wav, 5)
+    if ($err) { Write-Fail $err; return }
+    $a = [T2Setup.Wav]::Analyze($wav)
+    Write-Ok "Recorded: $a"
+    if ($a -match 'peak=(-?[\d.]+|-inf)') {
+        $peak = if ($Matches[1] -eq '-inf') { -999 } else { [double]$Matches[1] }
+        if ($peak -lt -45) { Write-Warn 'Very quiet or silent: is "Microphone Array (Apple T2 …)" selected and not muted (Sound settings > Input)?' }
+        elseif ($peak -gt -1) { Write-Warn 'Clipping: speak further away or lower the input level.' }
+    }
+    Write-Info 'Playing it back...'
+    (New-Object System.Media.SoundPlayer $wav).PlaySync()
+    Write-Info "File: $wav"
+}
+
+# Settings worth keeping: everything under Parameters except the crash guard,
+# persistent-mode switch and saved Windows Update values.
+function Get-SettingsFile { if ($File) { $File } else { Join-Path ([Environment]::GetFolderPath('Desktop')) 'T2AudioPort-settings.json' } }
+
+function Invoke-Backup {
+    Write-Section 'Backup settings'
+    if (-not (Test-Path $ParamsPath)) { Write-Fail 'No settings yet.'; return }
+    $item = Get-Item $ParamsPath
+    $data = [ordered]@{ Saved = (Get-Date).ToString('s'); Driver = (Get-DeviceDriverVersion (Get-T2Device)); Values = [ordered]@{} }
+    foreach ($n in ($item.GetValueNames() | Sort-Object)) {
+        if ($n -match '^(CrashGuard|Saved|EnableProduction$)') { continue }
+        $data.Values[$n] = [int](Get-EffectiveParam $n)
+    }
+    $path = Get-SettingsFile
+    $data | ConvertTo-Json -Depth 4 | Set-Content -Path $path -Encoding UTF8
+    Write-Ok "Saved $($data.Values.Count) values to $path"
+}
+
+function Invoke-Restore {
+    Write-Section 'Restore settings'
+    $path = Get-SettingsFile
+    if (-not (Test-Path $path)) { Write-Fail "No file $path"; return }
+    $data = Get-Content -Raw -Path $path | ConvertFrom-Json
+    $names = @($data.Values.PSObject.Properties.Name)
+    Write-Info "$($names.Count) values from $path (saved $($data.Saved), driver $($data.Driver))"
+    if (-not (Confirm-Action 'Apply them?')) { return }
+    foreach ($n in $names) {
+        if ($n -match '^(CrashGuard|Saved|EnableProduction$)') { continue }
+        Set-Param $n ([int]$data.Values.$n)
+    }
+    Write-Ok 'Applied.'
+    $null = Restart-T2Device
+}
+
+# One screen that checks everything and says how to fix what is wrong.
+function Invoke-Doctor {
+    Add-T2Code
+    Write-Section 'Doctor'
+    $issues = 0
+    function Bad($m, $fix) { Write-Fail $m; if ($fix) { Write-Info "fix: $fix" }; $script:doctorIssues++ }
+    $script:doctorIssues = 0
+    $model = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model
+    if ($model -eq 'MacBookPro16,1') { Write-Ok "Model $model" } else { Bad "Model '$model' (the driver is tuned for MacBookPro16,1)" 'do not install on other Macs' }
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    Write-Ok "Windows $($os.Caption) build $($os.BuildNumber)"
+    $sb = Get-SecureBootState
+    if ($sb -eq 'on') { Bad 'Secure Boot is on' 'macOS Recovery > Startup Security Utility > No Security' } else { Write-Ok "Secure Boot: $sb" }
+    if (Test-TestSigning) { Write-Ok 'Test mode: on' } else { Bad 'Test mode is off' '-Action Prepare, then reboot' }
+    try {
+        $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+        Write-Ok "BitLocker on ${env:SystemDrive}: $($bl.ProtectionStatus) (keep the recovery key at hand before boot changes)"
+    } catch { Write-Ok 'BitLocker: not in use' }
+    $d = Get-T2Device
+    if (-not $d) { Bad 'Apple T2 audio device not found' 'is this a T2 Mac with Boot Camp drivers?'; return }
+    $svc = Get-DeviceService $d
+    if ($svc -eq $ServiceName -and $d.Status -eq 'OK') { Write-Ok "Driver T2AudioPort $(Get-DeviceDriverVersion $d) running" }
+    elseif ($svc -eq 'AppleAudio') { Bad 'The device runs AppleAudio' '-Action Install' }
+    else { Bad "Device: $($d.Status), driver $svc" '-Action Report and look at the log' }
+    if (Test-Path -LiteralPath $SysPath) {
+        $sig = Get-AuthenticodeSignature -LiteralPath $SysPath
+        if ($sig.SignerCertificate) {
+            $trusted = Get-ChildItem Cert:\LocalMachine\TrustedPublisher -ErrorAction SilentlyContinue | Where-Object Thumbprint -eq $sig.SignerCertificate.Thumbprint
+            if ($trusted) { Write-Ok 'Package certificate trusted' } else { Bad 'Package certificate not trusted' '-Action Install offers to trust it' }
+        }
+    }
+    $strikes = Get-Param 'CrashGuardStrikes'
+    if ($strikes -ge 2) { Bad "Crash guard tripped ($strikes)" 'find the cause (-Action Report), then -Action ResetGuard' }
+    elseif ($strikes -ge 1) { Write-Warn 'One unclean end recorded (power loss, BSOD or hang)' } else { Write-Ok 'Crash guard: OK' }
+    $eps = @(Get-T2Endpoints)
+    foreach ($kind in 'Speakers', 'Headphones', 'Microphone') {
+        $e = $eps | Where-Object Kind -eq $kind | Select-Object -First 1
+        $feature = @{ Headphones = 'HeadphoneOutput'; Microphone = 'MicInput' }[$kind]
+        $wanted = (-not $feature) -or ((Get-Param $feature) -eq 1)
+        if ($e -and $e.State -eq 'Active') { Write-Ok "$kind endpoint: $($e.Name)" }
+        elseif ($wanted) { Bad "$kind endpoint missing or $($e.State)" 'restart the device (-Action Preset -Preset macos) or reboot' }
+        else { Write-Info "$kind endpoint: off (-Action Features)" }
+    }
+    $defOut = [T2Setup.Endpoints]::DefaultId(0, 1)
+    $defIn = [T2Setup.Endpoints]::DefaultId(1, 1)
+    $out = $eps | Where-Object Id -eq $defOut | Select-Object -First 1
+    if ($out) { Write-Ok "Default output: $($out.Kind)" } else { Write-Warn 'The default output is not a T2 device (-Action Switch -To Speakers)' }
+    $in = $eps | Where-Object Id -eq $defIn | Select-Object -First 1
+    if ($in) { Write-Ok 'Default input: T2 microphone' } elseif ((Get-Param 'MicInput') -eq 1) { Write-Warn 'The default input is not the T2 microphone' }
+    $spk = $eps | Where-Object { $_.Kind -eq 'Speakers' -and $_.State -eq 'Active' } | Select-Object -First 1
+    if ($spk) {
+        $v = [T2Setup.Volume]::Get($spk.Id)
+        if ($v -match 'mute=True') { Bad 'The T2 speakers are muted' '-Action Balance -Volume 0.3' }
+        elseif ($v -match 'L=([\d.,]+) R=([\d.,]+)' -and [math]::Abs([double]($Matches[1] -replace ',', '.') - [double]($Matches[2] -replace ',', '.')) -gt 0.02) {
+            Bad 'Uneven L/R balance' '-Action Balance -Volume 0.3'
+        } else { Write-Ok "Speaker volume: $v" }
+    }
+    $since = (Get-Date).AddDays(-7)
+    $kp = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = $since } -ErrorAction SilentlyContinue)
+    if ($kp.Count) { Write-Warn "$($kp.Count) unexpected shutdown(s) in the last 7 days (Kernel-Power 41)" } else { Write-Ok 'No unexpected shutdowns in the last 7 days' }
+    $dumps = @(Get-ChildItem "$env:SystemRoot\Minidump\*.dmp" -ErrorAction SilentlyContinue | Where-Object LastWriteTime -gt $since)
+    if ($dumps.Count) { Write-Warn "$($dumps.Count) crash dump(s) in the last 7 days in $env:SystemRoot\Minidump (-Action Report lists them)" }
+    if (Get-UpdateGuardOn) { Write-Info 'Windows Update driver guard: on' }
+    if (Test-Path $TestSession) { Write-Warn 'A test-agent session (TestSession) is present - removed at reboot.' }
+    Write-Host ''
+    if ($script:doctorIssues -eq 0) { Write-Ok 'Everything looks fine.' } else { Write-Warn "$($script:doctorIssues) problem(s) - see the fixes above." }
+}
+
+# A zip with what a bug report needs: Doctor, status, settings, device and
+# driver lists, recent T2/power events, the list of crash dumps (not the dumps).
+function Invoke-Report {
+    Write-Section 'Bug report'
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $dir = Join-Path $env:TEMP "T2AudioPort-report-$stamp"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Start-Transcript -Path (Join-Path $dir 'doctor-and-status.txt') | Out-Null
+    try { Invoke-Doctor; Invoke-Status } finally { Stop-Transcript | Out-Null }
+    & reg.exe export ($ParamsPath -replace '^HKLM:', 'HKLM') (Join-Path $dir 'parameters.reg') /y 2>&1 | Out-Null
+    $d = Get-T2Device
+    if ($d) { (Invoke-Pnp @('/enum-devices', '/instanceid', $d.InstanceId, '/drivers')).Out | Set-Content (Join-Path $dir 'device.txt') }
+    Get-T2Endpoints | Format-Table -AutoSize | Out-String -Width 200 | Set-Content (Join-Path $dir 'endpoints.txt')
+    $since = (Get-Date).AddDays(-7)
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProviderName -eq 'Microsoft-Windows-Kernel-Power' -or $_.Message -match 'T2Audio|AppleAudio' } |
+        Select-Object -First 200 TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+        Format-List | Out-String -Width 300 | Set-Content (Join-Path $dir 'events.txt')
+    Get-ChildItem "$env:SystemRoot\Minidump\*.dmp" -ErrorAction SilentlyContinue |
+        Select-Object Name, Length, LastWriteTime | Format-Table | Out-String | Set-Content (Join-Path $dir 'minidumps.txt')
+    $setupapi = "$env:SystemRoot\INF\setupapi.dev.log"
+    if (Test-Path $setupapi) {
+        Select-String -Path $setupapi -Pattern 'T2AudioMiniport|VEN_106B&DEV_1803' -Context 0, 2 |
+            Select-Object -Last 60 | Out-String -Width 300 | Set-Content (Join-Path $dir 'setupapi.txt')
+    }
+    $zip = Join-Path ([Environment]::GetFolderPath('Desktop')) "T2AudioPort-report-$stamp.zip"
+    Compress-Archive -Path (Join-Path $dir '*') -DestinationPath $zip -Force
+    Remove-Item -Recurse -Force $dir
+    Write-Ok "Report: $zip"
+    Write-Info 'It contains your computer name and device list, no personal files and no crash dumps.'
+}
+
 # Windows Update can reinstall Apple's Microsoft-signed AppleAudio over the
 # test-signed T2AudioPort. Opt-in guard: the documented Windows settings
 # "do not include drivers with Windows quality updates"
@@ -727,29 +1165,38 @@ function Show-Menu {
     while ($true) {
         Write-Banner
         Invoke-Status
-        Write-Section 'What to do?'
-        Write-Host '   1. Install / update T2AudioPort' -ForegroundColor White
-        Write-Host '   2. Change the sound preset' -ForegroundColor White
-        Write-Host '   3. Reset the crash guard' -ForegroundColor White
-        Write-Host '   4. Restore AppleAudio (remove T2AudioPort)' -ForegroundColor White
-        Write-Host '   5. Adjust the tone (bass / treble / clarity)' -ForegroundColor White
-        Write-Host '   6. Optional features (headphones, microphones, sleep, formats)' -ForegroundColor White
-        Write-Host '   7. Windows Update driver guard' -ForegroundColor White
+        Write-Section 'Setup'
+        Write-Host '   1. Prepare Windows (test mode, once)      2. Install / update      3. Restore AppleAudio' -ForegroundColor White
+        Write-Section 'Sound'
+        Write-Host '   4. Preset      5. Tone      6. Optional features (headphones, microphone, sleep, formats)' -ForegroundColor White
+        Write-Host '   7. Switch speakers <-> headphones      8. Sound test      9. Microphone test' -ForegroundColor White
+        Write-Section 'Maintenance'
+        Write-Host '   D. Doctor      R. Bug report      B. Backup settings      L. Load settings' -ForegroundColor White
+        Write-Host '   K. Switch shortcut (Ctrl+Alt+H)      G. Windows Update guard      C. Reset crash guard' -ForegroundColor White
         Write-Host '   0. Exit' -ForegroundColor White
         $c = Read-Host "`n  Choice"
         switch ($c) {
-            '1' { $script:Preset = Select-PresetInteractive; Invoke-Install }
-            '2' { $script:Preset = Select-PresetInteractive; Invoke-Preset }
-            '3' { Invoke-ResetGuard }
-            '4' { Invoke-Uninstall }
+            '1' { Invoke-Prepare }
+            '2' { $script:Preset = Select-PresetInteractive; Invoke-Install }
+            '3' { Invoke-Uninstall }
+            '4' { $script:Preset = Select-PresetInteractive; Invoke-Preset }
             '5' { Invoke-Tune -Interactive }
             '6' { Invoke-Features -Interactive }
-            '7' {
+            '7' { $script:To = 'Toggle'; Invoke-Switch }
+            '8' { Invoke-SoundTest }
+            '9' { Invoke-MicTest }
+            'd' { Invoke-Doctor }
+            'r' { Invoke-Report }
+            'b' { Invoke-Backup }
+            'l' { Invoke-Restore }
+            'k' { New-SwitchShortcut }
+            'g' {
                 $a = Read-Host '  1 = guard on, 0 = guard off, Enter = show'
                 if ($a -eq '0' -or $a -eq '1') { $script:Block = [int]$a }
                 Invoke-UpdateGuard
                 $script:Block = $null
             }
+            'c' { Invoke-ResetGuard }
             '0' { return }
             default { Write-Warn 'No such item.' }
         }
@@ -758,9 +1205,14 @@ function Show-Menu {
 }
 
 # ---------------------------------------------------------------------------
-if (-not (Test-Admin)) { Write-Fail 'Run PowerShell as administrator.'; exit 1 }
+# Switching outputs and the tests only touch the user's audio settings; all
+# other actions change drivers or HKLM and need an elevated PowerShell.
+if ($Action -notin @('Switch', 'SoundTest', 'MicTest', 'Shortcut') -and -not (Test-Admin)) {
+    Write-Fail 'Run PowerShell as administrator.'; exit 1
+}
 switch ($Action) {
     'Menu'       { Show-Menu }
+    'Prepare'    { Write-Banner; Invoke-Prepare }
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
@@ -768,6 +1220,14 @@ switch ($Action) {
     'UpdateGuard' { Write-Banner; Invoke-UpdateGuard }
     'Balance'    { Write-Banner; Write-Section 'Balance'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }
+    'Doctor'     { Write-Banner; Invoke-Doctor }
+    'Switch'     { Invoke-Switch }
+    'Shortcut'   { New-SwitchShortcut }
+    'SoundTest'  { Write-Banner; Invoke-SoundTest }
+    'MicTest'    { Write-Banner; Invoke-MicTest }
+    'Backup'     { Write-Banner; Invoke-Backup }
+    'Restore'    { Write-Banner; Invoke-Restore }
+    'Report'     { Write-Banner; Invoke-Report }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
     'Uninstall'  { Write-Banner; Invoke-Uninstall }
 }
