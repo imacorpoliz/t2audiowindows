@@ -31,6 +31,12 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): Windows Update guard in the installer; full plan for the remaining hardware work (GEMINI.md part 3)
+
+- **ROADMAP 2.7 (Windows Update may reinstall AppleAudio):** `-Action Status` now warns when the device runs AppleAudio while persistent mode is on. New opt-in `-Action UpdateGuard -Block 1|0` (menu 7): sets the documented Windows settings `ExcludeWUDriversInQualityUpdate=1` (policy) and `DriverSearching\SearchOrderConfig=0`, saving the previous values under the driver's Parameters key; `-Block 0` restores them. It affects driver updates for all devices, so it is never turned on by default. `-Action Uninstall` reminds about it.
+- **Not done on purpose:** replacing `ExAllocatePoolWithTag` with `ExAllocatePool2` (ROADMAP 2.6). `ExAllocatePool2` exists only from Windows 10 2004; on older builds the driver would fail to load, and the gain is a compiler warning. Kept as is.
+- **GEMINI.md "▶ NEXT RUN, part 3" rewritten** as the complete plan of what needs the Mac: B (build 1.0.13.5, English installer, UpdateGuard), J (automatic headphone switching: J1 jack experiment, J2 RE of AppleAudio's jack handling, J3 later), R (release package), Q (owner comparisons: microphone vs Boot Camp, speakers vs macOS, low volume), V (Driver Verifier, 60-minute run, reboot loop), H (static RE for hardware volume, headset microphone, sample rates).
+
 ### 2026-10-29 (Claude): sleep verified by the owner; installer in English; README and INSTALL rewritten for release
 
 - **Sleep:** the owner tested sleep and wake with the driver running: «проверку после сна я сделал все работает» ("I did the after-sleep check, everything works"). ROADMAP 2.1 → ✅.

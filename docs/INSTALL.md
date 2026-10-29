@@ -84,7 +84,7 @@ The driver never loads in Safe Mode.
 
 * **One side quieter:** `-Action Status` shows the L/R levels; `-Action Balance -Volume 0.3` evens them (Windows keeps a balance per device, even across reinstalls).
 * **No sound after install:** check that "Speakers (Apple T2 Audio Device …)" is the default output and not muted.
-* **Windows Update brought AppleAudio back:** run `-Action Install` again.
+* **Windows Update brought AppleAudio back:** `-Action Status` warns about it; run `-Action Install` again. `-Action UpdateGuard -Block 1` (menu 7) stops Windows Update from installing drivers — for **all** devices — and `-Block 0` restores the previous settings.
 * **Everything else:** `-Action Uninstall` restores Apple's driver; `tools\Restore-AppleAudioDriver.ps1` downloads it from Boot Camp if needed.
 
 Registry values behind all of this: `HKLM\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters`, described in `docs/DRIVER_GUIDE.md` section 8.3.

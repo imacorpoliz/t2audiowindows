@@ -158,22 +158,47 @@ PASS: «Устройство снова на AppleAudio» [device is back on App
 
 ---
 
-## ▶ NEXT RUN, part 3 — automatic headphone ↔ speaker switching (the only open owner complaint)
+## ▶ NEXT RUN, part 3 — everything that needs the Mac (2026-10-29)
 
-Part 2 is done on 1.0.13.4 (speakers, headphones and the microphone work; owner: «все работает шикарно, только звук с наушников на динамики и обратно сам не переключается» — "everything works great, only the sound does not switch between headphones and speakers by itself"). The driver already tells Windows when the jack changes (`KSEVENT_PINCAPS_JACKINFOCHANGE` + jack description, `src/Topology.c`), but only once a jack read has been seen "plugged"; the read `'outp'/'jack'`, element 0, object 0x25 always returns 0, and no `PROPERTY_CHANGED` ever arrives. **We need the real jack signal.** Build 1.0.13.5 from the latest `diagnostics` first (it includes your part 2 code, plus a bounds check on the appended BufferStruct entry and `-Microphone 1` now also sets `MicStartIo`).
+**State:** speakers, headphones, microphone, sleep and 16/24-bit work on 1.0.13.4 (owner: «все работает шикарно»; sleep: «проверку после сна я сделал все работает»). What is left needs the Mac, AppleAudio.sys under REA/Ghidra, or the owner's ears. **Order: B → J → R → Q → V → H.** One task at a time; DbgView from the start of every hardware step; each task ends with a report file and an entry in `docs/CURRENT_STATE.md`; a PR into `diagnostics` per task group (never push to `diagnostics` directly; do not change driver code yourself — describe what you found and Claude implements it, as with the microphone).
 
-**R1. Release package (any time after a build):** export the **public** part of the test certificate (`Export-Certificate -Cert Cert:\LocalMachine\My\<thumbprint> -FilePath T2AudioPort-test.cer`, never the .pfx) and run `.\tools\Make-ReleasePackage.ps1 -CertificatePath T2AudioPort-test.cer`. It refuses unsigned files and private keys, and writes `dist\T2AudioPort-<version>\` + `.zip` + `SHA256SUMS.txt`. Test it once on the Mac: unzip to a new folder, `tools\T2Audio-Setup.ps1 -Action Install -Preset macos` from there (answer "y" to trusting the certificate if asked), check sound, report. Do not upload the zip anywhere; the owner decides about a public release (licence first).
+Safety rules for all of part 3: on a BSOD or power-off stop, run `-Action Status`, collect the minidump / Event 41, switch the feature off, report. Static RE has no hardware risk and can run in parallel.
 
-**J1. Jack experiment on hardware (read-only, 5 min).** `JackEvents=1` is already set; add `Set-ItemProperty $p JackProbeAll 1 -Type DWord`, restart the device (`-Action Preset -Preset macos`). Then, with music playing on the **speakers**, plug and unplug the headphones 3 times (~5 s apart), and again while playing on the **Headphones** endpoint. Copy every `jack probe #… <name> (dev … obj …): value (was …)` line and every `VHCI message #… msg=…` / `PROPERTY_CHANGED` line, with the times of plugging. Then `JackProbeAll 0`.
+### B. Build 1.0.13.5 and check the new installer (30 min)
+1. Build from the latest `diagnostics` (DriverVer 1.0.13.5), sign, all 7 host tests.
+2. The installer is now **English** (messages, menu, presets; confirmation word `INSTALL`). `-Action Install -Preset macos`: check the text, that the T2 **speakers** endpoint (not the headphones) gets the volume (`T2 speakers: unmuted, volume 30 %, L/R balance evened …`), and `-Action Status` (`Status`, `Tone`, `Crash guard: OK`, the feature list with on/off).
+3. `-Action Features -Headphones 1 -Microphone 1 -ResumeAfterSleep 1`: all three on; the microphone now also sets `MicStartIo=1`.
+4. New `-Action UpdateGuard`: `-Block 1` (answer y), check `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1` and `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching\SearchOrderConfig = 0`; `-Block 0` restores the previous values (record them before and after). Leave it as the owner prefers.
+Report: `docs/logs/EXCERPT_<date>_partB_installer.md`.
 
-**J2. Static RE of AppleAudio.sys (REA/Ghidra), into `docs/analysis/RE_jack.md`:**
-1. `PROPERTY_LISTENER` (msg 11, sender `0x1400042C4`): the exact payload bytes (object id, element, scope, selector) for every call, which device ids it is sent to (0x25 "Codec Output"? 0x44 "Codec Input"? 0x39 "Speaker"?), and **when** (at start, after START_IO, after something else).
-2. The `0x222020` handler (`0x1400012C7`–`0x140001332`): which device ids/objects it accepts for `'outp'` and `'inpt'`; what the toggled flags `[g+0x38]`/`[g+0x39]` are read by, and what the callbacks `[g+0x08]([g+0x10])` / `[g+0x18]([g+0x20])` do (do they switch the render target between the speaker ring and the codec ring inside one endpoint? report a KS jack event? change a topology node?).
-3. `0x14000330C` (`GET_PROPERTY 'jack'` for `'outp'`): object, element, scope of the request; which device; how the reply is interpreted (offset, bit, u32 vs u8).
-4. How many render endpoints AppleAudio exposes on this Mac (one "Speakers" that follows the jack, or separate speakers + headphones) — the KS filter/pin descriptors and the topology pin categories/jack descriptions.
-5. Anything else AppleAudio sends to "Codec Output" (0x25) at start: SET_PROPERTY (which selectors), a listener on another selector (e.g. `'pfta'`, `'jkcn'`, `'jkst'`).
+### J. Automatic headphone ↔ speaker switching (the owner's only complaint)
+The driver already reports jack changes to Windows (`src/Topology.c`), but the T2 jack read stays 0 and no PROPERTY_CHANGED arrives.
+* **J1 — jack experiment (hardware, read-only, 10 min):** `Set-ItemProperty $p JackProbeAll 1 -Type DWord` (JackEvents is already 1), restart the device. Play on the **speakers**, plug/unplug the headphones 3× (~5 s apart, note the times); then play on the **Headphones** endpoint and repeat. Copy every `jack probe #… <name> (dev … obj …): value (was …)` line and every `VHCI message #… msg=…` / `PROPERTY_CHANGED` line. Then `JackProbeAll 0`.
+* **J2 — static RE of AppleAudio.sys → `docs/analysis/RE_jack.md`:**
+  1. Every `PROPERTY_LISTENER` (msg 11, `0x1400042C4`) AppleAudio sends: exact bytes (object, element, scope, selector), target device ids, and when (start, after START_IO, …).
+  2. The `0x222020` handler (`0x1400012C7`–`0x140001332`): which device/object/scope/selector it accepts; what reads the toggled flags `[g+0x38]`/`[g+0x39]`; what the callbacks `[g+0x08]([g+0x10])`, `[g+0x18]([g+0x20])` do (switch the render ring inside one endpoint? raise a KS event? change topology?).
+  3. `0x14000330C` (GET_PROPERTY `'jack'` for `'outp'`): request bytes and how the reply is read (offset, size, bit).
+  4. How many render endpoints AppleAudio exposes on this Mac and their topology pins / jack descriptions (one "Speakers" that follows the jack, or two).
+  5. Any other message AppleAudio sends to "Codec Output" 0x25 or "Codec Input" 0x44 at start (SET_PROPERTY selectors, other listeners).
+* **J3 — after Claude's change (later):** plug/unplug while playing: Windows switches the default output within ~1 s both ways, speakers silent while the headphones are in, no clicks; 20 cycles; report.
 
-With J1+J2 Claude will wire the real signal (a different address, the notification, or one endpoint that switches rings like AppleAudio).
+### R. Release package (1 h)
+`R1`: export the **public** test certificate (`Export-Certificate -Cert Cert:\LocalMachine\My\<thumbprint> -FilePath T2AudioPort-test.cer`; never the .pfx), run `.\tools\Make-ReleasePackage.ps1 -CertificatePath T2AudioPort-test.cer`. It must refuse an unsigned file and a certificate with a private key (try once with the .pfx-backed cert to see the refusal). Unzip `dist\T2AudioPort-1.0.13.5.zip` into a new folder, run `tools\T2Audio-Setup.ps1 -Action Install -Preset macos` **from there**; on a machine where the certificate is already trusted the prompt does not appear — to test the prompt, remove the certificate from `LocalMachine\TrustedPublisher` first (re-add it after). Check `SHA256SUMS.txt` with `Get-FileHash`. Do not publish the zip.
+
+### Q. Quality comparisons with the owner (needs the owner's ears and a reboot into macOS / AppleAudio)
+* **Q1 — microphone vs Boot Camp:** the same 20 s text, same position, same room, recorded with Voice Recorder (or `tools\Record-WasapiMic.ps1`) on (a) T2AudioPort and (b) AppleAudio (`-Action Uninstall`, record, `-Action Install`); if possible (c) macOS. Report peak/RMS/noise floor in silence (first 2 s) for each and the owner's verdict on clarity and noise (verbatim). Keep the WAVs out of git (attach paths only).
+* **Q2 — speakers vs macOS:** the owner plays the same 3 tracks (one with vocals, one with bass, one quiet acoustic) at the same volume in macOS and in Windows (`macos` preset); verdict per track: bass, brightness, loudness, harshness. Any "Windows is duller/thinner/louder" goes to Claude as a preset adjustment.
+* **Q3 — low volume:** at 10–20 % volume, does the bass disappear compared with macOS? (input for a loudness feature).
+
+### V. Robustness (needs time, little attention)
+* **V1 — Driver Verifier (only with the owner's permission; it can cause a BSOD by design):** `verifier /standard /driver T2AudioMiniport.sys`, reboot, then 15 min of music + 2 min of recording + headphones + sleep/wake once. A Verifier bugcheck is a real driver bug: minidump + `!analyze -v` text to Claude. At the end `verifier /reset`, reboot. With the crash guard: two Verifier crashes stop the driver from loading — that is expected; `-Action ResetGuard` after the report.
+* **V2 — long run:** 60 min of music on the speakers, then 10 min on the headphones, with a 10 min recording in parallel. `run summary` / `mic run summary`: `reAims`, `gaps>10ms`, `skips`, `maxRenderUs`, `slowRenders` (expect `slowRenders` ≤ 2 per run, `skips=0`). Owner: any crackle, drift, dropout?
+* **V3 — reboot loop:** 5 ordinary reboots and 2 shutdown/power-on cycles with everything on: `CrashGuardStrikes` stays 0, all three endpoints come back every time.
+
+### H. Static RE for the next features (no hardware risk; any time)
+* **H1 — hardware volume / mute:** BCE msg 28 (`controls`) in AppleAudio: the object classes `'levl'`, `'slct'`, `'togl'`, their properties (range, steps, dB mapping), whether AppleAudio maps the Windows volume slider to a T2 control (KS volume/mute node in its topology?), and the exact SET_PROPERTY messages. → `docs/analysis/RE_volume.md`.
+* **H2 — headset microphone:** how AppleAudio handles "Codec Input" 0x44 (stream 0x45, 1 ch 32-bit, flags 0xC): msg 18 for it, `'nsrt'`, its BufferStruct entry, and how it switches between the built-in array and the headset mic (jack). → `docs/analysis/RE_headset_mic.md`.
+* **H3 — sample rates:** whether AppleAudio ever sets `'nsrt'` to 44100/96000 on the speaker or the codec, and what else changes (ring size? timestamps?). → `docs/analysis/RE_sample_rate.md`.
 
 ---
 

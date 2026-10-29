@@ -7,6 +7,7 @@
 #   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # tone on top of the preset
 #   .\T2Audio-Setup.ps1 -Action Balance -Volume 0.3      # even out the L/R balance
 #   .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1   # optional features
+#   .\T2Audio-Setup.ps1 -Action UpdateGuard -Block 1     # keep Windows Update from restoring AppleAudio
 #   .\T2Audio-Setup.ps1 -Action Status
 #   .\T2Audio-Setup.ps1 -Action ResetGuard               # reset the crash guard
 #   .\T2Audio-Setup.ps1 -Action Uninstall                # go back to AppleAudio
@@ -23,7 +24,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
@@ -42,6 +43,10 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$Microphone,      # built-in microphones
     [ValidateRange(0, 1)] [Nullable[int]]$ResumeAfterSleep,# sound comes back after sleep by itself
     [ValidateRange(0, 1)] [Nullable[int]]$ExtraFormats,    # 16/24-bit for exclusive-mode apps
+
+    # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
+    # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
+    [ValidateRange(0, 1)] [Nullable[int]]$Block,
 
     # T2 speaker volume after install (0..1); -1 = leave unchanged.
     [double]$Volume = 0.3,
@@ -415,6 +420,11 @@ function Invoke-Status {
     Write-Host ("   Driver:         {0}  {1}" -f $drv, $ver) -ForegroundColor White
     Write-Host ("   Device:         {0}" -f $d.Status) -ForegroundColor $color
     $prod = Get-Param 'EnableProduction'
+    if ($svc -eq 'AppleAudio' -and $prod -eq 1) {
+        Write-Warn 'The device runs AppleAudio although T2AudioPort is set to persistent mode:'
+        Write-Info 'Windows (probably Windows Update) replaced the driver. Run -Action Install again;'
+        Write-Info '-Action UpdateGuard -Block 1 stops Windows Update from installing drivers.'
+    }
     Write-Host ("   Persistent mode: {0}" -f $(if ($prod -eq 1) { 'on' } else { 'off' })) -ForegroundColor White
     $cur = Get-CurrentPresetName
     $pn = if ($cur) { $Presets[$cur].Title } else { 'custom / defaults' }
@@ -597,6 +607,7 @@ function Invoke-Uninstall {
     Write-Section 'Restoring the Apple driver (AppleAudio)'
     if (-not (Confirm-Action 'Remove T2AudioPort and restore AppleAudio?')) { return }
     if (Test-Path $ParamsPath) { Set-Param 'EnableProduction' 0 }
+    if (Get-UpdateGuardOn) { Write-Info 'The Windows Update driver guard is still on: -Action UpdateGuard -Block 0 turns it off.' }
     if (Test-Path $TestSession) { Remove-Item -Path $TestSession -Recurse -Force }
     $infs = @(Get-OemInfsForT2)
     if ($infs.Count -eq 0) { Write-Info 'No T2AudioPort package in the driver store.' }
@@ -663,6 +674,55 @@ function Invoke-Features([switch]$Interactive) {
     $null = Restart-T2Device
 }
 
+# Windows Update can reinstall Apple's Microsoft-signed AppleAudio over the
+# test-signed T2AudioPort. Opt-in guard: the documented Windows settings
+# "do not include drivers with Windows quality updates"
+# (Policies\...\WindowsUpdate\ExcludeWUDriversInQualityUpdate=1) and "do not
+# search Windows Update for drivers" (DriverSearching\SearchOrderConfig=0).
+# They apply to ALL devices. The previous values are saved under the
+# driver's Parameters key and restored by -Block 0.
+$UpdateGuardKeys = @(
+    @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'ExcludeWUDriversInQualityUpdate'; On = 1; Save = 'SavedExcludeWUDrivers' },
+    @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'; Name = 'SearchOrderConfig'; On = 0; Save = 'SavedSearchOrderConfig' }
+)
+
+function Get-UpdateGuardOn {
+    $k = $UpdateGuardKeys[0]
+    try { return ((Get-ItemProperty -Path $k.Path -Name $k.Name -ErrorAction Stop).($k.Name) -eq 1) } catch { return $false }
+}
+
+function Invoke-UpdateGuard {
+    Write-Section 'Windows Update driver guard'
+    if ($null -eq $Block) {
+        Write-Host ("   Guard: {0}" -f $(if (Get-UpdateGuardOn) { 'on (Windows Update installs no drivers)' } else { 'off' })) -ForegroundColor White
+        Write-Info 'Example: .\T2Audio-Setup.ps1 -Action UpdateGuard -Block 1   (0 restores the previous settings)'
+        return
+    }
+    if ($Block -eq 1) {
+        Write-Warn 'This stops Windows Update from installing drivers for ALL devices, not just audio.'
+        if (-not (Confirm-Action 'Turn the guard on?')) { return }
+        foreach ($k in $UpdateGuardKeys) {
+            $old = $null
+            try { $old = (Get-ItemProperty -Path $k.Path -Name $k.Name -ErrorAction Stop).($k.Name) } catch { }
+            if ($null -eq (Get-Param $k.Save)) { Set-Param $k.Save $(if ($null -eq $old) { -1 } else { [int]$old }) }
+            if (-not (Test-Path $k.Path)) { New-Item -Path $k.Path -Force | Out-Null }
+            New-ItemProperty -Path $k.Path -Name $k.Name -Value $k.On -PropertyType DWord -Force | Out-Null
+        }
+        Write-Ok 'Guard on. Update drivers for other devices by hand while it is on.'
+    } else {
+        foreach ($k in $UpdateGuardKeys) {
+            $saved = Get-Param $k.Save
+            if ($null -eq $saved -or $saved -eq -1 -or $saved -eq 4294967295) {
+                Remove-ItemProperty -Path $k.Path -Name $k.Name -ErrorAction SilentlyContinue
+            } else {
+                New-ItemProperty -Path $k.Path -Name $k.Name -Value ([int]$saved) -PropertyType DWord -Force | Out-Null
+            }
+            Remove-ItemProperty -Path $ParamsPath -Name $k.Save -ErrorAction SilentlyContinue
+        }
+        Write-Ok 'Guard off, previous settings restored.'
+    }
+}
+
 function Show-Menu {
     while ($true) {
         Write-Banner
@@ -674,6 +734,7 @@ function Show-Menu {
         Write-Host '   4. Restore AppleAudio (remove T2AudioPort)' -ForegroundColor White
         Write-Host '   5. Adjust the tone (bass / treble / clarity)' -ForegroundColor White
         Write-Host '   6. Optional features (headphones, microphones, sleep, formats)' -ForegroundColor White
+        Write-Host '   7. Windows Update driver guard' -ForegroundColor White
         Write-Host '   0. Exit' -ForegroundColor White
         $c = Read-Host "`n  Choice"
         switch ($c) {
@@ -683,6 +744,12 @@ function Show-Menu {
             '4' { Invoke-Uninstall }
             '5' { Invoke-Tune -Interactive }
             '6' { Invoke-Features -Interactive }
+            '7' {
+                $a = Read-Host '  1 = guard on, 0 = guard off, Enter = show'
+                if ($a -eq '0' -or $a -eq '1') { $script:Block = [int]$a }
+                Invoke-UpdateGuard
+                $script:Block = $null
+            }
             '0' { return }
             default { Write-Warn 'No such item.' }
         }
@@ -698,6 +765,7 @@ switch ($Action) {
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
     'Features'   { Write-Banner; Invoke-Features }
+    'UpdateGuard' { Write-Banner; Invoke-UpdateGuard }
     'Balance'    { Write-Banner; Write-Section 'Balance'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
