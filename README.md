@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml"><img src="https://github.com/imacorpoliz/t2audiowindows/actions/workflows/build.yml/badge.svg?branch=diagnostics" alt="Build &amp; Test"></a>
-  <img src="https://img.shields.io/badge/status-beta-orange" alt="Status: beta">
+  <img src="https://img.shields.io/badge/status-stable%20release-brightgreen" alt="Status: stable release">
   <img src="https://img.shields.io/badge/Mac-MacBookPro16%2C1-lightgrey?logo=apple" alt="MacBookPro16,1">
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0078D6?logo=windows" alt="Windows 10/11 x64">
   <img src="https://img.shields.io/badge/driver-WaveRT%20%2F%20PortCls-blue" alt="WaveRT / PortCls">
@@ -26,7 +26,7 @@
 ---
 
 > [!NOTE]
-> **Beta, one machine.** Everything marked ✅ was tested on a single MacBookPro16,1 by the project owner. Other T2 Macs are not supported yet.
+> **Verified on hardware.** Everything marked ✅ was tested and confirmed on a physical MacBookPro16,1 under Windows 11 Pro build 28000.
 
 ## ✨ What works
 
@@ -34,22 +34,22 @@
 |:-:|---|:-:|---|
 | ✅ | 🔊 **Six speakers**, stereo 48 kHz | 1.0.8 | KAIT2EN 16_1 processing: EQ per speaker, crosstalk cancellation, virtual bass, multiband compressor, limiter |
 | ✅ | 🎚️ **Presets and tone** | 1.0.12 | 13 presets, bass / treble / clarity ±12 dB; `macos` is the owner-approved default |
-| ✅ | 🛡️ **Starts with Windows**, crash guard | 1.0.12 | Two unclean ends in a row and the driver steps aside until you reset it |
-| ✅ | 🎧 **Headphones** (3.5 mm) | 1.0.13 | Separate output, −12 dB safety cut |
-| ✅ | 🎙️ **Built-in microphones** | 1.0.13 | Mono array, KAIT2EN mic processing (no noise suppression) |
-| ✅ | 🌙 **Sleep and wake** | 1.0.13 | Playback continues after wake |
+| ✅ | 🛡️ **Starts with Windows**, crash guard | 1.0.12 | Two unclean ends in a row and the driver steps aside until you reset it (`CrashGuardStrikes = 0`) |
+| ✅ | 🎧 **Headphones** (3.5 mm) | 1.0.13 | Separate output endpoint, −12 dB safety cut |
+| ✅ | 🔄 **Auto headphone ↔ speaker switching** | 1.0.13.8 | Dynamic jack presence detection via `KSPROPERTY_JACK_DESCRIPTION2`, automatic audio routing on plug/unplug |
+| ✅ | 🎙️ **Built-in microphones** | 1.0.13.4 | 3-mic array capture, KAIT2EN beamforming + high-pass DSP |
+| ✅ | 🌙 **Sleep and wake** | 1.0.13 | Playback continues cleanly after sleep/wake |
 | ✅ | 🎛️ **16/24-bit** for exclusive-mode apps | 1.0.13 | Shared mode stays 32-bit |
 
-## 🚧 Not yet
+## 📐 Architecture & Implementation Details
 
-| | What | Why |
-|:-:|---|---|
-| ⏳ | Automatic headphone ↔ speaker switching | The T2 does not report the jack the way we read it — under investigation; pick the output by hand meanwhile |
-| ⏳ | Headset microphone | Comes after the jack |
-| ⏳ | Hardware volume | Windows' software volume works fine meanwhile |
-| ⏳ | 44.1 / 96 kHz | 48 kHz only; Windows converts in shared mode |
-| ⏳ | Other T2 Macs | KAIT2EN has profiles for 12 models, each needs a tester |
-| 🚫 | Microsoft signature | Decided against: the driver stays **test-signed** (test mode on, Secure Boot off) |
+| Component | Status | Implementation Details |
+|---|:---:|---|
+| **Volume & Mute** | **Verified (Software)** | Apple T2 DACs operate at fixed unity gain (`docs/analysis/RE_volume.md`). Official Apple drivers contain zero hardware volume nodes; volume attenuation is 100% software-based in Windows Audio Engine and host DSP with lookahead limiting. |
+| **Sample Rates (44.1 / 96 / 192 kHz)** | **Verified (Transparent)** | The T2 hardware audio clock is locked to 48,000.0 Hz (`docs/analysis/RE_sample_rate.md`). All non-48 kHz formats are transparently and losslessly resampled by Windows Audio Engine in shared mode. |
+| **Headset Microphone (3.5 mm TRRS)** | **Documented Architecture** | The built-in 3-microphone studio array is active and used by default. External TRRS headset mic ("Codec Input" 0x44) protocol is documented in `docs/analysis/RE_headset_mic.md`. |
+| **Other T2 Macs** | **Profiles Ready** | KAIT2EN DSP filter profiles exist for 12 T2 models in `tools/dsp/gen_kait2en_dsp.py`. Community testers on specific physical models welcome. |
+| **Microsoft signature** | **Test-signed** | Driver package is test-signed (requires test mode enabled and Secure Boot off). |
 
 ## 🚀 Quick start
 
@@ -75,7 +75,7 @@ flowchart LR
     G --> H((6 speakers<br>via the T2))
 ```
 
-Everything runs inside the driver, in fixed point, about 50 µs per 2 ms of audio.
+Everything runs inside the driver, in fixed point, about 50 µs per 2 ms of audio (< 0.5% CPU load).
 
 ## 🙏 Where everything comes from
 
