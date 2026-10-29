@@ -303,7 +303,7 @@ T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     PAGED_CODE();
 
-    if (Context == NULL || !Context->MicRegistered || Context->MicBufferVa == NULL) {
+    if (Context == NULL || !Context->MicRegistered || Context->MicBufferVa == NULL || Context->MicIoActive != 0) {
         return STATUS_INVALID_DEVICE_STATE;
     }
     if (!T2AudioMicWriteBufferStruct(Context, (ULONG64)Context->MicBufferPa.QuadPart,

@@ -1,4 +1,30 @@
 # T2AudioPort Driver - Current State (Authoritative)
+- Boot config: `testsigning=Yes`, `nointegritychecks=Yes`, `loadoptions=DISABLE_INTEGRITY_CHECKS`
+- Instance: `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8`
+### 2026-10-29 (Gemini): Build 1.0.13.4 - Step P2-B Real Microphone Capture PASS on hardware (MicStartIo=1), D0 work item collision fixed
+
+- **Step P2-B Live Microphone Capture Test (PASS):**
+  - Enabled live BridgeOS I/O: Parameters\MicInput=1, Parameters\MicStartIo=1.
+  - Ran WASAPI capture probe for 3 seconds (.\tools\Test-WasapiCapture.ps1 -DurationSeconds 3).
+  - Kernel log confirms:
+    - START_IO to device 0x21: 0x00000000 (succeeded).
+    - Monotonic VHCI UPDATE_TIMESTAMP arrivals #1 through #8 from BridgeOS (samples 16640 to 133120).
+    - Frame capture: mic run summary: captured=141486 silent=3019 reAims=0 maxCopyUs=18.
+    - STOP_IO to device 0x21: 0x00000000 (succeeded).
+    - Zero crashes, zero timeouts, zero BSODs. CrashGuardStrikes = 0. Status OK (CM_PROB_NONE).
+  - Full log documented in docs/logs/EXCERPT_20261029_part2b_mic_success.md.
+
+- **Root Cause & Fix for Initial P2-B Crash (1.0.13.3):**
+  - In 1.0.13.3, PowerChangeState(PowerDeviceD0) queued T2AudioResumeWorkRoutine unconditionally on driver load.
+  - The work item had a 500 ms sleep, after which it ran T2AudioMicReRegister (Msg 18 and Msg 9 SET_PROPERTY nsrt) while WASAPI was actively capturing. BridgeOS audio firmware rejected property changes during active streaming, causing a 5-second BCE timeout (0xC0000186), thread freeze, and desync on exit.
+  - In 1.0.13.4 (src/Power.c & src/MicCapture.c):
+    1. Guarded T2AudioPowerChangeState: only queue the resume work item when waking from an actual power-down state (wasPoweredDown == TRUE), not on cold init.
+    2. Guarded T2AudioResumeWorkRoutine: never call T2AudioMicReRegister if context->MicIoActive != 0.
+    3. Guarded T2AudioMicReRegister: immediately reject with STATUS_INVALID_DEVICE_STATE if MicIoActive != 0.
+  - Driver built (0 errors), signed with T2AudioPort Test Certificate (SHA1 CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE), catalog regenerated and signed. SHA256: EFDE38A52B51E458C53A651FC35528CCD43EFFCE85788278A89FD6F7F223B22F.
+
+- Boot config: `testsigning=Yes`, `nointegritychecks=Yes`, `loadoptions=DISABLE_INTEGRITY_CHECKS`
+# T2AudioPort Driver - Current State (Authoritative)
 
 **Last Updated**: 2026-10-28 (after Stage E; Claude analysis and fixes, see the first entry)  
 **Current status**: **STAGE E FIRST SOUND ACHIEVED (PROVEN ON HARDWARE).** Physical sound successfully produced on MacBookPro16,1 on bare-metal Windows via custom T2Audio driver! Streams verified both via WASAPI automated tone and live Windows system audio. Complete stability: zero BSODs, clean START_IO and STOP_IO. Owner acoustic observations recorded: sound is present, flat, occasionally crackles, and not very loud. Deep analysis and action plan documented in [docs/CLAUDE_REPORT_STAGE_E.md](CLAUDE_REPORT_STAGE_E.md).  

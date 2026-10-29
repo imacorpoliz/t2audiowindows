@@ -104,7 +104,7 @@ T2AudioResumeWorkRoutine(
         KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
         // Microphones: announce the host ring again after every wake, as
         // AppleAudio does (once, before any stream restarts).
-        if (attempt == 0 && !context->PoweredDown && context->MicRegistered) {
+        if (attempt == 0 && !context->PoweredDown && context->MicRegistered && context->MicIoActive == 0) {
             NTSTATUS micStatus = T2AudioMicReRegister(context);
 
             KdPrint(("T2Audio: D0: mic ranges re-sent: 0x%08X\n", micStatus));
@@ -151,15 +151,19 @@ T2AudioPowerChangeState(
     }
 
     if (NewState.DeviceState == PowerDeviceD0) {
+        BOOLEAN wasPoweredDown;
+
         KeAcquireSpinLock(&context->HardwareLock, &oldIrql);
+        wasPoweredDown = context->PoweredDown;
         context->PoweredDown = FALSE;
         KeReleaseSpinLock(&context->HardwareLock, oldIrql);
         // Persistent mode: a hardware session runs again (crash guard).
         T2AudioCrashGuardSetArmed(context, TRUE);
         // Like AppleAudio, START_IO is not re-sent here: it comes from the
         // next SetState(RUN). With ResumeAfterSleep a work item restarts the
-        // I/O of a stream that stayed in RUN through the sleep.
-        if (context->DeviceObject != NULL &&
+        // I/O of a stream that stayed in RUN through the sleep. Only queue on
+        // waking from an actual power-down state (wasPoweredDown).
+        if (wasPoweredDown && context->DeviceObject != NULL &&
             (context->MicRegistered ||
              (context->ResumeAfterSleep &&
               (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL ||
