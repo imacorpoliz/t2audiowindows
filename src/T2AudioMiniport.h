@@ -121,6 +121,16 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     volatile LONG JackPollStop;
     volatile LONG JackWorkRunning;
     volatile LONG JackPollCount;
+    // JackSeenPlugged: a jack read once returned "plugged", so the read is
+    // known to follow the jack; only then does the headphone endpoint report
+    // "unplugged" to Windows (otherwise it would stay hidden for good).
+    // JackProbeAll (Parameters\JackProbeAll=1, experiment): each poll also
+    // reads the jack at other addresses (T2AudioJackProbeVariants).
+    BOOLEAN JackSeenPlugged;
+    ULONG JackProbeAll;
+#define T2AUDIO_JACK_PROBE_VARIANTS 8
+    LONG JackProbeLast[T2AUDIO_JACK_PROBE_VARIANTS];
+    ULONG64 BceHeadsetMicDeviceId;
     // Headphone output (Parameters\HeadphoneOutput=1, default 0; ROADMAP 4.4).
     // A second WaveRT + topology filter pair renders to the "Codec Output"
     // device: its ring is located in BufferStruct at MapResources, its

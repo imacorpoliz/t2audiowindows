@@ -548,6 +548,9 @@ T2AudioStartDeviceInner(
     // speakers while headphones are plugged in.
     context->ExtendedProbe = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtendedProbe", 0) ? 1u : 0u;
     context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
+    // Experiment (read-only, needs JackEvents): read the jack at 8 addresses.
+    context->JackProbeAll = (context->JackEvents &&
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackProbeAll", 0)) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
     // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off
@@ -560,10 +563,10 @@ T2AudioStartDeviceInner(
     context->MicInput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
     context->MicDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1) ? 1u : 0u;
     context->ExtraFormats = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtraFormats", 0) ? 1u : 0u;
-    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicDsp=%u ExtraFormats=%u ResumeAfterSleep=%u\n",
+    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicDsp=%u ExtraFormats=%u ResumeAfterSleep=%u JackProbeAll=%u\n",
              context->HeadphoneOutput, context->HeadphoneAttenuation,
              context->HeadphoneAttenuation * 6u, context->MicInput, context->MicDsp,
-             context->ExtraFormats, context->ResumeAfterSleep));
+             context->ExtraFormats, context->ResumeAfterSleep, context->JackProbeAll));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
              context->MdlVariant, context->TweeterMode,

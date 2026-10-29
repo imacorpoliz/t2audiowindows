@@ -5,6 +5,14 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): Gemini step 4f/5/5a reviewed — jack read stuck at 0, owner keeps `macos`; jack experiment, safe jack reporting, copy-time measurement (source only)
+
+Reviewed `docs/logs/EXCERPT_20261028_step5_presets.md` (merged from `gemini/install-1.0.12.0`; the installer's UTF-8 BOM, which that branch had dropped, is restored — without it Windows PowerShell 5.1 garbles the Russian strings).
+- **Owner verdicts:** `macos` is more pleasant than `macos-precise` («первый приятнее был» — "the first one was more pleasant") → `CompStyle=0` stays the default; `bass` rattles on kicks («на киках дребезжание, короче оставляй то что было и доделывай остальное» — "rattling on kicks, in short leave what was there and finish the rest") → `macos` stays the reference. Presets, `-Action Tune` and the CPU load test passed.
+- **Jack:** the 1 s poll works (57 queries, stops in D3, PnP restart clean) but `'outp'/'jack'` of "Codec Output" returned 0 through 3 plug/unplug cycles. AppleUSBVHCI does forward notifications (type 3) to us (`RE_appleaudio_protocol.md` §6), and none came either. Hypotheses: the jack is reported at another address (scope/element/object), or only while the codec runs. **Changes:** `JackProbeAll=1` reads 8 addresses each poll and logs every change (read-only); the headphone endpoint now reports "unplugged" to Windows only after a jack read was once "plugged" — with the stuck read the endpoint would otherwise have been hidden for good. GEMINI.md part 2, P0.
+- **`maxCopyUs` 2.1–2.7 ms in step 4f/5a:** the measured section included the clock-follow `KdPrint` ("T2 clock: re-aimed …", always once per run), which with DbgView attached costs milliseconds at DISPATCH_LEVEL; Gemini noted ~40 µs per pass for the copy itself. `run summary` now also reports `maxRenderUs` (render + copy alone) and `slowRenders=N/M` (passes over 500 µs).
+- `DriverVer` 1.0.13.0 for the next package.
+
 ### 2026-10-28 (Claude): headphones, microphones, resume after sleep, 16/24-bit — all implemented behind parameters (source only, not hardware-tested)
 
 The owner asked to finish all remaining work («делай все что надо доделывай до конца всю работу»). Everything below is **off by default**: with the new parameters at 0 the driver registers the same two filters and runs the same speaker path as before (the speaker copy now goes through ring accessors and a render helper; same arithmetic, host tests unchanged). CI (WDK build + host tests on gcc/clang/MSVC) is green.

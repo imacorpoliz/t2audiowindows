@@ -446,9 +446,10 @@ T2AudioSendBceMessage(
 // DeviceId and copy the raw property data into DataBuffer. The reply must echo
 // the requested object and address.
 static NTSTATUS
-T2AudioGetProperty(
+T2AudioGetPropertyEx(
     _In_ ULONG64 DeviceId,
     _In_ ULONG64 ObjectId,
+    _In_ ULONG Element,
     _In_ ULONG Scope,
     _In_ ULONG Selector,
     _Out_writes_bytes_(DataBufferSize) PVOID DataBuffer,
@@ -485,7 +486,7 @@ T2AudioGetProperty(
 
     // obj, element, scope, selector, qualifier_size (no qualifier).
     T2AudioBceWriteU64(payload + 0, ObjectId);
-    T2AudioBceWriteU32(payload + 8, 0);
+    T2AudioBceWriteU32(payload + 8, Element);
     T2AudioBceWriteU32(payload + 12, Scope);
     T2AudioBceWriteU32(payload + 16, Selector);
     T2AudioBceWriteU64(payload + 20, 0);
@@ -510,7 +511,7 @@ T2AudioGetProperty(
     }
 
     // The reply must echo the property we asked for on the same object.
-    if (obj != ObjectId || element != 0 ||
+    if (obj != ObjectId || element != Element ||
         scope != Scope || selector != Selector) {
         KdPrint(("T2Audio: GET_PROPERTY reply mismatch: obj=0x%I64X el=%u "
                  "scope=0x%08X sel=0x%08X\n",
@@ -529,6 +530,21 @@ T2AudioGetProperty(
     RtlCopyMemory(DataBuffer, replyBuffer + dataOffset, (SIZE_T)dataSize);
     *DataLength = (ULONG)dataSize;
     return STATUS_SUCCESS;
+}
+
+// Element 0 (the master element), as every query but the jack experiment.
+static NTSTATUS
+T2AudioGetProperty(
+    _In_ ULONG64 DeviceId,
+    _In_ ULONG64 ObjectId,
+    _In_ ULONG Scope,
+    _In_ ULONG Selector,
+    _Out_writes_bytes_(DataBufferSize) PVOID DataBuffer,
+    _In_ ULONG DataBufferSize,
+    _Out_ PULONG DataLength)
+{
+    return T2AudioGetPropertyEx(DeviceId, ObjectId, 0, Scope, Selector,
+                                DataBuffer, DataBufferSize, DataLength);
 }
 
 static NTSTATUS
@@ -740,6 +756,7 @@ T2AudioRegisterJackListener(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 // PROPERTY_CHANGED: re-read the jack (as kaiT2en and AppleAudio do; the
 // notification carries no value) and publish it to the copy path.
 static IO_WORKITEM_ROUTINE T2AudioJackWorkRoutine;
+static VOID T2AudioJackProbeVariants(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ LONG Poll);
 
 static VOID
 T2AudioJackWorkRoutine(
@@ -765,6 +782,15 @@ T2AudioJackWorkRoutine(
                                        T2AUDIO_PROP_SCOPE_OUTPUT,
                                        T2AUDIO_PROP_JACK_PLUGGED, &plugged);
         polls = InterlockedIncrement(&context->JackPollCount);
+        if (NT_SUCCESS(status) && plugged != 0 && !context->JackSeenPlugged) {
+            // The jack read follows the jack: from now on the headphone
+            // endpoint reports the real state (Topology.c).
+            context->JackSeenPlugged = TRUE;
+            KdPrint(("T2Audio: jack read works (first PLUGGED)\n"));
+        }
+        if (context->JackProbeAll) {
+            T2AudioJackProbeVariants(context, polls);
+        }
         if (NT_SUCCESS(status)) {
             previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
             // The poll runs every second: log changes only (and the first
@@ -786,6 +812,56 @@ T2AudioJackWorkRoutine(
         IoFreeWorkItem(workItem);
     }
     InterlockedDecrement(&context->JackWorkRunning);
+}
+
+// Parameters\JackProbeAll (experiment, read-only): on hardware the
+// 'outp'/'jack' read of "Codec Output" stayed 0 through plug/unplug
+// (EXCERPT_20261028_step5_presets.md). Each poll also reads the jack at other
+// addresses and logs every value that changes, to find the one that follows
+// the jack. GET_PROPERTY only.
+static VOID
+T2AudioJackProbeVariants(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ LONG Poll)
+{
+    struct {
+        ULONG64 Device;
+        ULONG64 Object;
+        ULONG Element;
+        ULONG Scope;
+        PCSTR Name;
+    } v[T2AUDIO_JACK_PROBE_VARIANTS];
+    ULONG i;
+
+    PAGED_CODE();
+
+    v[0].Device = Context->BceHeadphoneDeviceId; v[0].Object = v[0].Device; v[0].Element = 0; v[0].Scope = T2AUDIO_PROP_SCOPE_OUTPUT; v[0].Name = "out dev outp el0";
+    v[1].Device = Context->BceHeadphoneDeviceId; v[1].Object = v[1].Device; v[1].Element = 0; v[1].Scope = T2AUDIO_PROP_SCOPE_INPUT;  v[1].Name = "out dev inpt el0";
+    v[2].Device = Context->BceHeadphoneDeviceId; v[2].Object = v[2].Device; v[2].Element = 0; v[2].Scope = T2AUDIO_PROP_SCOPE_GLOBAL; v[2].Name = "out dev glob el0";
+    v[3].Device = Context->BceHeadphoneDeviceId; v[3].Object = v[3].Device; v[3].Element = 1; v[3].Scope = T2AUDIO_PROP_SCOPE_OUTPUT; v[3].Name = "out dev outp el1";
+    v[4].Device = Context->BceHeadphoneDeviceId; v[4].Object = v[4].Device; v[4].Element = 2; v[4].Scope = T2AUDIO_PROP_SCOPE_OUTPUT; v[4].Name = "out dev outp el2";
+    v[5].Device = Context->BceHeadphoneDeviceId; v[5].Object = Context->HeadphoneStreamId; v[5].Element = 0; v[5].Scope = T2AUDIO_PROP_SCOPE_OUTPUT; v[5].Name = "out stream outp";
+    v[6].Device = Context->BceHeadphoneDeviceId; v[6].Object = Context->HeadphoneStreamId; v[6].Element = 0; v[6].Scope = T2AUDIO_PROP_SCOPE_GLOBAL; v[6].Name = "out stream glob";
+    v[7].Device = Context->BceHeadsetMicDeviceId; v[7].Object = v[7].Device; v[7].Element = 0; v[7].Scope = T2AUDIO_PROP_SCOPE_INPUT; v[7].Name = "in dev inpt el0";
+
+    for (i = 0; i < T2AUDIO_JACK_PROBE_VARIANTS; i++) {
+        UCHAR data[4];
+        ULONG length = 0;
+        LONG value;
+        NTSTATUS status;
+
+        if (v[i].Device == 0 || v[i].Object == 0) {
+            continue;
+        }
+        status = T2AudioGetPropertyEx(v[i].Device, v[i].Object, v[i].Element, v[i].Scope,
+                                      T2AUDIO_PROP_JACK_PLUGGED, data, sizeof(data), &length);
+        // Failures are recorded as negative values so a change is visible.
+        value = (NT_SUCCESS(status) && length == 4) ? (LONG)T2AudioBceReadU32(data)
+                                                    : -(LONG)(status & 0xFFFF) - 1;
+        if (Poll == 1 || value != Context->JackProbeLast[i]) {
+            KdPrint(("T2Audio: jack probe #%d %s (dev 0x%I64X obj 0x%I64X): %d (was %d)\n",
+                     Poll, v[i].Name, v[i].Device, v[i].Object, value, Context->JackProbeLast[i]));
+            Context->JackProbeLast[i] = value;
+        }
+    }
 }
 
 // Queue one jack re-read unless one is already queued (any IRQL <= DISPATCH).
@@ -1432,6 +1508,10 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         if (Context->BceMicDeviceId == 0 &&
             T2AudioBceUidEquals(uid, uidLength, "Digital Mic")) {
             Context->BceMicDeviceId = deviceList[i];
+        }
+        if (Context->BceHeadsetMicDeviceId == 0 &&
+            T2AudioBceUidEquals(uid, uidLength, "Codec Input")) {
+            Context->BceHeadsetMicDeviceId = deviceList[i];
         }
         // Headphone jack, read-only first step (KAIT2EN reads the same
         // property: 'outp'/'jack' on device "Codec Output", u32 plugged).

@@ -85,6 +85,11 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // (DSP included), in microseconds; measured at DISPATCH_LEVEL under the
     // hardware lock, so it is also how long that lock was held for the copy.
     ULONG MaxCopyUs;
+    // The same for the render + copy alone (without the clock follow and its
+    // logging), how many passes took over 500 us, and how many passes ran.
+    ULONG MaxRenderUs;
+    ULONG SlowRenders;
+    ULONG RenderPasses;
     // Frames written as silence because the headphones were plugged in
     // (HeadphoneAutoMute), per run.
     ULONG64 JackMutedFrames;
@@ -416,6 +421,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         PUCHAR hwBufferBase = (PUCHAR)context->Bar1Mapped + T2AudioStreamRingOffset(instance, context);
         PUCHAR sourceBase = (PUCHAR)instance->SystemBufferVa;
         ULONG remainingFrames = (ULONG)pendingFrames;
+        LARGE_INTEGER renderQpc;
         ULONG frameBytes = T2AudioStreamRingFrameBytes(instance);
         ULONG ringBytes = (ULONG)T2AudioStreamRingSize(instance, context);
         ULONG hwFrames = ringBytes / frameBytes;
@@ -455,6 +461,10 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         T2AudioStreamFollowT2ClockLocked(instance, context, hwBufferBase,
                                          hwFrames, frame, playFrame,
                                          (ULONG64)qpc.QuadPart);
+
+        // Timing of the render + copy alone (the clock follow above may log,
+        // and a DbgPrint with a debugger or DbgView attached takes ms).
+        renderQpc = KeQueryPerformanceCounter(NULL);
 
         // Parameters\HeadphoneAutoMute: while the headphone jack reads plugged
         // in (JackEvents keeps it current), the speakers get silence. The
@@ -523,17 +533,29 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // sees the samples before the position that covers them is reported.
         _mm_sfence();
 
-        // Diagnostics: cost of this render + copy (qpc was read on entry).
+        // Diagnostics: cost of the whole pass (qpc was read on entry,
+        // including clock-follow logging) and of the render + copy alone.
         {
             LARGE_INTEGER done = KeQueryPerformanceCounter(NULL);
 
             if (qpcFreq.QuadPart > 0 && done.QuadPart > qpc.QuadPart) {
                 ULONG64 us = (((ULONG64)done.QuadPart - (ULONG64)qpc.QuadPart) * 1000000ull) /
                              (ULONG64)qpcFreq.QuadPart;
+                ULONG64 renderUs = (done.QuadPart > renderQpc.QuadPart)
+                    ? (((ULONG64)done.QuadPart - (ULONG64)renderQpc.QuadPart) * 1000000ull) /
+                      (ULONG64)qpcFreq.QuadPart
+                    : 0;
 
                 if (us > instance->MaxCopyUs) {
                     instance->MaxCopyUs = (us > MAXULONG) ? MAXULONG : (ULONG)us;
                 }
+                if (renderUs > instance->MaxRenderUs) {
+                    instance->MaxRenderUs = (renderUs > MAXULONG) ? MAXULONG : (ULONG)renderUs;
+                }
+                if (renderUs > 500) {
+                    instance->SlowRenders++;
+                }
+                instance->RenderPasses++;
             }
         }
     }
@@ -875,6 +897,9 @@ T2AudioStreamSetStateLocked(
                 instance->CopyGapsOverLead = 0;
                 instance->SkipEvents = 0;
                 instance->MaxCopyUs = 0;
+                instance->MaxRenderUs = 0;
+                instance->SlowRenders = 0;
+                instance->RenderPasses = 0;
                 instance->JackMutedFrames = 0;
                 instance->ClockCorrections = 0;
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
@@ -917,10 +942,11 @@ T2AudioStreamSetStateLocked(
                  instance->GetPositionRegCalls, instance->CopyTickCalls,
                  instance->PositionRegister));
         // Per-run summary for crackle diagnosis (docs/REVIEW_20261028.md).
-        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u dspLimited=%lu wooferLimited=%lu autoGainDb10=%I64d jackMutedFrames=%I64u\n",
+        KdPrint(("T2Audio: run summary: reAims=%u rateUpdates=%u ratePpb=%I64d maxCopyGapUs=%u gaps>10ms=%u gaps>lead=%u skips=%u maxCopyUs=%u maxRenderUs=%u slowRenders=%u/%u dspLimited=%lu wooferLimited=%lu autoGainDb10=%I64d jackMutedFrames=%I64u\n",
                  instance->ClockCorrections, instance->RateUpdates, instance->RatePpb,
                  instance->MaxCopyGapUs, instance->CopyGapsOver10ms,
                  instance->CopyGapsOverLead, instance->SkipEvents, instance->MaxCopyUs,
+                 instance->MaxRenderUs, instance->SlowRenders, instance->RenderPasses,
                  instance->Dsp.LimitedFrames, instance->Dsp.WooferLimitedFrames,
                  // autogain at the end of the run, tenths of a dB (Q16 log2 * 6.02)
                  instance->Dsp.AgcLog * 602 / 65536,

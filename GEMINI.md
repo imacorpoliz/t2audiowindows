@@ -168,12 +168,26 @@ The installer switches them: `.\tools\T2Audio-Setup.ps1 -Action Features -Headph
 
 Rebuild 1.0.13.0 from the latest `diagnostics` (the INF gained interfaces, so the package must be re-signed and reinstalled: `-Action Install -Preset macos`). Check first that part 1 still passes with everything off (speakers play, reboot OK). **One feature at a time; DbgView from the start; on any BSOD: stop, minidump, `-Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0`, report.**
 
+**P0. Jack experiment** (read-only, no sound needed; ~5 minutes). Step 4f showed `'outp'/'jack'` of "Codec Output" stays 0. The driver can now read the jack at 8 addresses each second and log every change:
+```powershell
+$p = 'HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters'
+.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1      # HeadphoneOutput + JackEvents + HeadphoneAutoMute
+Set-ItemProperty $p JackProbeAll 1 -Type DWord
+.\tools\T2Audio-Setup.ps1 -Action Preset -Preset macos         # restarts the device
+```
+1. Log: `jack probe #1 <name> (dev … obj …): <value>` for each address (`out dev outp el0`, `out dev inpt el0`, `out dev glob el0`, `out dev outp el1`, `out dev outp el2`, `out stream outp`, `out stream glob`, `in dev inpt el0`). Negative values are failed reads.
+2. Play music on the **speakers**, then plug / unplug the headphones 3 times, ~5 s apart. Copy **every** `jack probe` line (only changes are logged) and note the times of plugging.
+3. Repeat while playing on the **headphone endpoint** (P1 below, at 10 %): the T2 may only track the jack while the codec runs.
+4. If any line changes with the jack: `jack read works (first PLUGGED)` appears when the main read follows; report which address it was. Afterwards `Set-ItemProperty $p JackProbeAll 0 -Type DWord`.
+
 **P1. Headphones** (sound allowed; **headphones on the desk first, not on the ears**, volume 10 %).
 1. `-Action Features -Headphones 1`. Log: `headphone endpoint registered`, `headphone stream 0x26: shift=8 …`, `audio path ENABLED for headphones 0x25 ring 0x190000+0x20800`, `jack poll started`. If the stream line says `format unsupported` or the endpoint is NOT registered: record, turn it off, go on with P2.
-2. Windows Sound settings: a new output «T2 Audio Headphones». With headphones unplugged it should show as unplugged/hidden (only if the jack poll sees the jack, step 4f); plugged in it appears. **If it stays "unplugged" with the headphones in** (the `'jack'` read does not follow the jack): `Set-ItemProperty $p JackEvents 0 -Type DWord` and restart the device — the endpoint is then always shown (no auto-switch, no auto-mute) — record it.
+2. Windows Sound settings: a new output «T2 Audio Headphones». It is **always shown** until a jack read has once returned "plugged" (`jack read works`); only then does Windows see it as unplugged/plugged and switch automatically. With the jack read stuck at 0 (step 4f), select it by hand.
 3. Plug in, select it, play a 1 kHz tone at 10 % (`tools\Test-WasapiTone.ps1` on that device, or any music). Is it audible in the headphones, both sides? Speakers silent (auto-mute)? Then music at a comfortable level: owner verdict (quality, noise, crackle).
 4. Unplug while playing: speakers take over (Windows switches the default back) within ~1–2 s; plug in again.
-5. `run summary` for the headphone stream (reAims, gaps, maxCopyUs); `jack change signalled to Windows` lines.
+5. `run summary` for the headphone stream (reAims, gaps, `maxCopyUs`, `maxRenderUs`, `slowRenders`); `jack change signalled to Windows` lines.
+
+**`run summary` now has `maxRenderUs=` and `slowRenders=N/M`** (render + ring copy alone, without the clock-follow logging; passes over 500 µs out of all passes). In step 4f `maxCopyUs` was 2.1–2.7 ms: Claude's reading is that this is the `T2 clock: re-aimed …` DbgPrint inside the measured section (DbgView attached), not the copy. Record both values in every report; `maxRenderUs` well under 500 µs and `slowRenders` near 0 confirm it.
 
 **P2. Microphones** (no sound needed; **this writes BufferStruct** — the owner must allow this step).
 1. `-Action Features -Microphone 1`. Log: `microphone endpoint registered`, `mic stream 0x22: 3 ch S24, latency=…`, `mic ring registered: pa=0x… size=0x30C00 (16640 frames)`, `mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x21: 0x00000000`, `audio path ENABLED for microphones`. If msg 18 fails: record the status, turn it off, stop P2.

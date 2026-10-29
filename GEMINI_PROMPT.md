@@ -22,7 +22,7 @@ Goal: verify on hardware what Claude built for daily use:
 6) sleep (only with permission);
 7) T2Audio-Setup.ps1 -Action Uninstall: back to AppleAudio.
 
-PART 2 (only after part 1 passed, rebuild as 1.0.13.0): the "▶ NEXT RUN, part 2" block in GEMINI.md — P1 headphones (low volume, headphones on the desk first), P2 microphones (writes BufferStruct: needs the owner's permission), P3 resume after sleep (needs permission for sleep), P4 16/24-bit. Switch features with T2Audio-Setup.ps1 -Action Features; one at a time; on trouble switch all four off.
+PART 2 (only after part 1 passed, rebuild as 1.0.13.0): the "▶ NEXT RUN, part 2" block in GEMINI.md — P0 jack experiment (JackProbeAll=1, read-only, copy every "jack probe" line), P1 headphones (low volume, headphones on the desk first), P2 microphones (writes BufferStruct: needs the owner's permission), P3 resume after sleep (needs permission for sleep), P4 16/24-bit. Switch features with T2Audio-Setup.ps1 -Action Features; one at a time; on trouble switch all four off.
 
 The installer's UI is in Russian; GEMINI.md gives the English meaning of the strings to check.
 

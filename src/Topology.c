@@ -225,7 +225,9 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
 static BOOLEAN
 T2AudioTopologyJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    if (Context == NULL || !Context->JackEvents) {
+    // Only a jack read that was once seen "plugged" is trusted; before that
+    // (or without JackEvents) the endpoint is always shown.
+    if (Context == NULL || !Context->JackEvents || !Context->JackSeenPlugged) {
         return TRUE;
     }
     return (Context->HeadphoneJackPlugged != 0) ? TRUE : FALSE;
@@ -311,7 +313,8 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
         RtlZeroMemory(jack2, sizeof(*jack2));
         jack2->DeviceStateInfo = 0;
         // Presence detection only when the driver actually tracks the jack.
-        jack2->JackCapabilities = (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents)
+        jack2->JackCapabilities = (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents &&
+                                   instance->DeviceContext->JackSeenPlugged)
                                       ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;
