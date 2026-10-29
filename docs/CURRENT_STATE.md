@@ -16,6 +16,24 @@ The owner asked to finish all remaining work («делай все что над�
 - **INF:** new interfaces `WaveHeadphone`, `TopologyHeadphone`, `WaveMic` (`KSCATEGORY_CAPTURE`), `TopologyMic`; they are inactive unless the subdevices are registered. The package must be rebuilt and re-signed (1.0.13.0).
 - Hardware plan: `GEMINI.md`, "▶ NEXT RUN, part 2" (P1 headphones, P2 microphones — needs the owner's permission because it writes BufferStruct, P3 sleep, P4 formats).
 - Still not done: hardware volume (ROADMAP §3, needs reverse engineering of msg 28), 44.1/96 kHz, the headset microphone on "Codec Input" (5.5), production signing (§6, an owner decision).
+### 2026-10-28 (Gemini): Step 4f (Jack polling verified), Step 5 & 5a (Presets, tone control, CPU stress test PASS)
+
+Executed on MacBookPro16,1 running Windows 11 with driver version 1.0.12.1 (sys SHA256 `6F6E2D5E583396D974ED38CF04B5E8FA28FE3DF5AE772AC567B76BDEEEEBC9FD`):
+- **Step 4f (Jack Polling):**
+  - Compiled and installed `1.0.12.1` with periodic 1000 ms jack poll timer (`JackEvents=1`).
+  - DPC polling verified: during active audio stream playback (`PoweredDown=FALSE`), the driver sends BCE message 7 (`T2AUDIO_PROP_JACK_PLUGGED`) to codec output device 0x25 at exact 1000 ms intervals (57 consecutive queries in live log).
+  - Power state management verified: when audio stops, PortCls transitions adapter to D3 (`PowerChangeState D3`), and polling cleanly halts.
+  - Hardware observation: during 3 physical plug/unplug cycles of 3.5 mm headphones while audio was playing, bridgeOS returned status `0x00000000` with 512-byte reply on each query, but `plugged` remained `0`. Dynamic PnP restart with `JackEvents=1` succeeded with 0 errors, no hung work items, no BSOD. Cleaned up registry to `JackEvents=0`, `HeadphoneAutoMute=0`, `ExtendedProbe=0`.
+- **Step 5 / 5a (Presets & Tone Controls):**
+  - Fixed signed DWORD handling in `tools/T2Audio-Setup.ps1`: `Get-EffectiveParam` converting values `> 0x7FFFFFFF` to signed `[int]` so negative tone values (`BassDb=-3`, `TrebleDb=-6`) display correctly in `Status`.
+  - Verified `-Action Tune -BassDb 6 -TrebleDb -6`: `Status` reported `бас +6 дБ, высокие -6 дБ`, sound audibly darkened. Reset to `0/0` cleanly restored standard `Как на Mac`.
+  - Verified CPU load test under extreme DSP settings: preset `night` (`SpeakerDsp=4`, `DspAutoGain=1`, `CompStyle=1`) + `Tune +12/+12/+12`. In `run summary`: `maxCopyUs = 2112` (2.1 ms max tick, ~40 µs per sub-buffer), `gaps>10ms=0`, `skips=0`, `dspLimited=0`. Stream remained completely glitch-free.
+  - Verified dynamic preset switching across all 10 presets: `macos`, `macos-precise`, `bass`, `voice`, `movie`, `night`, `loud`, `maxvolume`, `even`, `bright`.
+  - Documented in `docs/logs/EXCERPT_20261028_step5_presets.md`.
+- **Owner Listening Evaluation (Step 5a):**
+  - **A/B Compressor Style (`macos` vs `macos-precise`):** Owner verdict verbatim: *«первый приятнее был»* ("the first one [macos, `CompStyle=0`] was more pleasant"). Confirms `CompStyle=0` (fast peak compressor) remains the default for the `macos` profile (ROADMAP §7.2).
+  - **`bass` Preset (+4 dB 150 Hz woofer shelf):** Owner verdict verbatim: *«на киках дребезжание, короче оставляй то что было и доделывай остальное»* ("rattling on kicks, in short leave what was there before [macos] and finish up the rest"). Confirms 16" MBP woofers mechanically rattle on heavy kick transients with +4 dB boost; default `macos` profile is retained as the production reference.
+  - **Settled Profile:** `macos` (Как на Mac, рекомендуется), `volume=1.00 L=1.00 R=1.00`, `mute=False`, status OK.
 
 ### 2026-10-28 (Claude): Gemini hardware reports reviewed — balance fixed, reboot PASS, headphone/mic formats known, jack events absent → jack polling added (source only)
 

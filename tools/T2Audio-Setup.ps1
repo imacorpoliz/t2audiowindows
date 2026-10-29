@@ -376,6 +376,7 @@ function Write-PresetValues($name) {
 function Get-EffectiveParam($name) {
     $v = Get-Param $name
     if ($null -eq $v) { return [int]$ParamDefaults[$name] }
+    if ($v -gt [int]::MaxValue) { return [int]($v - 0x100000000) }
     return [int]$v
 }
 
