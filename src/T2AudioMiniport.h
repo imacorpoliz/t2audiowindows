@@ -179,6 +179,14 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 MicDeviceId;
     ULONG64 MicStreamId;
     ULONG MicLatencyFrames;
+    // MicStartIo (Parameters\MicStartIo=1, default 0): only then does a
+    // capture RUN send START_IO to the microphone device. Added after the
+    // first hardware run (2026-10-29): START_IO following a bare msg 18
+    // powered the Mac off. Without it the endpoint records silence.
+    ULONG MicStartIo;
+    // The ring is a common buffer of a DMA adapter of the PCI device, so
+    // MicBufferPa is the device-logical address the T2 must write to.
+    PVOID MicDmaAdapter;
     PVOID MicBufferVa;
     PHYSICAL_ADDRESS MicBufferPa;
     ULONG MicBufferSize;

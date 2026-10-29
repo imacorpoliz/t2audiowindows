@@ -79,7 +79,8 @@ static BCE_TRANSPORT_CONTEXT g_BceTransport = { NULL, NULL };
 
 // Largest message this driver sends (GET_PROPERTY = 49 bytes); the tagged copy
 // lives on the stack.
-#define T2AUDIO_BCE_MAX_MESSAGE_SIZE 128u
+// AppleAudio's SET_INPUT_STREAM_ADDRESS_RANGES is 837 bytes (0x345).
+#define T2AUDIO_BCE_MAX_MESSAGE_SIZE 1024u
 
 // Upper bound on how long any caller will wait to take the transport lock. A
 // send holds the lock for up to T2AUDIO_BCE_SEND_TIMEOUT_MS, so this is set a

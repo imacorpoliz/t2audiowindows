@@ -189,12 +189,20 @@ Set-ItemProperty $p JackProbeAll 1 -Type DWord
 
 **`run summary` now has `maxRenderUs=` and `slowRenders=N/M`** (render + ring copy alone, without the clock-follow logging; passes over 500 µs out of all passes). In step 4f `maxCopyUs` was 2.1–2.7 ms: Claude's reading is that this is the `T2 clock: re-aimed …` DbgPrint inside the measured section (DbgView attached), not the copy. Record both values in every report; `maxRenderUs` well under 500 µs and `slowRenders` near 0 confirm it.
 
-**P2. Microphones** (no sound needed; **this writes BufferStruct** — the owner must allow this step).
-1. `-Action Features -Microphone 1`. Log: `microphone endpoint registered`, `mic stream 0x22: 3 ch S24, latency=…`, `mic ring registered: pa=0x… size=0x30C00 (16640 frames)`, `mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x21: 0x00000000`, `audio path ENABLED for microphones`. If msg 18 fails: record the status, turn it off, stop P2.
-2. Sound settings → Input: «T2 Audio Microphone». Speak: does the level meter move? Record 10 s with the Voice Recorder app (or `tools\Test-WasapiRender.ps1` if it can capture), play it back on the speakers. Owner verdict: loud enough? noise? hum? Is the voice clear?
-3. `mic run summary: captured=… silent=… reAims=… maxCopyUs=…`: `captured` should be close to 48000 per second of recording, `silent` small (only the first ~20 ms), `reAims` 0–1.
-4. If the level is far too low or too loud: try `MicDsp=0` (raw mic 0, expected very quiet) for comparison and report both.
-5. Disable/enable the device in Device Manager once (tests STOP_IO → clear entry → free order): no BSOD; log `mic ring released`, then registered again.
+**P2. Microphones — REVISED after the power-off of 2026-10-29** (`EXCERPT_20261029_part2_mics.md`). Do not set `MicStartIo=1` until P2-RE is done and Claude has confirmed the sequence.
+
+*What changed (commit after b05dfbd):* msg 18 is now sent in AppleAudio's 837-byte form (stream id 0x22, count 1, range 1/1 — your finding); the mic ring is a DMA common buffer of our PCI device (`IoGetDmaAdapter` + `AllocateCommonBuffer`), so the address in BufferStruct is the device-logical one; **and a capture RUN no longer sends START_IO unless `Parameters\MicStartIo=1`** (default 0: the endpoint records silence, no T2 traffic). `-Action Features -Microphone 1` sets only `MicInput`.
+
+**P2-RE (static, AppleAudio.sys with REA/Ghidra, no hardware risk).** Answer each with addresses and disassembly in `docs/analysis/RE_mic_capture.md`:
+1. `0x140004344` (msg 18, 837 bytes): are `count=1, 1, 1` really immediates in every path, or is there a loop/branch that writes real ranges (addresses/sizes, page lists) into the 49/50 slots? Who calls it, and when relative to `0x1400046F8` (BufferStruct write), `0x1400044E4` (earlier noted as msg 18 too — what is the difference?) and START_IO (`0x1400048B0`) for the input device?
+2. How AppleAudio allocates the input buffers (`0x140001FA4`): `MmAllocateContiguousMemory*`, `AllocateCommonBuffer` (DMA adapter), `MmAllocatePagesForMdl*`? Which addresses go into BufferStruct: `MmGetPhysicalAddress`, the DMA logical address, or MDL PFNs? The table on hardware held 3 buffers (0x3000, 0x20000, …): how are they split?
+3. `SET_PROPERTY 'nsrt'` (msg 9, 0x42 bytes, `0x14000445C`): full layout (object = device or stream id? element, scope, selector, data size, the double 48000.0) and whether it is sent for the input device **before** START_IO.
+4. The complete ordered list of BCE messages AppleAudio sends when a capture stream goes to RUN and when it stops (any SET_PROPERTY, PROPERTY_LISTENER, msg 18 again, START_IO on which device id: 0x21 or the stream 0x22?).
+5. Anything AppleAudio writes into BufferStruct beyond `num_input_streams`, `num_buffers`, `buffers[]` (e.g. the `active`/flag fields at stream `+0x0C`/`+0x10` that the 2026 report mentioned).
+
+**P2-A (safe, MicStartIo=0):** rebuild, `-Action Features -Microphone 1`. Log: `mic ring: common buffer va=… logical=0x… physical=0x…` (are they equal? — tells whether DMA remapping is active), `mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x21 stream=0x22 (837 bytes): 0x00000000`, `mic ring registered`. Start Voice Recorder for 5 s: expected `mic RUN without START_IO (MicStartIo=0)`, a silent recording, **no crash**, `mic run summary: captured=0 silent=…`. Disable/enable the device once.
+
+**P2-B (only after P2-RE matches our sequence and the owner explicitly accepts that the Mac may power off again):** `Set-ItemProperty $p MicStartIo 1 -Type DWord`, restart the device, record 5 s, speak. Expected `mic RUN START_IO: 0x00000000`, `captured` ≈ 48000/s, a voice in the recording. On power-off: after reboot `-Action Features -Microphone 0`, `MicStartIo 0`, report.
 
 **P3. Resume after sleep** (only if the owner allows sleep). `-Action Features -ResumeAfterSleep 1`. Play music, sleep 1–2 min, wake **without touching the player**. Log: `resume after sleep: restarting speaker I/O`, `status=0x00000000`; does the sound come back by itself within ~1 s? With the microphone on as well: `D0: mic ranges re-sent: 0x00000000`. Compare once with `ResumeAfterSleep 0` (expected: silence until the player is restarted).
 

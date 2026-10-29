@@ -108,57 +108,115 @@ T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 A
     return done;
 }
 
+// msg 18 in AppleAudio's 837-byte form (stream id, one range); the first
+// hardware run sent kaiT2en's bare header, which was acknowledged but did
+// not prepare the stream (EXCERPT_20261029_part2_mics.md).
 static NTSTATUS
 T2AudioMicSendAddressRanges(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    UCHAR message[64];
+    UCHAR message[T2AUDIO_BCE_SET_INPUT_RANGES_SIZE];
     UCHAR reply[256];
-    SIZE_T length = 0;
+    ULONG length;
     ULONG replySize = 0;
     NTSTATUS status;
 
     PAGED_CODE();
 
-    status = T2AudioBuildIoCommand(T2AUDIO_MSG_SET_INPUT_STREAM_ADDRESS_RANGES,
-                                   Context->BceMicDeviceId, message, sizeof(message), &length);
-    if (NT_SUCCESS(status)) {
-        status = T2AudioSendBceMessage(message, (ULONG)length, reply, sizeof(reply), &replySize);
+    length = T2AudioBceBuildSetInputRanges(message, sizeof(message),
+                                           Context->BceMicDeviceId, Context->MicStreamId);
+    if (length == 0) {
+        return STATUS_INVALID_PARAMETER;
     }
+    status = T2AudioSendBceMessage(message, length, reply, sizeof(reply), &replySize);
     if (NT_SUCCESS(status) &&
         !T2AudioBceParseCommandResponse(reply, replySize,
                                         T2AUDIO_MSG_SET_INPUT_STREAM_ADDRESS_RANGES_RESPONSE)) {
         status = STATUS_DEVICE_PROTOCOL_ERROR;
     }
-    KdPrint(("T2Audio: mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x%I64X: 0x%08X (reply %u bytes)\n",
-             Context->BceMicDeviceId, status, replySize));
+    KdPrint(("T2Audio: mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x%I64X stream=0x%I64X (%u bytes): 0x%08X (reply %u bytes)\n",
+             Context->BceMicDeviceId, Context->MicStreamId, length, status, replySize));
     return status;
+}
+
+// The ring as a common buffer of a bus-master DMA adapter of our PCI device:
+// the address handed to the T2 is then the device-logical one even with DMA
+// remapping (Kernel DMA Protection) on.
+static PVOID
+T2AudioMicAllocateRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Out_ PHYSICAL_ADDRESS *Logical)
+{
+    DEVICE_DESCRIPTION desc;
+    PDEVICE_OBJECT pdo = NULL;
+    PDMA_ADAPTER adapter;
+    ULONG mapRegisters = 0;
+    PVOID va;
+
+    PAGED_CODE();
+
+    Logical->QuadPart = 0;
+    if (!NT_SUCCESS(PcGetPhysicalDeviceObject(Context->DeviceObject, &pdo)) || pdo == NULL) {
+        return NULL;
+    }
+    RtlZeroMemory(&desc, sizeof(desc));
+    desc.Version = DEVICE_DESCRIPTION_VERSION;
+    desc.Master = TRUE;
+    desc.ScatterGather = FALSE;
+    desc.Dma32BitAddresses = TRUE;
+    desc.Dma64BitAddresses = TRUE;
+    desc.InterfaceType = PCIBus;
+    desc.MaximumLength = T2AUDIO_MIC_RING_BYTES;
+    adapter = IoGetDmaAdapter(pdo, &desc, &mapRegisters);
+    if (adapter == NULL) {
+        KdPrint(("T2Audio: mic: IoGetDmaAdapter failed\n"));
+        return NULL;
+    }
+    va = adapter->DmaOperations->AllocateCommonBuffer(adapter, T2AUDIO_MIC_RING_BYTES, Logical, TRUE);
+    if (va == NULL) {
+        adapter->DmaOperations->PutDmaAdapter(adapter);
+        return NULL;
+    }
+    Context->MicDmaAdapter = adapter;
+    return va;
+}
+
+static VOID
+T2AudioMicFreeRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PVOID Va)
+{
+    PDMA_ADAPTER adapter = (PDMA_ADAPTER)Context->MicDmaAdapter;
+
+    PAGED_CODE();
+
+    if (adapter != NULL) {
+        adapter->DmaOperations->FreeCommonBuffer(adapter, T2AUDIO_MIC_RING_BYTES,
+                                                 Context->MicBufferPa, Va, TRUE);
+        adapter->DmaOperations->PutDmaAdapter(adapter);
+        Context->MicDmaAdapter = NULL;
+    }
 }
 
 NTSTATUS
 T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    PHYSICAL_ADDRESS low, high, boundary;
+    PHYSICAL_ADDRESS logical;
     PVOID va;
     NTSTATUS status;
 
     PAGED_CODE();
 
     if (Context == NULL || !Context->MicInput || !Context->MicFormatValid ||
-        Context->BceMicDeviceId == 0 || Context->MicRegistered) {
+        Context->BceMicDeviceId == 0 || Context->MicStreamId == 0 || Context->MicRegistered) {
         return STATUS_INVALID_DEVICE_STATE;
     }
-    low.QuadPart = 0;
-    high.QuadPart = (LONGLONG)-1;
-    boundary.QuadPart = 0;
-    va = MmAllocateContiguousMemorySpecifyCache(T2AUDIO_MIC_RING_BYTES, low, high, boundary, MmCached);
+    va = T2AudioMicAllocateRing(Context, &logical);
     if (va == NULL) {
         KdPrint(("T2Audio: mic ring allocation (%u bytes) failed\n", T2AUDIO_MIC_RING_BYTES));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(va, T2AUDIO_MIC_RING_BYTES);
     Context->MicBufferVa = va;
-    Context->MicBufferPa = MmGetPhysicalAddress(va);
+    Context->MicBufferPa = logical;
     Context->MicBufferSize = T2AUDIO_MIC_RING_BYTES;
+    KdPrint(("T2Audio: mic ring: common buffer va=%p logical=0x%I64X physical=0x%I64X\n",
+             va, (ULONG64)logical.QuadPart, (ULONG64)MmGetPhysicalAddress(va).QuadPart));
 
     if (!T2AudioMicWriteBufferStruct(Context, (ULONG64)Context->MicBufferPa.QuadPart,
                                      Context->MicBufferSize)) {
@@ -169,7 +227,7 @@ T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
     if (!NT_SUCCESS(status)) {
         (VOID)T2AudioMicWriteBufferStruct(Context, 0, 0);
-        MmFreeContiguousMemorySpecifyCache(va, T2AUDIO_MIC_RING_BYTES, MmCached);
+        T2AudioMicFreeRing(Context, va);
         Context->MicBufferVa = NULL;
         Context->MicBufferSize = 0;
         return status;
@@ -224,7 +282,7 @@ T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
     KeFlushQueuedDpcs();
 
-    MmFreeContiguousMemorySpecifyCache(va, T2AUDIO_MIC_RING_BYTES, MmCached);
+    T2AudioMicFreeRing(Context, va);
     Context->MicBufferSize = 0;
     KdPrint(("T2Audio: mic ring released\n"));
 }
@@ -544,7 +602,9 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
             return STATUS_INVALID_DEVICE_STATE;
         }
         qpc = KeQueryPerformanceCounter(&qpcFreq);
-        if (context->BceIoEnabled && context->MicRegistered && context->MicDeviceId != 0 &&
+        if (!context->MicStartIo) {
+            KdPrint(("T2Audio: mic RUN without START_IO (MicStartIo=0): the endpoint records silence\n"));
+        } else if (context->BceIoEnabled && context->MicRegistered && context->MicDeviceId != 0 &&
             !s->HardwareIoStarted) {
             status = T2AudioStartIoDevice(context, context->MicDeviceId);
             KdPrint(("T2Audio: mic RUN START_IO: 0x%08X\n", status));

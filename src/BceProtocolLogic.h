@@ -594,6 +594,40 @@ T2AudioBceBuildPropertyListener(unsigned char *Buffer,
     return T2AUDIO_BCE_PROPERTY_LISTENER_SIZE;
 }
 
+// SET_INPUT_STREAM_ADDRESS_RANGES (msg 18) as AppleAudio.sys builds it
+// (0x140004344, Gemini/REA 2026-10-29, EXCERPT_20261029_part2_mics.md):
+// 0x345 = 837 bytes; after header + base: the input stream id (u64), a range
+// count of 1 (u64) and one range written as the constants 1, 1 (u64, u64);
+// the rest zero. The buffer addresses themselves are in BufferStruct.
+// kaiT2en sends the bare header + base (no payload) - on Windows the bare
+// form was acknowledged but the following START_IO powered the Mac off.
+#define T2AUDIO_BCE_SET_INPUT_RANGES_SIZE 0x345u
+
+static __inline unsigned long
+T2AudioBceBuildSetInputRanges(unsigned char *Buffer,
+                              unsigned long BufferSize,
+                              unsigned long long DeviceId,
+                              unsigned long long StreamId)
+{
+    unsigned long i;
+    unsigned long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+
+    if (Buffer == 0 || BufferSize < T2AUDIO_BCE_SET_INPUT_RANGES_SIZE || StreamId == 0) {
+        return 0;
+    }
+    for (i = 0; i < T2AUDIO_BCE_SET_INPUT_RANGES_SIZE; i++) {
+        Buffer[i] = 0;
+    }
+    Buffer[T2AUDIO_BCE_TYPE_OFFSET] = (unsigned char)T2AUDIO_BCE_MSG_COMMAND;
+    T2AudioBceWriteU64(Buffer + 5, DeviceId);
+    T2AudioBceWriteU32(Buffer + T2AUDIO_BCE_HEADER_SIZE, T2AUDIO_MSG_SET_INPUT_STREAM_ADDRESS_RANGES);
+    T2AudioBceWriteU64(Buffer + base, StreamId);       // +0x15
+    T2AudioBceWriteU64(Buffer + base + 8, 1);          // +0x1D range count
+    T2AudioBceWriteU64(Buffer + base + 16, 1);         // +0x25
+    T2AudioBceWriteU64(Buffer + base + 24, 1);         // +0x2D
+    return T2AUDIO_BCE_SET_INPUT_RANGES_SIZE;
+}
+
 // Validate the PROPERTY_LISTENER reply: msg 12, status 0, and the echo of the
 // registered object and address. Returns 1 on success.
 static __inline int

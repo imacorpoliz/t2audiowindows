@@ -490,8 +490,34 @@ static void test_property_events(void)
           !T2AudioBceParsePropertyListenerResponse(r, 41, 0x25, 0x6f757470u, 0x6a61636bu));
 }
 
+static void test_set_input_ranges(void)
+{
+    unsigned char buf[T2AUDIO_BCE_SET_INPUT_RANGES_SIZE + 4];
+    unsigned long n, i;
+    int rest_zero = 1;
+
+    printf("T2AudioBceBuildSetInputRanges\n");
+    for (i = 0; i < sizeof(buf); i++) buf[i] = 0xEE;
+    n = T2AudioBceBuildSetInputRanges(buf, sizeof(buf), 0x21, 0x22);
+    check("size 0x345 (AppleAudio)", n == 0x345);
+    check("type COMMAND", buf[4] == 1);
+    check("device id 0x21", T2AudioBceReadU64(buf + 5) == 0x21);
+    check("msg 18", T2AudioBceReadU32(buf + 13) == 18);
+    check("status 0", T2AudioBceReadU32(buf + 17) == 0);
+    check("stream id at +0x15", T2AudioBceReadU64(buf + 0x15) == 0x22);
+    check("count 1 at +0x1D", T2AudioBceReadU64(buf + 0x1D) == 1);
+    check("1 at +0x25", T2AudioBceReadU64(buf + 0x25) == 1);
+    check("1 at +0x2D", T2AudioBceReadU64(buf + 0x2D) == 1);
+    for (i = 0x35; i < 0x345; i++) if (buf[i] != 0) rest_zero = 0;
+    check("rest zero", rest_zero);
+    check("nothing past 0x345", buf[0x345] == 0xEE);
+    check("too small refused", T2AudioBceBuildSetInputRanges(buf, 0x344, 0x21, 0x22) == 0);
+    check("stream 0 refused", T2AudioBceBuildSetInputRanges(buf, sizeof(buf), 0x21, 0) == 0);
+}
+
 int main(void)
 {
+    test_set_input_ranges();
     test_scalar_roundtrip();
     test_device_list();
     test_property_offset();
