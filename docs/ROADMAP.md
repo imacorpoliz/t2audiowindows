@@ -135,6 +135,22 @@ The PCI function is the same on every T2 Mac, but the speaker count, the channel
 
 ---
 
+## 9. Ideas: what owning the audio driver makes possible
+
+With the whole path from Windows to the T2 in our hands, these become possible without Apple. None is started; ordered by value for daily use.
+
+| # | Idea | What it takes | Notes |
+|---|---|---|---|
+| 9.1 | **Live settings, no device restart.** Today every preset/tone change restarts the device (sound stops for seconds). | A private KS property (or a registry change notification) the driver reads while running; the DSP already takes its tuning per call. | Unlocks 9.2. Pure code, host-testable. |
+| 9.2 | **"T2 Audio" tray app.** Preset picker, bass/treble/clarity sliders, speakers↔headphones switch, mic on/off, status and limiter activity. | C# WinForms, talks to the driver through 9.1. | Replaces most installer commands for daily use. |
+| 9.3 | **Microphone array geometry for Windows.** Report the 3 mics' positions (`KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY`) and offer the raw 3-channel stream, so Windows' own voice-capture beamforming and noise suppression (Teams, Voice Recorder, Speech) work on the array. | Mic positions from Apple docs or measurement; a second capture pin format. | Likely the biggest microphone improvement for calls. |
+| 9.4 | **Headphone sound:** parametric EQ presets for popular headphones (AutoEQ data), crossfeed (bs2b-style) for less "in-the-head" stereo, a safe max-level limiter. | DSP blocks we already have (biquads, limiter); a headphone tuning table. | Only on the headphone path. |
+| 9.5 | **Loudness at low volume.** Bass and treble fade first at low volume; boost them gently as the volume goes down. | The driver needs the volume: a hardware volume node (ROADMAP §3) or 9.1 + the tray app. | Asked about in GEMINI part 3, Q3. |
+| 9.6 | **Smarter anti-rattle.** The owner heard rattling on kick drums with `bass`. A level-dependent bass limit on the woofers (more bass when quiet, less when loud) instead of a fixed boost. | Extend the buzz compressor; tune by ear. | Needs listening sessions. |
+| 9.7 | **5.1 / 7.1 input with virtual surround** for films on the speakers (and headphones). | Accept multichannel formats, downmix with the XTC stage. | Nice to have. |
+| 9.8 | **Low-latency mode** for music apps: event-driven WaveRT notifications and a smaller lead (today ~21 ms). | Pin/stream changes; clock tuning on hardware. | For DAWs and games. |
+| 9.9 | **Other T2 Macs.** KAIT2EN profiles exist for 12 models. | Model detection + per-model tables (generator exists); one tester per model. | §8. |
+
 ## Suggested order
 
 1. §1 (verify) → fix whatever fails.

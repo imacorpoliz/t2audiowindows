@@ -101,7 +101,7 @@ Check everything at any time:
 
 | Feature | What you get | Good to know |
 |---|---|---|
-| 🎧 `-Headphones 1` | A second output **"Headphones (Apple T2 Audio Device …)"** | **Switching is manual for now**: when you plug headphones in, pick "Headphones" in the sound menu, and "Speakers" again when you unplug. Starts 12 dB quieter for safety. |
+| 🎧 `-Headphones 1` | A second output **"Headphones (Apple T2 Audio Device …)"** | **Switching is manual for now** — make it one key: `-Action Shortcut` puts a desktop shortcut with the hotkey **Ctrl+Alt+H** that flips between speakers and headphones. Starts 12 dB quieter for safety. |
 | 🎙️ `-Microphone 1` | **"Microphone Array (Apple T2 Audio Device …)"** | Mono, no noise suppression. Test it in the Voice Recorder app. |
 | 🌙 `-ResumeAfterSleep 1` | Music continues after the lid is opened | |
 | 🎛️ `-ExtraFormats 1` | 16/24-bit in Sound settings → Advanced | Only for apps that use exclusive mode |
@@ -118,13 +118,24 @@ Turn any of them off with `0`. Or use the menu: `.\tools\T2Audio-Setup.ps1` → 
 
 All presets: [INSTALL.md → Presets](INSTALL.md#presets). `macos` is the one tuned and approved by ear; `bass` can rattle on kick drums at high volume.
 
-## 8. Keeping it working
+## 8. Handy tools
+
+| Command | What it does |
+|---|---|
+| `-Action Doctor` | Checks the model, Secure Boot, test mode, the driver, all three devices, defaults, volume, crash guard and recent crashes — and prints a fix for every problem |
+| `-Action SoundTest` | Quiet tones: left, right, both |
+| `-Action MicTest` | Records 5 seconds, shows the level, plays it back |
+| `-Action Switch -To Headphones` / `Speakers` / `Toggle` | Changes the default output (also without admin rights) |
+| `-Action Backup` / `-Action Restore` | Saves / loads your preset, tone and features to `T2AudioPort-settings.json` on the desktop |
+| `-Action Report` | Makes `T2AudioPort-report-<date>.zip` on the desktop for a bug report (no personal files, no crash dumps) |
+
+## 9. Keeping it working
 
 * **After a big Windows update** check `-Action Status`. If it says the device runs **AppleAudio** again, run `-Action Install` once more.
 * To stop Windows Update from doing that: `-Action UpdateGuard -Block 1` (it stops driver updates for **all** devices; `-Block 0` undoes it).
 * **No sound after a crash?** After two unclean ends in a row the driver steps aside on purpose. `-Action Status` shows it; `-Action ResetGuard` lets it load again.
 
-## 9. Going back to Apple's driver
+## 10. Going back to Apple's driver
 
 ```powershell
 .\tools\T2Audio-Setup.ps1 -Action Uninstall
@@ -149,7 +160,8 @@ If AppleAudio does not come back by itself: restart, or run `.\tools\Restore-App
 | Headphones silent | Choose "Headphones" as the output (no automatic switching yet) |
 | Microphone silent | `-Action Features -Microphone 1`, then pick "Microphone Array" as the input |
 | BitLocker asks for the recovery key | Enter it once (`aka.ms/myrecoverykey` if it is in your Microsoft account) |
-| Anything else | `-Action Uninstall` returns Apple's driver; open an issue with the output of `-Action Status` |
+| Not sure what is wrong | `-Action Doctor` |
+| Anything else | `-Action Uninstall` returns Apple's driver; open an issue with the zip from `-Action Report` |
 
 ## ❓ FAQ
 
