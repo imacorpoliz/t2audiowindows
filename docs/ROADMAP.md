@@ -108,7 +108,7 @@ Two input devices: `"Digital Mic"` (`0x21`, the 3-microphone array) and `"Codec 
 | # | Item | Who | Notes |
 |---|---|---|---|
 | 6.1 | ✅ **Decided by the owner (2026-10-29): no Microsoft signature; the driver stays test-signed (test mode, Secure Boot off).** **Signing.** Today the driver needs `testsigning` on and Secure Boot off. For an install without test mode the package needs a Microsoft signature: an EV code-signing certificate (an organisation, a yearly cost) + attestation signing through the Windows Hardware Dev Center. Alternative: stay with test signing for personal use. | O | Decision; nothing to build until then. |
-| 6.2 | **Licence.** The DSP tables are generated from kaiT2en's GPL-3.0-or-later graph, so a distributed driver binary carries GPL-3.0 obligations (`THIRD_PARTY_LICENSES.md`). Decide the repository licence and, if needed, an offer of source with every binary. | O | |
+| 6.2 | ✅ **Done (2026-10-29): `LICENSE` = GPL-3.0-or-later, KAIT2EN attribution in README, installer banner and THIRD_PARTY_LICENSES.** **Licence.** The DSP tables are generated from kaiT2en's GPL-3.0-or-later graph, so a distributed driver binary carries GPL-3.0 obligations (`THIRD_PARTY_LICENSES.md`). Decide the repository licence and, if needed, an offer of source with every binary. | O | |
 | 6.3 | ✅ **English UI done (2026-10-29).** **Installer polish:** English UI, an offline package layout (driver + installer in one folder), clear messages when Windows Update brings back AppleAudio (2.7). | C | |
 | 6.4 | **Release process:** versioned packages built in CI (S2), the signed `.sys`/`.cat` stored outside git (in `imacorpoliz/mbp` or releases), a changelog from `CURRENT_STATE.md`. | C, G | |
 

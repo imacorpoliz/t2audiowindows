@@ -29,10 +29,11 @@ A Windows (WaveRT / PortCls) driver for the audio of the **MacBook Pro 16" 2019 
 
 ## Install
 
-Requirements: MacBookPro16,1 with Windows 10/11 x64 and Boot Camp drivers; `bcdedit /set testsigning on` and a reboot; Secure Boot off (Startup Security Utility); a signed package in `packaging\`.
+Requirements: MacBookPro16,1 with Windows 10/11 x64 and Boot Camp drivers; Secure Boot off (macOS Recovery → Startup Security Utility); a signed package (release zip or your own build).
 
 ```powershell
-# PowerShell as Administrator, in the repository folder
+# PowerShell as Administrator, in the package folder
+.\tools\T2Audio-Setup.ps1 -Action Prepare     # once: turns test mode on, then reboot
 .\tools\T2Audio-Setup.ps1                     # menu
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 .\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1 -ResumeAfterSleep 1
@@ -54,7 +55,7 @@ Full credits: [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 ## Licence
 
-The repository has **no top-level licence yet**. Because the driver compiles DSP tables derived from KAIT2EN's GPL-3.0-or-later profile, a built `T2AudioMiniport.sys` must be distributed under **GPL-3.0-or-later** (with KAIT2EN's attribution term). The owner still has to add the licence before a public release.
+**GPL-3.0-or-later** ([`LICENSE`](LICENSE)). The driver compiles DSP tables derived from KAIT2EN's GPL-3.0-or-later profile, whose attribution term (GPL-3.0 section 7b) must be kept: "Speaker and microphone DSP from the KAIT2EN 16_1 profile, Copyright (C) 2026 André Eikmeyer". The virtual bass follows bankstown (MIT, Copyright (C) 2023 James Calligeros). Details: [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 ## For developers
 

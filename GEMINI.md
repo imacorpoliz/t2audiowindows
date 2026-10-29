@@ -168,7 +168,8 @@ Safety rules for all of part 3: on a BSOD or power-off stop, run `-Action Status
 1. Build from the latest `diagnostics` (DriverVer 1.0.13.5), sign, all 7 host tests.
 2. The installer is now **English** (messages, menu, presets; confirmation word `INSTALL`). `-Action Install -Preset macos`: check the text, that the T2 **speakers** endpoint (not the headphones) gets the volume (`T2 speakers: unmuted, volume 30 %, L/R balance evened …`), and `-Action Status` (`Status`, `Tone`, `Crash guard: OK`, the feature list with on/off).
 3. `-Action Features -Headphones 1 -Microphone 1 -ResumeAfterSleep 1`: all three on; the microphone now also sets `MicStartIo=1`.
-4. New `-Action UpdateGuard`: `-Block 1` (answer y), check `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1` and `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching\SearchOrderConfig = 0`; `-Block 0` restores the previous values (record them before and after). Leave it as the owner prefers.
+4. New `-Action Prepare` (menu 8): on the Mac with test mode already on it must say "Test mode is already on"; read its Secure Boot line (`on`/`off`/`unknown`). Do **not** test turning test mode off on the owner's machine; at `-Action Uninstall` answer **n** to "Turn test mode off".
+5. New `-Action UpdateGuard`: `-Block 1` (answer y), check `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\ExcludeWUDriversInQualityUpdate = 1` and `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching\SearchOrderConfig = 0`; `-Block 0` restores the previous values (record them before and after). Leave it as the owner prefers.
 Report: `docs/logs/EXCERPT_<date>_partB_installer.md`.
 
 ### J. Automatic headphone ↔ speaker switching (the owner's only complaint)

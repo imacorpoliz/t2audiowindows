@@ -2,6 +2,7 @@
 #
 # Menu (run without parameters) or parameters:
 #   .\T2Audio-Setup.ps1                                  # interactive menu
+#   .\T2Audio-Setup.ps1 -Action Prepare                  # turn on test mode (once, then reboot)
 #   .\T2Audio-Setup.ps1 -Action Install -Preset macos    # install, persistent mode
 #   .\T2Audio-Setup.ps1 -Action Preset  -Preset bright   # change the sound preset
 #   .\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -ClarityDb 2  # tone on top of the preset
@@ -24,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status', 'ResetGuard', 'Uninstall')]
+    [ValidateSet('Menu', 'Prepare', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status', 'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
 
     [ValidateSet('macos', 'macos-precise', 'bright', 'loud', 'maxvolume', 'even', 'bass', 'voice', 'movie', 'night', 'warm', 'natural', 'raw')]
@@ -138,6 +139,9 @@ function Write-Banner {
     Write-Host '  ║        T2AudioPort  ·  Apple T2 audio for Windows        ║' -ForegroundColor Cyan
     Write-Host '  ║                  MacBook Pro 16" (2019)                  ║' -ForegroundColor DarkCyan
     Write-Host '  ╚══════════════════════════════════════════════════════════╝' -ForegroundColor Cyan
+    # Legal notice (GPL-3.0 section 7b attribution term of the KAIT2EN profile).
+    Write-Host '   GPL-3.0-or-later. Speaker/mic DSP from the KAIT2EN 16_1 profile (C) André Eikmeyer;' -ForegroundColor DarkGray
+    Write-Host '   virtual bass after bankstown (C) James Calligeros, MIT. See THIRD_PARTY_LICENSES.md.' -ForegroundColor DarkGray
 }
 function Write-Section($t) { Write-Host ''; Write-Host "  ── $t " -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "   ✓ $m" -ForegroundColor Green }
@@ -467,7 +471,7 @@ function Invoke-Install {
     }
     if (-not (Test-TestSigning)) {
         Write-Fail 'testsigning is off: Windows will not accept the test-signed driver.'
-        Write-Info  'Enable it: bcdedit /set testsigning on, then reboot (Secure Boot must be off).'
+        Write-Info  'Run .\T2Audio-Setup.ps1 -Action Prepare (turns test mode on), reboot, then install.'
         return
     }
     foreach ($f in @($InfPath, $SysPath, $CatPath)) {
@@ -550,6 +554,50 @@ function Install-PackageCertificate($signer) {
     return $true
 }
 
+# Changing the boot configuration makes BitLocker ask for the recovery key at
+# the next boot unless protection is suspended for one reboot.
+function Suspend-BitLockerForBootChange {
+    $bl = $null
+    try { $bl = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop } catch { return $true }
+    if (-not $bl -or $bl.ProtectionStatus -ne 'On') { return $true }
+    Write-Warn "BitLocker protects $($env:SystemDrive): changing the boot settings would ask for the recovery key at the next boot."
+    if (-not (Confirm-Action 'Suspend BitLocker for one reboot (it resumes by itself)?')) {
+        Write-Info 'Not changed. Have the recovery key ready, or suspend BitLocker yourself first.'
+        return $false
+    }
+    Suspend-BitLocker -MountPoint $env:SystemDrive -RebootCount 1 | Out-Null
+    Write-Ok 'BitLocker suspended for one reboot.'
+    return $true
+}
+
+function Get-SecureBootState {
+    try { if (Confirm-SecureBootUEFI -ErrorAction Stop) { return 'on' } else { return 'off' } } catch { return 'unknown' }
+}
+
+# Test mode once per computer: the driver is test-signed (no Microsoft
+# signature, owner's decision 2026-10-29).
+function Invoke-Prepare {
+    Write-Section 'Preparing Windows for a test-signed driver'
+    $model = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).Model
+    Write-Info "Model: $model"
+    $sb = Get-SecureBootState
+    if ($sb -eq 'on') {
+        Write-Fail 'Secure Boot is on: Windows refuses test mode while it is.'
+        Write-Info 'Turn it off on the Mac: restart into macOS Recovery (Cmd+R), Utilities > Startup Security Utility,'
+        Write-Info 'Secure Boot: "No Security". Then come back to Windows and run -Action Prepare again.'
+        return
+    }
+    Write-Ok "Secure Boot: $sb"
+    if (Test-TestSigning) { Write-Ok 'Test mode is already on. Next: -Action Install.'; return }
+    Write-Info 'Test mode lets Windows load drivers signed with a test certificate; Windows shows'
+    Write-Info '"Test Mode" in a desktop corner while it is on. -Action Uninstall can turn it off again.'
+    if (-not (Confirm-Action 'Turn test mode on?')) { return }
+    if (-not (Suspend-BitLockerForBootChange)) { return }
+    $out = & bcdedit.exe /set testsigning on 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Fail "bcdedit failed: $($out.Trim())"; return }
+    Write-Ok 'Test mode on. Reboot Windows, then run: .\T2Audio-Setup.ps1 -Action Install -Preset macos'
+}
+
 function Invoke-Preset {
     Write-Section 'Changing the preset'
     Write-PresetValues $Preset
@@ -619,6 +667,14 @@ function Invoke-Uninstall {
     $d = Wait-DeviceService 'AppleAudio' 30
     if ($d -and (Get-DeviceService $d) -eq 'AppleAudio' -and $d.Status -eq 'OK') {
         Write-Ok 'The device is back on AppleAudio.'
+        if (Test-TestSigning) {
+            Write-Info 'Test mode is still on. Turn it off only if no other test-signed driver needs it.'
+            if ((-not $Force) -and (Confirm-Action 'Turn test mode off (takes effect after a reboot)?') -and
+                (Suspend-BitLockerForBootChange)) {
+                $out = & bcdedit.exe /set testsigning off 2>&1 | Out-String
+                if ($LASTEXITCODE -eq 0) { Write-Ok 'Test mode off after the next reboot.' } else { Write-Warn "bcdedit failed: $($out.Trim())" }
+            }
+        }
     } else {
         Write-Warn "Now: $($d.Status), driver $(Get-DeviceService $d)."
         Write-Info 'If AppleAudio did not come back by itself: reboot, or .\Restore-AppleAudioDriver.ps1 (downloads the Boot Camp driver).'
@@ -728,6 +784,7 @@ function Show-Menu {
         Write-Banner
         Invoke-Status
         Write-Section 'What to do?'
+        Write-Host '   8. Prepare Windows (test mode, once)' -ForegroundColor White
         Write-Host '   1. Install / update T2AudioPort' -ForegroundColor White
         Write-Host '   2. Change the sound preset' -ForegroundColor White
         Write-Host '   3. Reset the crash guard' -ForegroundColor White
@@ -744,6 +801,7 @@ function Show-Menu {
             '4' { Invoke-Uninstall }
             '5' { Invoke-Tune -Interactive }
             '6' { Invoke-Features -Interactive }
+            '8' { Invoke-Prepare }
             '7' {
                 $a = Read-Host '  1 = guard on, 0 = guard off, Enter = show'
                 if ($a -eq '0' -or $a -eq '1') { $script:Block = [int]$a }
@@ -761,6 +819,7 @@ function Show-Menu {
 if (-not (Test-Admin)) { Write-Fail 'Run PowerShell as administrator.'; exit 1 }
 switch ($Action) {
     'Menu'       { Show-Menu }
+    'Prepare'    { Write-Banner; Invoke-Prepare }
     'Install'    { Write-Banner; Invoke-Install }
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }

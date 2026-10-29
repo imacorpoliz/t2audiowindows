@@ -31,6 +31,14 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Claude): licence GPL-3.0-or-later; installer prepares test mode and can turn it off
+
+The owner agreed («делай») to the three proposals after deciding against a Microsoft signature:
+- **`LICENSE`** = GPL-3.0-or-later (text from KAIT2EN `LICENSES/GPL-3.0-or-later.txt`), required because the driver compiles KAIT2EN's GPL-3.0-or-later DSP profile. Its section 7(b) attribution is shown in the README and, as the "Appropriate Legal Notices" of an interactive program, in the installer banner (KAIT2EN 16_1 profile © André Eikmeyer; bankstown © James Calligeros, MIT). ROADMAP 6.2 closed.
+- **`-Action Prepare`** (menu 8): checks Secure Boot (`Confirm-SecureBootUEFI`; if on, explains the Startup Security Utility), offers to suspend BitLocker for one reboot (a boot-configuration change otherwise triggers the recovery-key prompt), runs `bcdedit /set testsigning on`, asks for a reboot. `-Action Install` now points to it when test mode is off.
+- **`-Action Uninstall`** offers (default no, skipped with `-Force`) to turn test mode off again after AppleAudio is back, with the same BitLocker handling.
+- Not run on Windows here (no PowerShell host); CI parses the script; GEMINI.md part 3, B checks Prepare read-only.
+
 ### 2026-10-29 (owner decision): no Microsoft signature
 
 The owner: «подпись делать не буду» ("I won't do the signature"). The driver stays test-signed: users need `testsigning` on and Secure Boot off. ROADMAP 6.1 closed; README says so.

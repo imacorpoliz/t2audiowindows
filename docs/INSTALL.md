@@ -3,7 +3,7 @@
 ## Requirements
 
 * MacBookPro16,1 (MacBook Pro 16", 2019) with Windows 10/11 x64 and the Boot Camp drivers (`AppleAudio`).
-* Test signing: `bcdedit /set testsigning on`, then reboot. Secure Boot must be off (macOS Recovery → Startup Security Utility).
+* Test mode (the driver is test-signed and will stay so): `.\tools\T2Audio-Setup.ps1 -Action Prepare` (menu 8) checks Secure Boot, offers to suspend BitLocker for one reboot, runs `bcdedit /set testsigning on`; then reboot. Secure Boot must be off (macOS Recovery → Startup Security Utility → "No Security"). Windows shows "Test Mode" on the desktop while it is on.
 * A signed package: either a release zip (`packaging\`, `tools\`, `certificate\`; made by `tools\Make-ReleasePackage.ps1`) — the installer offers to trust the included test certificate — or your own build in `packaging\` (build and signing: `GEMINI.md` section 2).
 
 ## Install
@@ -19,9 +19,11 @@ Menu:
 1. **Install / update T2AudioPort** — asks for a preset, binds the driver, turns persistent mode on, unmutes the T2 speakers at 30 % volume.
 2. **Change the sound preset** — restarts the device (sound stops for a few seconds).
 3. **Reset the crash guard** — if the driver stopped loading after two failures.
-4. **Restore AppleAudio** — removes T2AudioPort; the device goes back to Apple's driver.
+4. **Restore AppleAudio** — removes T2AudioPort; the device goes back to Apple's driver, and you are offered to turn test mode off again.
 5. **Adjust the tone** — bass / treble / clarity on top of the preset.
 6. **Optional features** — headphones, microphones, sound after sleep, 16/24-bit.
+7. **Windows Update driver guard** — see Troubleshooting.
+8. **Prepare Windows** — test mode, once per computer (see Requirements).
 
 The same without the menu:
 
