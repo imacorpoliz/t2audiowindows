@@ -5,6 +5,20 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Gemini): Build 1.0.13.3 — P2-A Safe Capture Test PASS on hardware (`MicStartIo=0`)
+
+- **Step P2-A Safe Capture Test (PASS):**
+  - Ran `.\tools\Test-WasapiCapture.ps1 -DurationSeconds 5` against `Microphone Array (Apple T2 Audio Device (6-channel Native Driver))`.
+  - Format: mono (1 ch), 48,000 Hz, 32-bit float/container.
+  - Stream lifecycle (`Initialize` -> `Start` -> `Stop`) executed cleanly with `hr=0x00000000`.
+  - Kernel log confirms:
+    - BCE Message 18 (837-byte form, stream 0x22, count 1, range 1, 1): status `0x00000000` (reply 256 bytes).
+    - BCE Message 9 (`SET_PROPERTY 'nsrt'`, 66 bytes, rate 48000.0): status `0x00000000` (reply 64 bytes).
+    - `mic RUN without START_IO (MicStartIo=0): the endpoint records silence`.
+    - `mic run summary: captured=0 silent=144488 reAims=0 maxCopyUs=10`.
+  - Zero crashes, zero freezes, zero power-offs. `CrashGuardStrikes = 0`.
+  - Log excerpt documented in `docs/logs/EXCERPT_20261029_part2a_mics.md`.
+
 ### 2026-10-29 (Gemini): Build 1.0.13.3 — BufferStruct dynamic device append matching AppleAudio FUN_140004558
 
 - **Critical Bug Discovered via ExtendedProbe & Ghidra RE:**
