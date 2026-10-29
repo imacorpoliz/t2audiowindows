@@ -225,11 +225,15 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
 static BOOLEAN
 T2AudioTopologyJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    // Only a jack read that was once seen "plugged" is trusted; before that
-    // (or without JackEvents) the endpoint is always shown.
-    if (Context == NULL || !Context->JackEvents || !Context->JackSeenPlugged) {
+    // With JackEvents enabled (1), return the actual hardware plug state.
+    // Without JackEvents (0), the jack always reads "connected" so the endpoint
+    // remains accessible for manual selection.
+    if (Context == NULL || !Context->JackEvents) {
         return TRUE;
     }
+    KdPrint(("T2Audio: TopologyJackConnected returning %s (plugged=%ld)\n",
+             ((Context->HeadphoneJackPlugged != 0) ? "TRUE" : "FALSE"),
+             Context->HeadphoneJackPlugged));
     return (Context->HeadphoneJackPlugged != 0) ? TRUE : FALSE;
 }
 
@@ -273,9 +277,11 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL) {
         pinId = *(PULONG)Request->Instance;
     }
-    if (!instance->Headphone || pinId != T2AUDIO_TOPO_PIN_HEADPHONE) {
+    if (!instance->Headphone || (pinId != T2AUDIO_TOPO_PIN_HEADPHONE && pinId != (ULONG)-1)) {
         return STATUS_NOT_SUPPORTED;
     }
+    KdPrint(("T2Audio: JackProperty id=%u verb=0x%X pinId=%u\n",
+             Request->PropertyItem->Id, Request->Verb, pinId));
     if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
         return T2AudioTopologyBasicSupport(Request);
     }
@@ -312,9 +318,8 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
 
         RtlZeroMemory(jack2, sizeof(*jack2));
         jack2->DeviceStateInfo = 0;
-        // Presence detection only when the driver actually tracks the jack.
-        jack2->JackCapabilities = (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents &&
-                                   instance->DeviceContext->JackSeenPlugged)
+        // Presence detection when JackEvents is enabled (hardware tracks jack state)
+        jack2->JackCapabilities = (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents)
                                       ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;

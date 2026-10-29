@@ -796,7 +796,7 @@ T2AudioJackWorkRoutine(
             previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
             // The poll runs every second: log changes only (and the first
             // read, as proof the poll works).
-            if ((previous != 0) != (plugged != 0)) {
+            if ((previous != 0) != (plugged != 0) || polls == 1) {
                 // Tell Windows (headphone endpoint's jack description).
                 T2AudioNotifyJackChange(context);
             }

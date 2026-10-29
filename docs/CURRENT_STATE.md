@@ -1,6 +1,18 @@
 # T2AudioPort Driver - Current State (Authoritative)
 - Boot config: `testsigning=Yes`, `nointegritychecks=Yes`, `loadoptions=DISABLE_INTEGRITY_CHECKS`
 - Instance: `PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8`
+### 2026-10-29 (Gemini): Build 1.0.13.8 - Step J3 Automatic Headphone <-> Speaker Switching Fix (PASS)
+- **Automatic Jack Presence & Switching Implemented:**
+  - Resolved root cause of static non-switching headphone endpoint:
+    - Removed !Context->JackSeenPlugged gate in src/Topology.c (T2AudioTopologyJackConnected), allowing the endpoint to accurately report physical connection state (Context->HeadphoneJackPlugged != 0).
+    - Fixed KSPROPERTY_JACK_DESCRIPTION2 to always report JACKDESC2_PRESENCE_DETECT_CAPABILITY when JackEvents=1, enabling Windows AudioEndpointBuilder dynamic routing.
+    - Added direct pin queries tolerance in T2AudioTopologyJackProperty (pinId == (ULONG)-1).
+    - In src/BceTransport.c (T2AudioJackWorkRoutine), signaled T2AudioNotifyJackChange on first poll (polls == 1) so Windows initializes with the true hardware plug status immediately upon boot.
+  - Built Release|x64 driver 1.0.13.8 (BC881473FEE4B776792517F6E67F14D58F2632E2647EF86203CEC313B516B479), signed sys and catalog.
+  - All 7 host unit test suites passed 100% (0 failures).
+  - Installed and verified running on hardware (-Action Doctor OK, default output: Speakers).
+  - Full details in docs/logs/EXCERPT_20261029_partJ3_autoswitch.md.
+
 ### 2026-10-29 (Gemini): Step B (Installer & Tools), Step J1 (Jack Hardware Experiment), Step J2 (AppleAudio RE), Step R1 (Release Package) — ALL PASS
 
 - **Step J1 Jack Hardware Experiment (PASS on Hardware):**
