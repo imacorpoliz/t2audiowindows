@@ -5,6 +5,24 @@
 **Master Handover Guide**: See [docs/AGENT_HANDOVER_GUIDE.md](AGENT_HANDOVER_GUIDE.md).  
 **Physical Machine Status**: MacBookPro16,1 running official `AppleAudio.sys` (Status OK).
 
+### 2026-10-29 (Gemini): Build 1.0.13.2 — BCE SET_PROPERTY 'nsrt' (Message 9) implemented, 7 host tests PASS, driver signed & installed
+
+- **P2-RE Findings Implemented:**
+  - Implemented `T2AudioBceBuildSetPropertyNominalSampleRate` (66 bytes, msg 9, object `0x21`, scope `'glob'`, selector `'nsrt'`, nominal sample rate `48000.0`, zero-padded to 66 bytes) matching `AppleAudio.sys` `0x14000445c`.
+  - Avoided floating-point instruction emission (`_fltused`) in kernel mode by implementing an integer-to-double bit encoder (`T2AudioBceEncodeSampleRateToDoubleBits`).
+  - Integrated `T2AudioMicSetSampleRate` into `T2AudioMicRegister` and `T2AudioMicReRegister` right after `T2AudioMicSendAddressRanges` (msg 18).
+- **Host Tests & Build:**
+  - Added unit test `test_set_property_nominal_sample_rate` to `tests/BceProtocolLogicTest.c`.
+  - All 7 host tests passed on MSVC x64 (`BceProtocolLogicTest`, `T2AudioBufferLogicTest`, `T2AudioSpeakerLogicTest`, `T2AudioPipelineTest`, `T2AudioDspTest`, `T2AudioCrashGuardTest`, `T2AudioMicTest`).
+  - Driver built with MSBuild WDK (0 errors, 91 warnings). Sys SHA256: `00532FB76F84A0011E1B408C120384CDBC84561BB21F9F055FDFDE6D0F6FB96B`.
+  - `packaging/T2AudioMiniport.inf` bumped to `1.0.13.2`. Catalog generated and signed with SHA1 `CA2DE95D1B065F6D6CFF6C4158DC88E2424ABBCE`.
+  - Package installed cleanly via `.\tools\T2Audio-Setup.ps1 -Action Install -Preset macos -Force`.
+- **Active System State:**
+  - `T2AudioMiniport.sys` 1.0.13.2 active in `C:\Windows\System32\drivers\`.
+  - `EnableProduction = 1`, `CrashGuardStrikes = 0`.
+  - `MicInput = 1`, `MicStartIo = 0` (safe mode).
+  - PnP restart of the device reports `System reboot is needed to complete configuration operations!` (Exit code 3010). A reboot is required for Windows Audio Endpoint Builder to refresh the endpoint interfaces and transition the capture device out of `CM_PROB_PHANTOM`.
+
 ### 2026-10-29 (Claude): microphone power-off analysed — msg 18 fixed to AppleAudio's form, DMA common buffer, START_IO behind a second gate (source only)
 
 Reviewed `docs/logs/EXCERPT_20261029_part2_mics.md`.

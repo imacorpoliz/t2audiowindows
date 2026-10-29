@@ -138,6 +138,35 @@ T2AudioMicSendAddressRanges(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     return status;
 }
 
+// Send SET_PROPERTY 'nsrt' (msg 9, 66 bytes) with (double)48000.0, matching
+// AppleAudio.sys 0x14000445c. Sent right after SET_INPUT_STREAM_ADDRESS_RANGES.
+static NTSTATUS
+T2AudioMicSetSampleRate(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG SampleRateHz)
+{
+    unsigned char message[T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE];
+    unsigned char reply[64];
+    unsigned long length;
+    ULONG replySize = 0;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    length = T2AudioBceBuildSetPropertyNominalSampleRate(message, sizeof(message),
+                                                        Context->BceMicDeviceId, SampleRateHz);
+    if (length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = T2AudioSendBceMessage(message, length, reply, sizeof(reply), &replySize);
+    if (NT_SUCCESS(status) &&
+        !T2AudioBceParseCommandResponse(reply, replySize,
+                                        T2AUDIO_MSG_SET_PROPERTY_RESPONSE)) {
+        status = STATUS_DEVICE_PROTOCOL_ERROR;
+    }
+    KdPrint(("T2Audio: mic SET_PROPERTY 'nsrt' dev=0x%I64X (rate %u): 0x%08X (reply %u bytes)\n",
+             Context->BceMicDeviceId, SampleRateHz, status, replySize));
+    return status;
+}
+
 // The ring as a common buffer of a bus-master DMA adapter of our PCI device:
 // the address handed to the T2 is then the device-logical one even with DMA
 // remapping (Kernel DMA Protection) on.
@@ -224,6 +253,9 @@ T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         status = STATUS_OBJECT_NAME_NOT_FOUND;
     } else {
         status = T2AudioMicSendAddressRanges(Context);
+        if (NT_SUCCESS(status)) {
+            status = T2AudioMicSetSampleRate(Context, 48000);
+        }
     }
     if (!NT_SUCCESS(status)) {
         (VOID)T2AudioMicWriteBufferStruct(Context, 0, 0);
@@ -243,6 +275,8 @@ T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 NTSTATUS
 T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
+    NTSTATUS status;
+
     PAGED_CODE();
 
     if (Context == NULL || !Context->MicRegistered || Context->MicBufferVa == NULL) {
@@ -252,7 +286,11 @@ T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
                                      Context->MicBufferSize)) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    return T2AudioMicSendAddressRanges(Context);
+    status = T2AudioMicSendAddressRanges(Context);
+    if (NT_SUCCESS(status)) {
+        status = T2AudioMicSetSampleRate(Context, 48000);
+    }
+    return status;
 }
 
 VOID

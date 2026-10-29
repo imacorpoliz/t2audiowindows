@@ -33,12 +33,17 @@
 #define T2AUDIO_MSG_STOP_IO_RESPONSE          3u
 #define T2AUDIO_MSG_GET_PROPERTY              7u
 #define T2AUDIO_MSG_GET_PROPERTY_RESPONSE     8u
+#define T2AUDIO_MSG_SET_PROPERTY              9u
+#define T2AUDIO_MSG_SET_PROPERTY_RESPONSE     10u
 #define T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST    26u
 #define T2AUDIO_MSG_GET_OUTPUT_STREAM_LIST_RESPONSE 27u
 #define T2AUDIO_MSG_SET_REMOTE_ACCESS         32u
 #define T2AUDIO_MSG_SET_REMOTE_ACCESS_RESPONSE 33u
 #define T2AUDIO_MSG_GET_DEVICE_LIST           101u
 #define T2AUDIO_MSG_GET_DEVICE_LIST_RESPONSE  102u
+
+#define T2AUDIO_PROP_SCOPE_GLOBAL             0x676c6f62u   // 'glob'
+#define T2AUDIO_PROP_SELECTOR_NOMINAL_SAMPLE_RATE 0x6e737274u // 'nsrt'
 
 #define T2AUDIO_BCE_HEADER_SIZE      13u
 #define T2AUDIO_BCE_BASE_SIZE        8u
@@ -626,6 +631,75 @@ T2AudioBceBuildSetInputRanges(unsigned char *Buffer,
     T2AudioBceWriteU64(Buffer + base + 16, 1);         // +0x25
     T2AudioBceWriteU64(Buffer + base + 24, 1);         // +0x2D
     return T2AUDIO_BCE_SET_INPUT_RANGES_SIZE;
+}
+
+// Encode an integer sample rate (e.g. 48000) into IEEE-754 double-precision bits
+// without floating-point instructions (avoids _fltused in kernel mode).
+static __inline unsigned long long
+T2AudioBceEncodeSampleRateToDoubleBits(unsigned long SampleRateHz)
+{
+    unsigned long long mantissa;
+    unsigned long shift = 0;
+    unsigned long val = SampleRateHz;
+
+    if (SampleRateHz == 0) {
+        return 0;
+    }
+    if (SampleRateHz == 48000) {
+        return 0x40E7700000000000ull;
+    }
+    if (SampleRateHz == 44100) {
+        return 0x40E5888000000000ull;
+    }
+    if (SampleRateHz == 96000) {
+        return 0x40F7700000000000ull;
+    }
+    while ((val & 0x80000000u) == 0) {
+        val <<= 1;
+        shift++;
+    }
+    mantissa = ((unsigned long long)(val & 0x7FFFFFFFu)) << (52 - 31);
+    return (((unsigned long long)(31 - shift + 1023)) << 52) | mantissa;
+}
+
+// SET_PROPERTY 'nsrt' (msg 9) as AppleAudio.sys builds it (0x14000445c, Gemini/REA 2026-10-29):
+// 66 bytes (0x42); after header + base:
+// Object (u64, +0x15 = DeviceId)
+// Element (u32, +0x1D = 0)
+// Scope (u32, +0x21 = 'glob' / 0x676C6F62)
+// Selector (u32, +0x25 = 'nsrt' / 0x6E737274)
+// DataSize (u64, +0x29 = 8)
+// NominalSampleRate (double as u64, +0x31 = 48000.0 / 0x40E7700000000000ull)
+// Reserved (9 bytes of zero, +0x39..+0x41)
+#define T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE 0x42u
+
+static __inline unsigned long
+T2AudioBceBuildSetPropertyNominalSampleRate(unsigned char *Buffer,
+                                           unsigned long BufferSize,
+                                           unsigned long long DeviceId,
+                                           unsigned long SampleRateHz)
+{
+    unsigned long i;
+    unsigned long base = T2AUDIO_BCE_HEADER_SIZE + T2AUDIO_BCE_BASE_SIZE;
+    unsigned long long rateBits;
+
+    if (Buffer == 0 || BufferSize < T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE || DeviceId == 0) {
+        return 0;
+    }
+    for (i = 0; i < T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE; i++) {
+        Buffer[i] = 0;
+    }
+    Buffer[T2AUDIO_BCE_TYPE_OFFSET] = (unsigned char)T2AUDIO_BCE_MSG_COMMAND;
+    T2AudioBceWriteU64(Buffer + 5, DeviceId);
+    T2AudioBceWriteU32(Buffer + T2AUDIO_BCE_HEADER_SIZE, T2AUDIO_MSG_SET_PROPERTY);
+    T2AudioBceWriteU64(Buffer + base, DeviceId);
+    T2AudioBceWriteU32(Buffer + base + 8, 0);
+    T2AudioBceWriteU32(Buffer + base + 12, T2AUDIO_PROP_SCOPE_GLOBAL);
+    T2AudioBceWriteU32(Buffer + base + 16, T2AUDIO_PROP_SELECTOR_NOMINAL_SAMPLE_RATE);
+    T2AudioBceWriteU64(Buffer + base + 20, 8);
+    rateBits = T2AudioBceEncodeSampleRateToDoubleBits(SampleRateHz);
+    T2AudioBceWriteU64(Buffer + base + 28, rateBits);
+    return T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE;
 }
 
 // Validate the PROPERTY_LISTENER reply: msg 12, status 0, and the echo of the

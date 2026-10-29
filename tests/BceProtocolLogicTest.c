@@ -362,7 +362,7 @@ static void test_incoming(void)
     T2AudioBceWriteU32(m + 13, T2AUDIO_MSG_UPDATE_TIMESTAMP);
     T2AudioBceWriteU64(m + 21, 123456789ull);   // timestamp (AppleAudio: +0x15)
     T2AudioBceWriteU64(m + 29, 1);              // update seed
-    T2AudioBceWriteU64(m + 37, 0x40E7700000000000ull); // 48000.0
+    T2AudioBceWriteU64(m + 37, 0x40E7700000000000ull); // 48000
 
     check("incoming header parses",
           T2AudioBceParseIncoming(m, sizeof(m), &type, &msg, &dev) &&
@@ -379,7 +379,7 @@ static void test_incoming(void)
     check("other message id is not a timestamp",
           !T2AudioBceParseUpdateTimestamp(m, sizeof(m), &dev, &ts, &seed, &bits));
 
-    check("sampleTime 48000.0 -> 48000",
+    check("sampleTime 48000 -> 48000",
           T2AudioBceDecodeSampleTime(0x40E7700000000000ull, &frames) && frames == 48000);
     check("sampleTime 0 -> 0",
           T2AudioBceDecodeSampleTime(0, &frames) && frames == 0);
@@ -490,6 +490,39 @@ static void test_property_events(void)
           !T2AudioBceParsePropertyListenerResponse(r, 41, 0x25, 0x6f757470u, 0x6a61636bu));
 }
 
+static void test_set_property_nominal_sample_rate(void)
+{
+    unsigned char buf[128];
+    unsigned long n;
+    unsigned long i;
+    int rest_zero = 1;
+    union {
+        double d;
+        unsigned long long u;
+    } rate;
+
+    printf("T2AudioBceBuildSetPropertyNominalSampleRate\n");
+    for (i = 0; i < sizeof(buf); i++) buf[i] = 0xAA;
+    n = T2AudioBceBuildSetPropertyNominalSampleRate(buf, sizeof(buf), 0x21, 48000);
+    check("size 0x42 (AppleAudio)", n == 0x42);
+    check("type COMMAND", buf[4] == 1);
+    check("device id 0x21", T2AudioBceReadU64(buf + 5) == 0x21);
+    check("msg 9 (SET_PROPERTY)", T2AudioBceReadU32(buf + 13) == 9);
+    check("status 0", T2AudioBceReadU32(buf + 17) == 0);
+    check("object 0x21 at +0x15", T2AudioBceReadU64(buf + 0x15) == 0x21);
+    check("element 0 at +0x1D", T2AudioBceReadU32(buf + 0x1D) == 0);
+    check("scope 'glob' at +0x21", T2AudioBceReadU32(buf + 0x21) == 0x676c6f62u);
+    check("selector 'nsrt' at +0x25", T2AudioBceReadU32(buf + 0x25) == 0x6e737274u);
+    check("datasize 8 at +0x29", T2AudioBceReadU64(buf + 0x29) == 8);
+    rate.u = T2AudioBceReadU64(buf + 0x31);
+    check("rate 48000 at +0x31", rate.d == 48000);
+    for (i = 0x39; i < 0x42; i++) if (buf[i] != 0) rest_zero = 0;
+    check("reserved zero at +0x39..+0x41", rest_zero);
+    check("nothing past 0x42", buf[0x42] == 0xAA);
+    check("too small refused", T2AudioBceBuildSetPropertyNominalSampleRate(buf, 0x41, 0x21, 48000) == 0);
+    check("device 0 refused", T2AudioBceBuildSetPropertyNominalSampleRate(buf, sizeof(buf), 0, 48000) == 0);
+}
+
 static void test_set_input_ranges(void)
 {
     unsigned char buf[T2AUDIO_BCE_SET_INPUT_RANGES_SIZE + 4];
@@ -518,6 +551,7 @@ static void test_set_input_ranges(void)
 int main(void)
 {
     test_set_input_ranges();
+    test_set_property_nominal_sample_rate();
     test_scalar_roundtrip();
     test_device_list();
     test_property_offset();
