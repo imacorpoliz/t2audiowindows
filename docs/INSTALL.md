@@ -4,7 +4,7 @@
 
 * MacBookPro16,1 (MacBook Pro 16", 2019) with Windows 10/11 x64 and the Boot Camp drivers (`AppleAudio`).
 * Test signing: `bcdedit /set testsigning on`, then reboot. Secure Boot must be off (macOS Recovery → Startup Security Utility).
-* A signed package in `packaging\`: `T2AudioMiniport.inf`, `T2AudioMiniport.sys`, `t2audiominiport.cat`, with the signing certificate in the trusted stores (build and signing: `GEMINI.md` section 2).
+* A signed package: either a release zip (`packaging\`, `tools\`, `certificate\`; made by `tools\Make-ReleasePackage.ps1`) — the installer offers to trust the included test certificate — or your own build in `packaging\` (build and signing: `GEMINI.md` section 2).
 
 ## Install
 

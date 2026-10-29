@@ -465,6 +465,7 @@ function Invoke-Install {
     }
     $sig = Get-AuthenticodeSignature -LiteralPath $SysPath
     if (-not $sig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys is not signed.'; return }
+    if (-not (Install-PackageCertificate $sig.SignerCertificate)) { return }
     $hash = (Get-FileHash -LiteralPath $SysPath -Algorithm SHA256).Hash
     $infVer = (Select-String -LiteralPath $InfPath -Pattern '^DriverVer\s*=\s*(.+)$').Matches | Select-Object -First 1
     Write-Ok "Package: $(if ($infVer) { $infVer.Groups[1].Value } else { '?' }), SHA256 $($hash.Substring(0, 16))…"
@@ -514,6 +515,29 @@ function Invoke-Install {
         Write-Fail "The device did not start: $($d.Status), driver $(Get-DeviceService $d)."
         Write-Info 'Check testsigning and the signature; to roll back use "Restore AppleAudio".'
     }
+}
+
+# A release package may ship the public test certificate in certificate\*.cer.
+# Windows only loads the test-signed driver when that certificate is trusted
+# (Root + TrustedPublisher of the local machine). Returns $false to stop.
+function Install-PackageCertificate($signer) {
+    $trusted = Get-ChildItem Cert:\LocalMachine\TrustedPublisher -ErrorAction SilentlyContinue |
+        Where-Object { $_.Thumbprint -eq $signer.Thumbprint }
+    if ($trusted) { return $true }
+    $cer = Get-ChildItem -Path (Join-Path $ProjectRoot 'certificate') -Filter *.cer -ErrorAction SilentlyContinue |
+        Where-Object {
+            (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $_.FullName).Thumbprint -eq $signer.Thumbprint
+        } | Select-Object -First 1
+    if (-not $cer) {
+        Write-Warn "The signing certificate ($($signer.Subject)) is not in TrustedPublisher; Windows may refuse the driver."
+        return $true
+    }
+    Write-Info "The package is signed with $($signer.Subject) ($($signer.Thumbprint))."
+    if (-not (Confirm-Action 'Trust this test certificate on this computer (Root + TrustedPublisher)?')) { return $false }
+    Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+    Import-Certificate -FilePath $cer.FullName -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+    Write-Ok 'Certificate trusted.'
+    return $true
 }
 
 function Invoke-Preset {
