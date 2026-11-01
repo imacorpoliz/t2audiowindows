@@ -1,6 +1,6 @@
 # T2AudioPort — Project Roadmap & Milestone Verification
 
-**Current Release:** v1.0.13.14  
+**Current Release:** v1.0.13.15  
 **Target Hardware:** Apple MacBook Pro 16" (2019, `MacBookPro16,1`), Apple T2 Security Chip (`PCI\VEN_106B&DEV_1803`), Windows 11 Pro 64-bit.
 
 ---
@@ -33,7 +33,7 @@
 
 ## 1. Core Milestones (MacBookPro16,1) — 100% COMPLETE
 
-All primary objectives required to completely replace `AppleAudio.sys` on the 16-inch MacBook Pro have been implemented, verified on physical hardware, and delivered in release v1.0.13.14:
+All primary objectives required to completely replace `AppleAudio.sys` on the 16-inch MacBook Pro have been implemented, verified on physical hardware, and delivered in release v1.0.13.15:
 
 1. ✅ **Audio Quality:** Full 6-speaker macOS soundstage with deep bass and clean highs.
 2. ✅ **Reliability:** Zero crashes on boot, sleep, wake, or format switching.

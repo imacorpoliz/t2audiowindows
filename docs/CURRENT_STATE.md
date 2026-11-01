@@ -18,6 +18,14 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.15 (2026-11-02)
+- Fixed TOCTOU race in jack poll routine and teardown synchronization (prevents kernel UAF on device unload/stop).
+- Added cancellation and wait loop for `T2AudioResumeWorkRoutine` during PnP Stop/Remove (`T2AudioStopResumeWork`).
+- Synchronized audio format and buffer size reads under `StreamLock` in `T2AudioStreamGetPosition` and `T2AudioStreamPlayPositionBytes`.
+- Added `volatile` qualification to power, jack, and mic state flags.
+- Fixed `ExtraFormats` fallback restoring 32-bit minimum sample size.
+- Improved Digital Mic presence check in BufferStruct and speaker buffer size validation.
+
 ### v1.0.13.14 (2026-11-02)
 - Added 5.1 Virtual Surround Sound (`T2DspRender5Point1ToSpeakers`).
 - Implemented SMBIOS hardware model auto-detection (`T2AudioDetectHardwareModel`).

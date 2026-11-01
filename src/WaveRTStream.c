@@ -619,10 +619,13 @@ T2AudioStreamPlayPositionBytes(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     ULONG bufferSize;
     KIRQL oldIrql;
 
+    ULONG bytesPerFrame;
+
     KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
     bufferSize = instance->AudioBufferSize;
+    bytesPerFrame = instance->BytesPerFrame;
     if (instance->State == KSSTATE_STOP || bufferSize == 0 ||
-        instance->BytesPerFrame == 0) {
+        bytesPerFrame == 0) {
         KeReleaseSpinLock(&instance->StreamLock, oldIrql);
         return 0;
     }
@@ -630,7 +633,7 @@ T2AudioStreamPlayPositionBytes(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     frame = instance->LastCopiedFrame;
     KeReleaseSpinLock(&instance->StreamLock, oldIrql);
 
-    return (ULONG)((frame * instance->BytesPerFrame) % bufferSize);
+    return (ULONG)((frame * bytesPerFrame) % bufferSize);
 }
 
 // Release the buffer currently held by the stream (if any). `expected` is the
@@ -1128,12 +1131,19 @@ T2AudioStreamGetPosition(
         return STATUS_INVALID_PARAMETER;
     }
 
+    ULONG bytesPerFrame;
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
     bufferSize = instance->AudioBufferSize;
-    if (instance->State == KSSTATE_STOP || bufferSize == 0) {
+    bytesPerFrame = instance->BytesPerFrame;
+    if (instance->State == KSSTATE_STOP || bufferSize == 0 || bytesPerFrame == 0) {
+        KeReleaseSpinLock(&instance->StreamLock, oldIrql);
         Position->PlayOffset = 0;
         Position->WriteOffset = 0;
         return STATUS_SUCCESS;
     }
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
 
     instance->GetPositionCalls++;
     // Advances the mirror first, so the reported position never runs ahead of
@@ -1142,7 +1152,7 @@ T2AudioStreamGetPosition(
 
     Position->PlayOffset = playOffset;
     // WriteOffset is ahead of PlayOffset by a reasonable FIFO size (512 frames = ~10.6ms at 48kHz)
-    Position->WriteOffset = (playOffset + 512 * instance->BytesPerFrame) % bufferSize;
+    Position->WriteOffset = (playOffset + 512 * bytesPerFrame) % bufferSize;
 
     return STATUS_SUCCESS;
 }

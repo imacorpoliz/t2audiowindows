@@ -90,7 +90,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     BOOLEAN HardwareReady;
     // TRUE while the adapter is in D1..D3 (set by PowerChangeState under
     // HardwareLock): the copy DPC does not write BAR0 then.
-    BOOLEAN PoweredDown;
+    volatile BOOLEAN PoweredDown;
     // 1 while START_IO is in effect. Whoever clears it with
     // InterlockedExchange (the stream leaving RUN, or the power callbacks
     // before D3) sends the one matching STOP_IO.
@@ -120,7 +120,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // path cancel the timer and wait for a queued re-read to finish.
     KTIMER JackPollTimer;
     KDPC JackPollDpc;
-    BOOLEAN JackPollStarted;
+    volatile BOOLEAN JackPollStarted;
     volatile LONG JackPollStop;
     volatile LONG JackWorkRunning;
     volatile LONG JackPollCount;
@@ -129,7 +129,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // "unplugged" to Windows (otherwise it would stay hidden for good).
     // JackProbeAll (Parameters\JackProbeAll=1, experiment): each poll also
     // reads the jack at other addresses (T2AudioJackProbeVariants).
-    BOOLEAN JackSeenPlugged;
+    volatile BOOLEAN JackSeenPlugged;
     ULONG JackProbeAll;
 #define T2AUDIO_JACK_PROBE_VARIANTS 8
     LONG JackProbeLast[T2AUDIO_JACK_PROBE_VARIANTS];
@@ -179,7 +179,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // using 32-bit, the format the intersection proposes.
     ULONG ExtraFormats;
     BOOLEAN MicFiltersRegistered;
-    BOOLEAN MicRegistered;
+    volatile BOOLEAN MicRegistered;
     BOOLEAN MicFormatValid;
     ULONG64 BceMicDeviceId;
     ULONG64 MicDeviceId;
@@ -210,6 +210,8 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     KMUTEX StreamMutex;
     PVOID RunningStream[2];
     volatile LONG ResumeWorkPending;
+    volatile LONG ResumeWorkRunning;
+    volatile LONG ResumeStop;
     // Parameters\ExtendedProbe=1: log every BCE device's streams, formats,
     // latencies and jacks, and the whole BufferStruct table (read-only), as
     // groundwork for the headphone and microphone endpoints (docs/ROADMAP.md).
@@ -481,6 +483,7 @@ NTSTATUS T2AudioFindSpeakerDeviceId(
 
 NTSTATUS T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioStopJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioStopResumeWork(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioLogBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 // IOCTL AppleUSBVHCI uses to push bridgeOS messages to the audio device:

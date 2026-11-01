@@ -773,9 +773,13 @@ T2AudioJackWorkRoutine(
 
     PAGED_CODE();
 
-    if (context == NULL) {
+    if (context == NULL || context->JackPollStop != 0) {
         if (workItem != NULL) {
             IoFreeWorkItem(workItem);
+        }
+        if (context != NULL) {
+            InterlockedDecrement(&context->JackWorkRunning);
+            InterlockedExchange(&context->JackWorkPending, 0);
         }
         return;
     }
@@ -885,12 +889,18 @@ T2AudioQueueJackRead(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         InterlockedCompareExchange(&Context->JackWorkPending, 1, 0) != 0) {
         return;
     }
-    workItem = IoAllocateWorkItem(Context->DeviceObject);
-    if (workItem == NULL) {
+    InterlockedIncrement(&Context->JackWorkRunning);
+    if (Context->JackPollStop != 0) {
+        InterlockedDecrement(&Context->JackWorkRunning);
         InterlockedExchange(&Context->JackWorkPending, 0);
         return;
     }
-    InterlockedIncrement(&Context->JackWorkRunning);
+    workItem = IoAllocateWorkItem(Context->DeviceObject);
+    if (workItem == NULL) {
+        InterlockedDecrement(&Context->JackWorkRunning);
+        InterlockedExchange(&Context->JackWorkPending, 0);
+        return;
+    }
     IoQueueWorkItem(workItem, T2AudioJackWorkRoutine, DelayedWorkQueue, workItem);
 }
 

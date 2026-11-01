@@ -420,8 +420,8 @@ T2AudioFindSpeakerBuffer(
         KdPrint(("T2Audio: Speaker buffer[0]: Address=0x%Ix Size=0x%Ix\n",
                  *BufferOffset, *BufferSize));
         
-        if (*BufferOffset > Bar1Size) {
-            KdPrint(("T2Audio: FindSpeaker FAIL_J: BufferOffset 0x%Ix > Bar1Size 0x%Ix\n",
+        if (*BufferOffset > Bar1Size || *BufferSize == 0) {
+            KdPrint(("T2Audio: FindSpeaker FAIL_J: BufferOffset 0x%Ix > Bar1Size 0x%Ix or zero size\n",
                      *BufferOffset, Bar1Size));
             return STATUS_DEVICE_CONFIGURATION_ERROR;
         }

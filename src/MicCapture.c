@@ -92,6 +92,10 @@ T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (Context == NULL || !Context->HardwareReady || Context->BufferStruct == NULL) {
         return FALSE;
     }
+    // If "Digital Mic" is already present in BufferStruct, return TRUE.
+    if (T2AudioMicFindDeviceLocked(Context) >= 0) {
+        return TRUE;
+    }
     // AppleAudio.sys dynamically appends "Digital Mic" to BufferStruct (FUN_140004558)
     // if not already present. As long as BufferStruct has space, mic is supported.
     return (Context->BufferStructDevices < T2AUDIO_MAX_DEVICES) ? TRUE : FALSE;

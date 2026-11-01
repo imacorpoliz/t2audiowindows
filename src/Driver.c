@@ -50,6 +50,7 @@ T2AudioPnpHandler(
             // re-initializes.
             // The jack poll sends BCE requests: stop it before the transport
             // is closed with the resources.
+            T2AudioStopResumeWork(context);
             T2AudioStopJackPoll(context);
             T2AudioReleaseHeadphoneEvents(context);
             // The T2 must stop writing the mic ring before it is freed; this

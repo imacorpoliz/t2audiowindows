@@ -12,8 +12,8 @@
 // Constants at 48 kHz:
 //   Cutoff: ~700 Hz (1st order IIR, alpha = 0.0875)
 //   Delay: 13 samples (~270 microseconds, typical human head ITD)
-//   g_direct: ~ -1.5 dB (0.841)
-//   g_cross:  ~ -9.0 dB (0.355)
+//   g_direct: ~ -2.85 dB (0.72)
+//   g_cross:  ~ -11.0 dB (0.28)
 //   g_direct + g_cross <= 1.20; normalized with 6 dB headroom.
 
 #define T2AUDIO_HP_CROSSFEED_DELAY 13u

@@ -96,11 +96,25 @@ T2AudioResumeWorkRoutine(
 
     PAGED_CODE();
 
+    if (context == NULL || context->ResumeStop != 0) {
+        InterlockedExchange(&context->ResumeWorkPending, 0);
+        if (context != NULL) {
+            InterlockedDecrement(&context->ResumeWorkRunning);
+        }
+        if (workItem != NULL) {
+            IoFreeWorkItem(workItem);
+        }
+        return;
+    }
+
     delay.QuadPart = -5000000ll; // 500 ms
     for (attempt = 0; attempt < 3; attempt++) {
         BOOLEAN pending = FALSE;
 
         KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        if (context->ResumeStop != 0) {
+            break;
+        }
         KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
         // Microphones: announce the host ring again after every wake, as
         // AppleAudio does (once, before any stream restarts).
@@ -130,8 +144,30 @@ T2AudioResumeWorkRoutine(
         }
     }
     InterlockedExchange(&context->ResumeWorkPending, 0);
+    InterlockedDecrement(&context->ResumeWorkRunning);
     if (workItem != NULL) {
         IoFreeWorkItem(workItem);
+    }
+}
+
+VOID
+T2AudioStopResumeWork(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    LARGE_INTEGER wait;
+    ULONG i;
+
+    PAGED_CODE();
+
+    if (Context == NULL) {
+        return;
+    }
+    InterlockedExchange(&Context->ResumeStop, 1);
+    wait.QuadPart = -100000ll; // 10 ms
+    for (i = 0; i < 200 && Context->ResumeWorkRunning != 0; i++) {
+        KeDelayExecutionThread(KernelMode, FALSE, &wait);
+    }
+    if (Context->ResumeWorkRunning != 0) {
+        KdPrint(("T2Audio: resume work item: still running after 2 s\n"));
     }
 }
 
@@ -163,18 +199,25 @@ T2AudioPowerChangeState(
         // next SetState(RUN). With ResumeAfterSleep a work item restarts the
         // I/O of a stream that stayed in RUN through the sleep. Only queue on
         // waking from an actual power-down state (wasPoweredDown).
-        if (wasPoweredDown && context->DeviceObject != NULL &&
+        if (wasPoweredDown && context->DeviceObject != NULL && context->ResumeStop == 0 &&
             (context->MicRegistered ||
              (context->ResumeAfterSleep &&
               (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL ||
                context->MicRunningStream != NULL))) &&
             InterlockedCompareExchange(&context->ResumeWorkPending, 1, 0) == 0) {
-            PIO_WORKITEM workItem = IoAllocateWorkItem(context->DeviceObject);
-
-            if (workItem != NULL) {
-                IoQueueWorkItem(workItem, T2AudioResumeWorkRoutine, DelayedWorkQueue, workItem);
-            } else {
+            InterlockedIncrement(&context->ResumeWorkRunning);
+            if (context->ResumeStop != 0) {
+                InterlockedDecrement(&context->ResumeWorkRunning);
                 InterlockedExchange(&context->ResumeWorkPending, 0);
+            } else {
+                PIO_WORKITEM workItem = IoAllocateWorkItem(context->DeviceObject);
+
+                if (workItem != NULL) {
+                    IoQueueWorkItem(workItem, T2AudioResumeWorkRoutine, DelayedWorkQueue, workItem);
+                } else {
+                    InterlockedDecrement(&context->ResumeWorkRunning);
+                    InterlockedExchange(&context->ResumeWorkPending, 0);
+                }
             }
         }
         return;

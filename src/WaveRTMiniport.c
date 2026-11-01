@@ -452,6 +452,9 @@ T2AudioMiniportInit(
     if (instance->DeviceContext != NULL && instance->DeviceContext->ExtraFormats) {
         g_T2AudioSpeakerRange.MinimumBitsPerSample = 16;
         g_T2AudioHeadphoneRange.MinimumBitsPerSample = 16;
+    } else {
+        g_T2AudioSpeakerRange.MinimumBitsPerSample = 32;
+        g_T2AudioHeadphoneRange.MinimumBitsPerSample = 32;
     }
     if (instance->Headphone) {
         // Fixed stereo descriptor; the speaker range below is not touched.
