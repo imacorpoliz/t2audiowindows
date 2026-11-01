@@ -19,8 +19,8 @@ $ErrorActionPreference = "Stop"
 # Paths
 $ScriptDir    = $PSScriptRoot
 $ProjectRoot  = if (Test-Path (Join-Path $ScriptDir "T2AudioPort")) { $ScriptDir } else { Split-Path -Parent $ScriptDir }
-$T2PortDir    = Join-Path $ProjectRoot "T2AudioPort"
-$AppleDir     = Join-Path $ProjectRoot "MBP-Audio-driver"
+$T2PortDir    = if (Test-Path (Join-Path $ProjectRoot "tools\T2Audio-Setup.ps1")) { $ProjectRoot } else { Join-Path $ProjectRoot "T2AudioPort" }
+$AppleDir     = if (Test-Path (Join-Path $ProjectRoot "..\MBP-Audio-driver")) { Join-Path $ProjectRoot "..\MBP-Audio-driver" } else { Join-Path $ProjectRoot "MBP-Audio-driver" }
 $AppleInf     = Join-Path $AppleDir "appleaudio.inf"
 $T2SetupScript= Join-Path $T2PortDir "tools\T2Audio-Setup.ps1"
 $BackupDir    = Join-Path $ProjectRoot "backups"
