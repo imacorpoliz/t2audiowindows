@@ -26,6 +26,15 @@
 // far it may wander before it is re-aimed (frames at 48 kHz). 512 frames
 // (~10.7 ms) keeps clear of the T2's write burst; the window absorbs the
 // 2 ms copy tick and timestamp jitter.
+// MacBookPro16,1 3-microphone array physical geometry (ROADMAP 9.3)
+#define T2AUDIO_MIC_ARRAY_COUNT       3u
+#define T2AUDIO_MIC_ARRAY_FREQ_LO     50u     // 50 Hz
+#define T2AUDIO_MIC_ARRAY_FREQ_HI     20000u  // 20 kHz
+#define T2AUDIO_MIC_ARRAY_WORK_ANGLE  15708   // pi/2 radians * 10000 (90 deg)
+#define T2AUDIO_MIC0_X_MM             -40     // Left mic: -40mm
+#define T2AUDIO_MIC1_X_MM             0       // Center mic: 0mm
+#define T2AUDIO_MIC2_X_MM             40      // Right mic: +40mm
+
 #define T2AUDIO_MIC_CAPTURE_LAG       512
 #define T2AUDIO_MIC_CAPTURE_TOLERANCE 384
 

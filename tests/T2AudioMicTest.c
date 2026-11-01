@@ -150,8 +150,19 @@ static void test_capture_aim(void)
     CHECK(T2AudioMicRingSlot(T2AUDIO_MIC_RING_FRAMES + 5, T2AUDIO_MIC_RING_FRAMES) == 5, "wrap");
 }
 
+static void test_geometry(void)
+{
+    CHECK(T2AUDIO_MIC_ARRAY_COUNT == 3, "mic count");
+    CHECK(T2AUDIO_MIC0_X_MM < T2AUDIO_MIC1_X_MM, "left of center");
+    CHECK(T2AUDIO_MIC1_X_MM < T2AUDIO_MIC2_X_MM, "center of right");
+    CHECK(T2AUDIO_MIC_ARRAY_FREQ_LO <= 50, "low frequency response");
+    CHECK(T2AUDIO_MIC_ARRAY_FREQ_HI >= 20000, "high frequency response");
+    CHECK(T2AUDIO_MIC_ARRAY_WORK_ANGLE > 0, "work angle positive");
+}
+
 int main(void)
 {
+    test_geometry();
     test_sample24();
     test_dsp();
     test_capture_aim();

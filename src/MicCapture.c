@@ -1097,7 +1097,7 @@ T2AudioMicMiniportNewStream(
         !NT_SUCCESS(T2AudioMicValidateFormat(DataFormat))) {
         return STATUS_INVALID_PARAMETER;
     }
-    s = (PT2AUDIO_MIC_STREAM)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*s), T2AUDIO_MIC_POOL_TAG);
+    s = (PT2AUDIO_MIC_STREAM)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*s), T2AUDIO_MIC_POOL_TAG);
     if (s == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1150,6 +1150,125 @@ static const IMiniportWaveRTVtbl g_T2AudioMicMiniportVtbl = {
 // Microphone topology ("TopologyMic"): microphone array -> bridge
 // ---------------------------------------------------------------------------
 
+typedef struct {
+    KSAUDIO_MIC_ARRAY_GEOMETRY Geometry;
+    KSAUDIO_MICROPHONE_COORDINATES AdditionalCoords[2];
+} T2AUDIO_MIC_ARRAY_GEOMETRY_EX;
+
+static NTSTATUS
+T2AudioMicBasicSupport(_Inout_ PPCPROPERTY_REQUEST Request)
+{
+    if (Request->ValueSize >= sizeof(KSPROPERTY_DESCRIPTION) && Request->Value != NULL) {
+        PKSPROPERTY_DESCRIPTION desc = (PKSPROPERTY_DESCRIPTION)Request->Value;
+
+        desc->AccessFlags = KSPROPERTY_TYPE_BASICSUPPORT | KSPROPERTY_TYPE_GET;
+        desc->DescriptionSize = sizeof(KSPROPERTY_DESCRIPTION);
+        desc->PropTypeSet.Set = KSPROPTYPESETID_General;
+        desc->PropTypeSet.Id = VT_ILLEGAL;
+        desc->PropTypeSet.Flags = 0;
+        desc->MembersListCount = 0;
+        desc->Reserved = 0;
+        Request->ValueSize = sizeof(KSPROPERTY_DESCRIPTION);
+        return STATUS_SUCCESS;
+    }
+    if (Request->ValueSize >= sizeof(ULONG) && Request->Value != NULL) {
+        *(PULONG)Request->Value = KSPROPERTY_TYPE_BASICSUPPORT | KSPROPERTY_TYPE_GET;
+        Request->ValueSize = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+    Request->ValueSize = sizeof(KSPROPERTY_DESCRIPTION);
+    return STATUS_BUFFER_OVERFLOW;
+}
+
+static NTSTATUS
+T2AudioMicArrayProperty(_Inout_ PPCPROPERTY_REQUEST Request)
+{
+    ULONG needed;
+    T2AUDIO_MIC_ARRAY_GEOMETRY_EX *geom;
+
+    if (Request == NULL || Request->PropertyItem == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (Request->PropertyItem->Id != KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
+        return T2AudioMicBasicSupport(Request);
+    }
+    if (!(Request->Verb & KSPROPERTY_TYPE_GET)) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    needed = sizeof(T2AUDIO_MIC_ARRAY_GEOMETRY_EX);
+    if (Request->ValueSize == 0) {
+        Request->ValueSize = needed;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    if (Request->ValueSize < needed || Request->Value == NULL) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    geom = (T2AUDIO_MIC_ARRAY_GEOMETRY_EX *)Request->Value;
+    RtlZeroMemory(geom, sizeof(*geom));
+
+    // Linear 3-microphone array on MacBookPro16,1
+    geom->Geometry.usVersion = 0x0100;
+    geom->Geometry.usMicArrayType = KSMICARRAY_MICARRAYTYPE_LINEAR;
+    // Work volume: -pi/2 to +pi/2 vertical and horizontal (radians * 10000)
+    geom->Geometry.wVerticalAngleBegin = -T2AUDIO_MIC_ARRAY_WORK_ANGLE;
+    geom->Geometry.wVerticalAngleEnd = T2AUDIO_MIC_ARRAY_WORK_ANGLE;
+    geom->Geometry.wHorizontalAngleBegin = -T2AUDIO_MIC_ARRAY_WORK_ANGLE;
+    geom->Geometry.wHorizontalAngleEnd = T2AUDIO_MIC_ARRAY_WORK_ANGLE;
+    geom->Geometry.usFrequencyBandLo = T2AUDIO_MIC_ARRAY_FREQ_LO;
+    geom->Geometry.usFrequencyBandHi = T2AUDIO_MIC_ARRAY_FREQ_HI;
+    geom->Geometry.usNumberOfMicrophones = T2AUDIO_MIC_ARRAY_COUNT;
+
+    // Mic 0 (Left): -40mm on X axis
+    geom->Geometry.KsMicCoord[0].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
+    geom->Geometry.KsMicCoord[0].wXCoord = T2AUDIO_MIC0_X_MM;
+    geom->Geometry.KsMicCoord[0].wYCoord = 0;
+    geom->Geometry.KsMicCoord[0].wZCoord = 0;
+    geom->Geometry.KsMicCoord[0].wVerticalAngle = 0;
+    geom->Geometry.KsMicCoord[0].wHorizontalAngle = 0;
+
+    // Mic 1 (Center): 0mm on X axis
+    geom->AdditionalCoords[0].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
+    geom->AdditionalCoords[0].wXCoord = T2AUDIO_MIC1_X_MM;
+    geom->AdditionalCoords[0].wYCoord = 0;
+    geom->AdditionalCoords[0].wZCoord = 0;
+    geom->AdditionalCoords[0].wVerticalAngle = 0;
+    geom->AdditionalCoords[0].wHorizontalAngle = 0;
+
+    // Mic 2 (Right): +40mm on X axis
+    geom->AdditionalCoords[1].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
+    geom->AdditionalCoords[1].wXCoord = T2AUDIO_MIC2_X_MM;
+    geom->AdditionalCoords[1].wYCoord = 0;
+    geom->AdditionalCoords[1].wZCoord = 0;
+    geom->AdditionalCoords[1].wVerticalAngle = 0;
+    geom->AdditionalCoords[1].wHorizontalAngle = 0;
+
+    Request->ValueSize = needed;
+    return STATUS_SUCCESS;
+}
+
+static PCPROPERTY_ITEM g_T2AudioMicProperties[] = {
+    {
+        &KSPROPSETID_Audio,
+        KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioMicArrayProperty
+    }
+};
+
+static PCAUTOMATION_TABLE g_T2AudioMicPinAutomation = {
+    sizeof(PCPROPERTY_ITEM),
+    SIZEOF_ARRAY(g_T2AudioMicProperties),
+    g_T2AudioMicProperties,
+    0, 0, NULL,
+    0, 0, NULL,
+    0
+};
+
 typedef struct _T2AUDIO_MIC_TOPOLOGY {
     IMiniportTopology Interface;
     LONG ReferenceCount;
@@ -1158,7 +1277,7 @@ typedef struct _T2AUDIO_MIC_TOPOLOGY {
 static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
     // Pin 0: the built-in microphone array (physical source).
     {
-        1, 1, 0, NULL,
+        1, 1, 0, &g_T2AudioMicPinAutomation,
         {
             0, NULL, 0, NULL,
             SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
@@ -1297,8 +1416,8 @@ T2AudioRegisterMicFilters(
 
     PAGED_CODE();
 
-    topo = (PT2AUDIO_MIC_TOPOLOGY)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*topo), T2AUDIO_MIC_POOL_TAG);
-    wave = (PT2AUDIO_MIC_MINIPORT)ExAllocatePoolWithTag(NonPagedPoolNx, sizeof(*wave), T2AUDIO_MIC_POOL_TAG);
+    topo = (PT2AUDIO_MIC_TOPOLOGY)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*topo), T2AUDIO_MIC_POOL_TAG);
+    wave = (PT2AUDIO_MIC_MINIPORT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*wave), T2AUDIO_MIC_POOL_TAG);
     if (topo == NULL || wave == NULL) {
         if (topo != NULL) {
             ExFreePoolWithTag(topo, T2AUDIO_MIC_POOL_TAG);
