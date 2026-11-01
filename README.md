@@ -40,6 +40,9 @@
 | ✅ | 🎙️ **Built-in microphones** | 1.0.13.4 | 3-mic array capture, KAIT2EN beamforming + high-pass DSP |
 | ✅ | 🌙 **Sleep and wake** | 1.0.13 | Playback continues cleanly after sleep/wake |
 | ✅ | 🎛️ **16/24-bit** for exclusive-mode apps | 1.0.13 | Shared mode stays 32-bit |
+| ✅ | ⚡ **Live DSP tuning** | 1.0.13.11 | Real-time on-the-fly EQ/preset updates without audio restart |
+| ✅ | 🎧 **Bauer bs2b Crossfeed** | 1.0.13.11 | Binaural crossfeed DSP for natural headphone listening |
+| ✅ | 🔊 **Dynamic Loudness & Anti-Rattle** | 1.0.13.12 | Low-volume loudness curve compensation and woofer excursion protection |
 
 ## 📐 Architecture & Implementation Details
 

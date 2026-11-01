@@ -18,7 +18,9 @@ Who: **G** = Gemini on the Windows/Mac machine (build, hardware tests, reverse e
 | Persistent mode (start on every boot) + crash guard, installer | ✅ (1.0.12; installer in English since 2026-10-29) |
 | Sleep / wake, sound back after sleep (`ResumeAfterSleep`) | ✅ (1.0.13, tested by the owner 2026-10-29) |
 | Headphone output | ✅ (1.0.13) |
-| Jack detection → automatic headphone/speaker switching | ⬜ (no working jack signal yet; GEMINI.md part 3) |
+| Jack detection → automatic headphone/speaker switching | ✅ (1.0.13.8) |
+| Live DSP tuning & Dynamic Loudness / Anti-Rattle | ✅ (1.0.13.12) |
+| Headphone crossfeed (bs2b) | ✅ (1.0.13.11) |
 | Built-in microphones (3-mic array) | ✅ (1.0.13) |
 | Headset microphone | ⬜ |
 | Hardware volume / mute | ⬜ (software volume works) |
