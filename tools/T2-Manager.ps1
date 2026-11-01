@@ -336,6 +336,10 @@ function Show-StatusSummary {
         Write-Host ("   Headphone Auto-Jack:{0}" -f $jack) -ForegroundColor White
         $cf = if ($params.HeadphoneCrossfeed -eq 1) { "ENABLED (bs2b Binaural)" } else { "DISABLED" }
         Write-Host ("   Headphone Crossfeed:{0}" -f $cf) -ForegroundColor $(if ($params.HeadphoneCrossfeed -eq 1) { "Cyan" } else { "White" })
+        $loud = if ($params.DspLoudness -eq 1) { "ENABLED (+3dB Bass/+2dB Treble)" } else { "DISABLED" }
+        Write-Host ("   Dynamic Loudness:   {0}" -f $loud) -ForegroundColor $(if ($params.DspLoudness -eq 1) { "Cyan" } else { "White" })
+        $rattle = if ($params.AntiRattle -eq 1) { "ENABLED (Chassis Protection)" } else { "DISABLED" }
+        Write-Host ("   Anti-Rattle Limiter:{0}" -f $rattle) -ForegroundColor $(if ($params.AntiRattle -eq 1) { "Cyan" } else { "White" })
         Write-Host ("   Microphone Input:   {0}" -f $mic) -ForegroundColor White
         Write-Host ("   Crash Guard:        {0} strikes" -f $strikes) -ForegroundColor $(if ($strikes -eq 0) { "Green" } else { "Red" })
     }
@@ -370,6 +374,8 @@ function Show-MainMenu {
      [8] Preset 'voice'  (Optimized speech clarity for calls & video)
      [9] Preset 'night'  (Night mode: compressed dynamic range)
      [C] Toggle Headphone Crossfeed (bs2b binaural natural acoustic sound)
+     [U] Toggle Dynamic Loudness (Rich low-volume bass & treble compensation)
+     [A] Toggle Anti-Rattle Protection (Adaptive woofer limiter at high volume)
 
    HARDWARE TESTS & DIAGNOSTICS:
      [T] Sound Test (Test stereo speakers: Left / Right / Both)
@@ -407,6 +413,22 @@ function Show-MainMenu {
                 $newVal = if ($cur -eq 1) { 0 } else { 1 }
                 Set-ItemProperty -Path $paramPath -Name "HeadphoneCrossfeed" -Value $newVal -Type DWord
                 Write-Ok ("Headphone Crossfeed is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                Start-Sleep -Milliseconds 700
+            }
+            "U" {
+                $paramPath = "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters"
+                $cur = (Get-ItemProperty $paramPath -Name "DspLoudness" -ErrorAction SilentlyContinue).DspLoudness
+                $newVal = if ($cur -eq 1) { 0 } else { 1 }
+                Set-ItemProperty -Path $paramPath -Name "DspLoudness" -Value $newVal -Type DWord
+                Write-Ok ("Dynamic Loudness is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                Start-Sleep -Milliseconds 700
+            }
+            "A" {
+                $paramPath = "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters"
+                $cur = (Get-ItemProperty $paramPath -Name "AntiRattle" -ErrorAction SilentlyContinue).AntiRattle
+                $newVal = if ($cur -eq 1) { 0 } else { 1 }
+                Set-ItemProperty -Path $paramPath -Name "AntiRattle" -Value $newVal -Type DWord
+                Write-Ok ("Anti-Rattle Protection is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
                 Start-Sleep -Milliseconds 700
             }
             "T" { Invoke-SoundTest; Pause-Menu }

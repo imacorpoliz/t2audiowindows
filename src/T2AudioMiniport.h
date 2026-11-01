@@ -109,6 +109,8 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG JackEvents;
     ULONG HeadphoneAutoMute;
     ULONG HeadphoneCrossfeed;
+    ULONG DspLoudness;
+    ULONG AntiRattle;
     BOOLEAN JackListenerRegistered;
     volatile LONG JackWorkPending;
     volatile LONG JackEventCount;

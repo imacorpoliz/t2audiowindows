@@ -326,6 +326,8 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
     Context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
     Context->HeadphoneCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
+    Context->DspLoudness = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspLoudness", 0) ? 1u : 0u;
+    Context->AntiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
 
     if (oldDsp != Context->SpeakerDsp || oldBass != Context->BassDb ||
         oldTreble != Context->TrebleDb || oldClarity != Context->ClarityDb ||
@@ -579,6 +581,8 @@ T2AudioStartDeviceInner(
     context->JackProbeAll = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackProbeAll", 0)) ? 1u : 0u;
     context->HeadphoneCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
+    context->DspLoudness = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspLoudness", 0) ? 1u : 0u;
+    context->AntiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
     // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off
