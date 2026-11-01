@@ -86,12 +86,12 @@ T2AudioHeadphoneProcessStereo(
     delayedL = State->LeftDelay[readIdx];
     delayedR = State->RightDelay[readIdx];
 
-    // 1-pole lowpass filter: y[n] = y[n-1] + alpha * (x[n] - y[n-1])
-    State->LeftIirState += (int)(((long long)T2AUDIO_HP_IIR_ALPHA_Q16 * (delayedL - State->LeftIirState)) >> 16);
-    State->RightIirState += (int)(((long long)T2AUDIO_HP_IIR_ALPHA_Q16 * (delayedR - State->RightIirState)) >> 16);
+    // 1-pole lowpass filter in Q16: y[n] = y[n-1] + alpha * (x[n] - y[n-1])
+    State->LeftIirState += (long long)((((long long)delayedL << 16) - State->LeftIirState) * T2AUDIO_HP_IIR_ALPHA_Q16 >> 16);
+    State->RightIirState += (long long)((((long long)delayedR << 16) - State->RightIirState) * T2AUDIO_HP_IIR_ALPHA_Q16 >> 16);
 
-    filtL = State->LeftIirState;
-    filtR = State->RightIirState;
+    filtL = State->LeftIirState >> 16;
+    filtR = State->RightIirState >> 16;
 
     // Cross mix: L = direct * L + cross * R_filtered
     mixedL = ((long long)InLeft * T2AUDIO_HP_DIRECT_GAIN_Q16 + filtR * T2AUDIO_HP_CROSS_GAIN_Q16) >> 16;

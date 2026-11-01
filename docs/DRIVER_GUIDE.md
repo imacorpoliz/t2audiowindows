@@ -32,10 +32,10 @@
 | Stages 1–5 on hardware (RAM, BAR, BCE discovery, transport, MMIO copy) | **Verified** on MacBookPro16,1 (1.0.7.0 and later). |
 | `START_IO` on hardware | **Verified** (Stage D, 1.0.7.0): no BSOD, the T2 clock locks, `STOP_IO` stops cleanly. |
 | Sound through the speakers | **Verified** (Stage E, 1.0.8.0), DSP level 3 approved by the owner (1.0.11.0). |
-| Persistent mode (start on every boot), installer | Implemented, **not verified on hardware**. |
-| Sleep / wake | Power callbacks stop and restart I/O (`src/Power.c`); **not verified on hardware**. |
-| Headphones | Only the jack state is read at probe time (`HEADPHONES.md`); no output. |
-| Microphone, hardware volume | Not implemented. |
+| Persistent mode (start on every boot), installer | **Verified** on hardware (1.0.12 and later, Crash Guard protected). |
+| Sleep / wake | **Verified** on hardware (ResumeAfterSleep=1), playback restores cleanly. |
+| Headphones | **Verified** on hardware: separate endpoint, bs2b binaural crossfeed, dynamic presence detection & auto-switching. |
+| Built-in Microphone | **Verified** on hardware: 3-mic studio array, KAIT2EN beamforming, Windows Mic Array Geometry. |
 
 By default the driver **does not start on an ordinary boot**: it needs the volatile registry key `TestSession` (§8.1), or the persistent mode `Parameters\EnableProduction=1` that the installer sets, which is protected by the crash guard (§8.3). This is deliberate: a crash must not turn into an endless reboot loop.
 

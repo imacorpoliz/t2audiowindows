@@ -229,7 +229,7 @@ T2AudioTopologyJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
     // the read has been verified (JackSeenPlugged).
     // Without JackEvents (0), or until the jack read is verified, the jack reads
     // "connected" so the endpoint remains accessible for manual selection.
-    if (Context == NULL || !Context->JackEvents || !Context->JackSeenPlugged) {
+    if (Context == NULL || !Context->JackEvents) {
         return TRUE;
     }
     KdPrint(("T2Audio: TopologyJackConnected returning %s (plugged=%ld)\n",
@@ -321,8 +321,7 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
         jack2->DeviceStateInfo = 0;
         // Presence detection when JackEvents is enabled and verified on hardware
         jack2->JackCapabilities = (instance->DeviceContext != NULL &&
-                                   instance->DeviceContext->JackEvents &&
-                                   instance->DeviceContext->JackSeenPlugged)
+                                   instance->DeviceContext->JackEvents)
                                       ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;
