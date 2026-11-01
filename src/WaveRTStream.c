@@ -2,6 +2,7 @@
 #include "T2AudioBufferLogic.h"
 #include "T2AudioSpeakerLogic.h"
 #include "T2AudioDsp.h"
+#include "T2AudioHeadphoneDsp.h"
 #include <intrin.h>
 
 // How often the system-memory WaveRT buffer is mirrored into the BAR1 hardware
@@ -97,6 +98,7 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     T2AUDIO_SPEAKER_STATE SpeakerState;
     // Speaker DSP state (context->SpeakerDsp); reset with SpeakerState.
     T2DSP_STATE Dsp;
+    T2AUDIO_HEADPHONE_DSP_STATE HeadphoneDsp;
     KTIMER CopyTimer;
     KDPC CopyDpc;
     BOOLEAN TimerActive;
@@ -307,11 +309,24 @@ T2AudioStreamRenderFrames(
     if (instance->Headphone) {
         // Headphones: stereo straight into the 2-channel ring (same
         // 4-byte slots as the client), with the headphone safety cut.
-        T2AudioConvertSamples(
-            Dest,
-            Source,
-            Frames * instance->Channels,
-            context->HeadphoneSampleShift + context->HeadphoneAttenuation);
+        if (context->HeadphoneCrossfeed) {
+            ULONG shift = context->HeadphoneSampleShift + context->HeadphoneAttenuation;
+            ULONG i;
+            for (i = 0; i < Frames; i++) {
+                int inL = (int)Source[i * 2] >> shift;
+                int inR = (int)Source[i * 2 + 1] >> shift;
+                int outL, outR;
+                T2AudioHeadphoneProcessStereo(&instance->HeadphoneDsp, inL, inR, 1, &outL, &outR);
+                Dest[i * 2] = (unsigned int)outL;
+                Dest[i * 2 + 1] = (unsigned int)outR;
+            }
+        } else {
+            T2AudioConvertSamples(
+                Dest,
+                Source,
+                Frames * instance->Channels,
+                context->HeadphoneSampleShift + context->HeadphoneAttenuation);
+        }
     } else if (instance->Channels == 2 && context->SpeakerDsp) {
         // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
         // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
@@ -907,6 +922,7 @@ T2AudioStreamSetStateLocked(
                 if (instance->LastCopiedFrame == 0) {
                     T2AudioSpeakerStateReset(&instance->SpeakerState);
                     T2DspReset(&instance->Dsp);
+    T2AudioHeadphoneDspReset(&instance->HeadphoneDsp);
                 }
                 instance->State = KSSTATE_RUN;
                 KeReleaseSpinLock(&instance->StreamLock, oldIrql);

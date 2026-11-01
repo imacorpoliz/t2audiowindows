@@ -325,6 +325,7 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->TrebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
     Context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
     Context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
+    Context->HeadphoneCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
 
     if (oldDsp != Context->SpeakerDsp || oldBass != Context->BassDb ||
         oldTreble != Context->TrebleDb || oldClarity != Context->ClarityDb ||
@@ -577,6 +578,7 @@ T2AudioStartDeviceInner(
     // Experiment (read-only, needs JackEvents): read the jack at 8 addresses.
     context->JackProbeAll = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackProbeAll", 0)) ? 1u : 0u;
+    context->HeadphoneCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
     // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off

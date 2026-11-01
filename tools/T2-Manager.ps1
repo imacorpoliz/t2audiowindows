@@ -334,6 +334,8 @@ function Show-StatusSummary {
         Write-Host ("   Active Preset:      {0}" -f $preset) -ForegroundColor White
         Write-Host ("   Tone Tuning:        Bass {0} | Treble {1} | Clarity {2} | Gain {3}" -f $bass, $treble, $clarity, $gain) -ForegroundColor Cyan
         Write-Host ("   Headphone Auto-Jack:{0}" -f $jack) -ForegroundColor White
+        $cf = if ($params.HeadphoneCrossfeed -eq 1) { "ENABLED (bs2b Binaural)" } else { "DISABLED" }
+        Write-Host ("   Headphone Crossfeed:{0}" -f $cf) -ForegroundColor $(if ($params.HeadphoneCrossfeed -eq 1) { "Cyan" } else { "White" })
         Write-Host ("   Microphone Input:   {0}" -f $mic) -ForegroundColor White
         Write-Host ("   Crash Guard:        {0} strikes" -f $strikes) -ForegroundColor $(if ($strikes -eq 0) { "Green" } else { "Red" })
     }
@@ -367,6 +369,7 @@ function Show-MainMenu {
      [7] Preset 'movie'  (Cinematic dynamic audio)
      [8] Preset 'voice'  (Optimized speech clarity for calls & video)
      [9] Preset 'night'  (Night mode: compressed dynamic range)
+     [C] Toggle Headphone Crossfeed (bs2b binaural natural acoustic sound)
 
    HARDWARE TESTS & DIAGNOSTICS:
      [T] Sound Test (Test stereo speakers: Left / Right / Both)
@@ -398,6 +401,14 @@ function Show-MainMenu {
             "7" { Set-SoundPreset "movie"; Start-Sleep -Milliseconds 700 }
             "8" { Set-SoundPreset "voice"; Start-Sleep -Milliseconds 700 }
             "9" { Set-SoundPreset "night"; Start-Sleep -Milliseconds 700 }
+            "C" {
+                $paramPath = "HKLM:\SYSTEM\CurrentControlSet\Services\T2AudioMiniport\Parameters"
+                $cur = (Get-ItemProperty $paramPath -Name "HeadphoneCrossfeed" -ErrorAction SilentlyContinue).HeadphoneCrossfeed
+                $newVal = if ($cur -eq 1) { 0 } else { 1 }
+                Set-ItemProperty -Path $paramPath -Name "HeadphoneCrossfeed" -Value $newVal -Type DWord
+                Write-Ok ("Headphone Crossfeed is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                Start-Sleep -Milliseconds 700
+            }
             "T" { Invoke-SoundTest; Pause-Menu }
             "M" { Invoke-MicTest; Pause-Menu }
             "D" { Invoke-Doctor; Pause-Menu }
