@@ -134,6 +134,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
 #define T2AUDIO_JACK_PROBE_VARIANTS 8
     LONG JackProbeLast[T2AUDIO_JACK_PROBE_VARIANTS];
     ULONG64 BceHeadsetMicDeviceId;
+    ULONG64 HeadsetMicStreamId;
+    BOOLEAN HeadsetMicFormatValid;
+    ULONG HeadsetMicLatencyFrames;
     // Headphone output (Parameters\HeadphoneOutput=1, default 0; ROADMAP 4.4).
     // A second WaveRT + topology filter pair renders to the "Codec Output"
     // device: its ring is located in BufferStruct at MapResources, its
@@ -323,6 +326,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // It is read only when TestModeEnabled is set, so a normal boot never maps
     // device memory regardless of this value.
     ULONG DiagStage;
+    WCHAR ModelName[64];
 } T2AUDIO_DEVICE_CONTEXT, *PT2AUDIO_DEVICE_CONTEXT;
 
 typedef struct _T2AUDIO_STREAM_CONTEXT {

@@ -1146,6 +1146,52 @@ T2AudioQueryMicStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
              streams[0], streamLatency, deviceLatency));
 }
 
+static VOID
+T2AudioQueryHeadsetMicStream(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    ULONG64 streams[4];
+    ULONG streamCount = 0;
+    UCHAR formatData[T2AUDIO_BCE_PHYS_FORMAT_SIZE];
+    ULONG formatLength = 0;
+    T2AUDIO_BCE_PHYS_FORMAT format;
+    ULONG64 deviceId = Context->BceHeadsetMicDeviceId;
+    ULONG deviceLatency = 0;
+    ULONG streamLatency = 0;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    Context->HeadsetMicStreamId = 0;
+    Context->HeadsetMicFormatValid = FALSE;
+    Context->HeadsetMicLatencyFrames = 0;
+
+    status = T2AudioGetStreamList(deviceId, TRUE, streams, ARRAYSIZE(streams), &streamCount);
+    if (!NT_SUCCESS(status) || streamCount == 0) {
+        KdPrint(("T2Audio: headset mic 0x%I64X: no input stream (0x%08X, n=%u)\n",
+                 deviceId, status, streamCount));
+        return;
+    }
+    Context->HeadsetMicStreamId = streams[0];
+    status = T2AudioGetProperty(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_PHYS_FORMAT, formatData,
+                                sizeof(formatData), &formatLength);
+    if (!NT_SUCCESS(status) ||
+        !T2AudioBceParsePhysicalFormat(formatData, formatLength, &format)) {
+        KdPrint(("T2Audio: headset mic stream 0x%I64X: 'pft ' unavailable (0x%08X)\n",
+                 streams[0], status));
+        return;
+    }
+    (VOID)T2AudioGetU32Property(deviceId, streams[0], T2AUDIO_PROP_SCOPE_GLOBAL,
+                                T2AUDIO_PROP_LATENCY, &streamLatency);
+    (VOID)T2AudioGetU32Property(deviceId, deviceId, T2AUDIO_PROP_SCOPE_INPUT,
+                                T2AUDIO_PROP_LATENCY, &deviceLatency);
+    Context->HeadsetMicLatencyFrames = streamLatency + deviceLatency;
+    Context->HeadsetMicFormatValid = TRUE;
+    KdPrint(("T2Audio: headset mic stream 0x%I64X: ch=%u bits=%u bpf=%u flags=0x%X latency=%u+%u frames\n",
+             streams[0], format.ChannelsPerFrame, format.BitsPerChannel, format.BytesPerFrame,
+             format.FormatFlags, streamLatency, deviceLatency));
+}
+
 NTSTATUS
 T2AudioGetDeviceList(
     _Out_writes_(MaxDevices) ULONG64 *DeviceList,
@@ -1555,6 +1601,9 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
     if (Context->MicInput && Context->BceMicDeviceId != 0) {
         T2AudioQueryMicStream(Context);
+    }
+    if (Context->BceHeadsetMicDeviceId != 0) {
+        T2AudioQueryHeadsetMicStream(Context);
     }
     if (Context->BceHeadphoneDeviceId != 0 && Context->JackEvents) {
         (VOID)T2AudioRegisterJackListener(Context);

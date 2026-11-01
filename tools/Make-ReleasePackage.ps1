@@ -52,10 +52,11 @@ Copy-Item (Join-Path $root 'tools\T2Audio-Setup.ps1'), (Join-Path $root 'tools\R
     (Join-Path $root 'tools\T2-Manager.ps1') `
     -Destination (Join-Path $dest 'tools')
 if ($CertificatePath) {
-    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $CertificatePath
+    $resolvedCert = (Resolve-Path $CertificatePath).Path
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $resolvedCert
     if ($cert.HasPrivateKey) { throw "$CertificatePath contains a private key - export the public .cer only." }
     New-Item -ItemType Directory -Force -Path (Join-Path $dest 'certificate') | Out-Null
-    Copy-Item $CertificatePath -Destination (Join-Path $dest 'certificate')
+    Copy-Item $resolvedCert -Destination (Join-Path $dest 'certificate')
     Write-Host "certificate: $($cert.Subject) $($cert.Thumbprint)"
 }
 

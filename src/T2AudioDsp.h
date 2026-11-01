@@ -854,4 +854,121 @@ T2DspRenderStereoToSpeakers(volatile unsigned int *Dest,
     }
 }
 
+// Render Frames 5.1 surround frames (MSB-aligned 32-bit host samples:
+// FL, FR, FC, LFE, BL, BR) into the 6-channel physical ring through the DSP.
+// Center & LFE are downmixed equally to L & R, surrounds to L & R,
+// and the acoustic XTC + crossover pipeline widens and drives the physical speakers.
+static __inline void
+T2DspRender5Point1ToSpeakers(volatile unsigned int *Dest,
+                             const unsigned int *Source,
+                             unsigned long Frames,
+                             unsigned int Shift,
+                             unsigned int AttenuationShift,
+                             unsigned int Level,
+                             unsigned int GainDb,
+                             unsigned int TweeterTrimDb,
+                             unsigned int WooferLimitDb,
+                             unsigned int AutoGain,
+                             T2DSP_STATE *S)
+{
+    unsigned long f;
+    long long gain = T2DspGainFromDb(GainDb);
+    long long tgain = T2DspSar(gain * T2DspGainFromDb(TweeterTrimDb), T2DSP_Q);
+    long long wooferThreshold = (T2DSP_LIMIT_THRESHOLD << T2DSP_Q) / T2DspGainFromDb(WooferLimitDb);
+
+    AttenuationShift = T2AudioClampAttenuation(AttenuationShift);
+    for (f = 0; f < Frames; f++) {
+        long long in[2], w[2], t[2], lw[1], rw[1], tw[2];
+        unsigned int side;
+
+        // Downmix 5.1 channels (0: FL, 1: FR, 2: Center, 3: LFE, 4: Surround Left, 5: Surround Right)
+        unsigned int rawFL = T2AudioSar32(Source[f * 6u + 0], AttenuationShift);
+        unsigned int rawFR = T2AudioSar32(Source[f * 6u + 1], AttenuationShift);
+        unsigned int rawFC = T2AudioSar32(Source[f * 6u + 2], AttenuationShift);
+        unsigned int rawLFE = T2AudioSar32(Source[f * 6u + 3], AttenuationShift);
+        unsigned int rawSL = T2AudioSar32(Source[f * 6u + 4], AttenuationShift);
+        unsigned int rawSR = T2AudioSar32(Source[f * 6u + 5], AttenuationShift);
+
+        long long fl = (rawFL & 0x80000000u) ? (long long)rawFL - 0x100000000ll : (long long)rawFL;
+        long long fr = (rawFR & 0x80000000u) ? (long long)rawFR - 0x100000000ll : (long long)rawFR;
+        long long fc = (rawFC & 0x80000000u) ? (long long)rawFC - 0x100000000ll : (long long)rawFC;
+        long long lfe = (rawLFE & 0x80000000u) ? (long long)rawLFE - 0x100000000ll : (long long)rawLFE;
+        long long sl = (rawSL & 0x80000000u) ? (long long)rawSL - 0x100000000ll : (long long)rawSL;
+        long long sr = (rawSR & 0x80000000u) ? (long long)rawSR - 0x100000000ll : (long long)rawSR;
+
+        // Center and LFE are equally shared: -3 dB (0.7071 * 65536 = 46341)
+        long long centerLfe = T2DspSar((fc + lfe) * 46341ll, 16);
+        long long surroundL = T2DspSar(sl * 46341ll, 16);
+        long long surroundR = T2DspSar(sr * 46341ll, 16);
+
+        // Summing FL + Center/LFE + SurroundL with headroom scaling (0.60 * 65536 = 39322)
+        long long mixL = T2DspSar((fl + centerLfe + surroundL) * 39322ll, 16);
+        long long mixR = T2DspSar((fr + centerLfe + surroundR) * 39322ll, 16);
+
+        in[0] = T2DspSar(mixL, T2DSP_INTERNAL_SHIFT);
+        in[1] = T2DspSar(mixR, T2DSP_INTERNAL_SHIFT);
+
+        if (AutoGain != 0) {
+            T2DspAutoGain(S, &in[0], &in[1]);
+        }
+        for (side = 0; side < 2; side++) {
+            in[side] = T2DspUserEq(S, side, in[side]);
+            if (Level >= T2DSP_LEVEL_VIRTBASS) {
+                in[side] = T2DspVirtBass(S->VirtBass[side], in[side]);
+            }
+            in[side] = T2DspCascade(g_T2DspTone1, S->Tone1[side], T2DSP_TONE1_STAGES, in[side]);
+        }
+        T2DspXtc(S, &in[0], &in[1]);
+        for (side = 0; side < 2; side++) {
+            in[side] = T2DspCascade(g_T2DspTone2, S->Tone2[side], T2DSP_TONE2_STAGES, in[side]);
+        }
+        if (Level >= T2DSP_LEVEL_COMP) {
+            T2DspComp(S, &in[0], &in[1]);
+        }
+        for (side = 0; side < 2; side++) {
+            long long x = in[side];
+            w[side] = T2DspCascade(g_T2DspWoofer, S->Woofer[side], T2DSP_WOOFER_STAGES, x);
+            t[side] = T2DspCascade(g_T2DspTweeter, S->Tweeter[side], T2DSP_TWEETER_STAGES, x);
+        }
+        if (Level >= T2DSP_LEVEL_BUZZ) {
+            T2DspBuzz(S, w);
+        }
+        for (side = 0; side < 2; side++) {
+            long long tc = t[side];
+            if (tc > (1ll << 29)) {
+                tc = 1ll << 29;
+            } else if (tc < -(1ll << 29)) {
+                tc = -(1ll << 29);
+            }
+            w[side] = T2DspSar(w[side] * gain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
+            t[side] = T2DspSar(tc * tgain, T2DSP_Q - T2DSP_INTERNAL_SHIFT);
+        }
+        lw[0] = w[0];
+        rw[0] = w[1];
+        tw[0] = t[0];
+        tw[1] = t[1];
+        {
+            unsigned long woofersBefore = S->WooferLimitedFrames;
+            T2DspLimit(&S->Limiter[0], lw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Limiter[1], rw, 1, wooferThreshold, &S->WooferLimitedFrames);
+            T2DspLimit(&S->Limiter[2], tw, 2, T2DSP_LIMIT_THRESHOLD, &S->LimitedFrames);
+            S->LimitedFrames += S->WooferLimitedFrames - woofersBefore;
+        }
+
+        {
+            unsigned int lwWord = T2AudioSar32((unsigned int)(lw[0] & 0xFFFFFFFFll), Shift);
+            unsigned int rwWord = T2AudioSar32((unsigned int)(rw[0] & 0xFFFFFFFFll), Shift);
+
+            Dest[f * 6u + T2AUDIO_SPK_LEFT_WOOFER_A] = lwWord;
+            Dest[f * 6u + T2AUDIO_SPK_LEFT_WOOFER_B] = lwWord;
+            Dest[f * 6u + T2AUDIO_SPK_LEFT_TWEETER] =
+                T2AudioSar32((unsigned int)(tw[0] & 0xFFFFFFFFll), Shift);
+            Dest[f * 6u + T2AUDIO_SPK_RIGHT_WOOFER_A] = rwWord;
+            Dest[f * 6u + T2AUDIO_SPK_RIGHT_WOOFER_B] = rwWord;
+            Dest[f * 6u + T2AUDIO_SPK_RIGHT_TWEETER] =
+                T2AudioSar32((unsigned int)(tw[1] & 0xFFFFFFFFll), Shift);
+        }
+    }
+}
+
 #endif

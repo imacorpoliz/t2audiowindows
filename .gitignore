@@ -65,3 +65,5 @@ Backup/
 
 # Release packages (tools/Make-ReleasePackage.ps1)
 dist/
+
+backups/

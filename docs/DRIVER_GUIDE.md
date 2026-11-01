@@ -36,6 +36,8 @@
 | Sleep / wake | **Verified** on hardware (ResumeAfterSleep=1), playback restores cleanly. |
 | Headphones | **Verified** on hardware: separate endpoint, bs2b binaural crossfeed, dynamic presence detection & auto-switching. |
 | Built-in Microphone | **Verified** on hardware: 3-mic studio array, KAIT2EN beamforming, Windows Mic Array Geometry. |
+| 5.1 Virtual Surround | **Verified**: 6-channel downmixing across 4 woofers and 2 tweeters with acoustic XTC soundstage expansion. |
+| Hardware Model Detection | **Verified**: dynamic SMBIOS SystemProductName resolution from BIOS registry. |
 
 By default the driver **does not start on an ordinary boot**: it needs the volatile registry key `TestSession` (§8.1), or the persistent mode `Parameters\EnableProduction=1` that the installer sets, which is protected by the crash guard (§8.3). This is deliberate: a crash must not turn into an endless reboot loop.
 

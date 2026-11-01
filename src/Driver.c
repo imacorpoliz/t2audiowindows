@@ -222,6 +222,59 @@ T2AudioReadDwordParameter(
     return value;
 }
 
+static NTSTATUS
+T2AudioQueryStringValue(
+    _In_ PWSTR ValueName,
+    _In_ ULONG ValueType,
+    _In_ PVOID ValueData,
+    _In_ ULONG ValueLength,
+    _In_opt_ PVOID Context,
+    _In_opt_ PVOID EntryContext)
+{
+    UNREFERENCED_PARAMETER(ValueName);
+    UNREFERENCED_PARAMETER(Context);
+
+    if (EntryContext != NULL && (ValueType == REG_SZ || ValueType == REG_EXPAND_SZ) &&
+        ValueData != NULL && ValueLength > 0) {
+        PWCHAR dest = (PWCHAR)EntryContext;
+        ULONG maxChars = 63;
+        ULONG charsToCopy = ValueLength / sizeof(WCHAR);
+        if (charsToCopy > maxChars) {
+            charsToCopy = maxChars;
+        }
+        RtlCopyMemory(dest, ValueData, charsToCopy * sizeof(WCHAR));
+        dest[charsToCopy] = L'\0';
+    }
+    return STATUS_SUCCESS;
+}
+
+static VOID
+T2AudioDetectHardwareModel(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    RTL_QUERY_REGISTRY_TABLE table[2];
+    NTSTATUS status;
+
+    if (Context == NULL) {
+        return;
+    }
+
+    RtlZeroMemory(Context->ModelName, sizeof(Context->ModelName));
+    RtlZeroMemory(table, sizeof(table));
+    table[0].QueryRoutine = T2AudioQueryStringValue;
+    table[0].Flags = 0;
+    table[0].Name = L"SystemProductName";
+    table[0].EntryContext = Context->ModelName;
+
+    status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
+                                    L"\\Registry\\Machine\\HARDWARE\\DESCRIPTION\\System\\BIOS",
+                                    table, NULL, NULL);
+    if (!NT_SUCCESS(status) || Context->ModelName[0] == L'\0') {
+        wcscpy_s(Context->ModelName, sizeof(Context->ModelName) / sizeof(WCHAR), L"MacBookPro16,1");
+    }
+
+    KdPrint(("T2Audio: Detected Apple hardware model: %ls\n", Context->ModelName));
+}
+
 // A registry DWORD that holds a signed dB value, clamped to -12..+12.
 static LONG
 T2AudioClampSignedDb(_In_ ULONG Raw)
@@ -465,6 +518,7 @@ T2AudioStartDeviceInner(
     KeInitializeMutex(&context->StreamMutex, 0);
     KeInitializeSpinLock(&context->HardwareLock);
     KeInitializeSpinLock(&context->ClockLock);
+    T2AudioDetectHardwareModel(context);
 
     // Never start in Safe Mode. This driver programs device memory, and a fault
     // here must not make the recovery environment unusable. SafeBootMode is set

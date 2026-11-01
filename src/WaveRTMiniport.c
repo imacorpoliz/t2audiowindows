@@ -327,8 +327,8 @@ T2AudioMiniportDataRangeIntersection(
     PT2AUDIO_MINIPORT instance = CONTAINING_RECORD(
         Miniport, T2AUDIO_MINIPORT, Interface);
     BOOLEAN allowRaw = (!instance->Headphone && (instance->DeviceContext != NULL) &&
-                        instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE;
-    ULONG channels = allowRaw ? T2AUDIO_RING_CHANNELS : 2u;
+                        (instance->DeviceContext->RawSpeakerChannels || instance->DeviceContext->SpeakerDsp)) ? TRUE : FALSE;
+    ULONG channels = (instance->DeviceContext != NULL && instance->DeviceContext->RawSpeakerChannels) ? T2AUDIO_RING_CHANNELS : 2u;
 
     UNREFERENCED_PARAMETER(MatchingDataRange);
 
@@ -461,7 +461,7 @@ T2AudioMiniportInit(
     // channels. Init runs before the port reads the filter descriptor at
     // PcRegisterSubdevice, and there is a single device.
     g_T2AudioSpeakerRange.MaximumChannels =
-        (instance->DeviceContext != NULL && instance->DeviceContext->RawSpeakerChannels)
+        (instance->DeviceContext != NULL && (instance->DeviceContext->RawSpeakerChannels || instance->DeviceContext->SpeakerDsp))
             ? T2AUDIO_RING_CHANNELS : 2u;
     return STATUS_SUCCESS;
 }

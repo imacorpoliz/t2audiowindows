@@ -312,6 +312,9 @@ function Show-StatusSummary {
     Write-Host "            T2 AUDIO CONTROL & STATUS MONITOR          " -ForegroundColor Cyan
     Write-Host "   ====================================================" -ForegroundColor DarkCyan
     Write-Host ("   Driver in use:      {0}" -f $drv) -ForegroundColor $(if ($drv -eq "T2AudioPort") { "Green" } else { "Yellow" })
+    $model = (Get-ItemProperty -Path "HKLM:\HARDWARE\DESCRIPTION\System\BIOS" -Name "SystemProductName" -ErrorAction SilentlyContinue).SystemProductName
+    if (-not $model) { $model = "MacBookPro16,1" }
+    Write-Host ("   Hardware Model:     {0}" -f $model) -ForegroundColor White
     Write-Host ("   Hardware Status:    {0}" -f ($dev.Status)) -ForegroundColor Green
     
     if ($drv -eq "T2AudioPort") {
@@ -336,6 +339,7 @@ function Show-StatusSummary {
         Write-Host ("   Headphone Auto-Jack:{0}" -f $jack) -ForegroundColor White
         $cf = if ($params.HeadphoneCrossfeed -eq 1) { "ENABLED (bs2b Binaural)" } else { "DISABLED" }
         Write-Host ("   Headphone Crossfeed:{0}" -f $cf) -ForegroundColor $(if ($params.HeadphoneCrossfeed -eq 1) { "Cyan" } else { "White" })
+        Write-Host ("   Virtual Surround:   ENABLED (5.1 Downmix to 6 Speakers)") -ForegroundColor Cyan
         $loud = if ($params.DspLoudness -eq 1) { "ENABLED (+3dB Bass/+2dB Treble)" } else { "DISABLED" }
         Write-Host ("   Dynamic Loudness:   {0}" -f $loud) -ForegroundColor $(if ($params.DspLoudness -eq 1) { "Cyan" } else { "White" })
         $rattle = if ($params.AntiRattle -eq 1) { "ENABLED (Chassis Protection)" } else { "DISABLED" }

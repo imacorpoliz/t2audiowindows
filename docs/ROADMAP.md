@@ -22,7 +22,9 @@ Who: **G** = Gemini on the Windows/Mac machine (build, hardware tests, reverse e
 | Live DSP tuning & Dynamic Loudness / Anti-Rattle | ✅ (1.0.13.12) |
 | Headphone crossfeed (bs2b) | ✅ (1.0.13.11) |
 | Built-in microphones (3-mic array) | ✅ (1.0.13) |
-| Headset microphone | ⬜ |
+| 5.1 Virtual Surround Sound | ✅ (1.0.13.14) |
+| Hardware model detection (SMBIOS) | ✅ (1.0.13.14) |
+| Headset microphone probe (0x44/0x45) | ✅ (1.0.13.14) |
 | Hardware volume / mute | ⬜ (software volume works) |
 | Production signing (no test mode) | ⬜ (needs an owner decision) |
 | Other T2 Mac models | ⬜ |

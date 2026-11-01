@@ -313,8 +313,8 @@ T2AudioStreamRenderFrames(
             ULONG shift = context->HeadphoneSampleShift + context->HeadphoneAttenuation;
             ULONG i;
             for (i = 0; i < Frames; i++) {
-                int inL = (int)Source[i * 2] >> shift;
-                int inR = (int)Source[i * 2 + 1] >> shift;
+                int inL = (int)T2AudioSar32(Source[i * 2], shift);
+                int inR = (int)T2AudioSar32(Source[i * 2 + 1], shift);
                 int outL, outR;
                 T2AudioHeadphoneProcessStereo(&instance->HeadphoneDsp, inL, inR, 1, &outL, &outR);
                 Dest[i * 2] = (unsigned int)outL;
@@ -341,6 +341,30 @@ T2AudioStreamRenderFrames(
         T2DspSetTuning(&instance->Dsp, effectiveBass, effectiveTreble,
                        (int)context->ClarityDb, context->CompStyle);
         T2DspRenderStereoToSpeakers(
+            Dest,
+            Source,
+            Frames,
+            context->SpeakerSampleShift,
+            context->OutputAttenuation,
+            (context->SpeakerDsp > T2DSP_LEVEL_MAX) ? T2DSP_LEVEL_MAX
+                                                    : context->SpeakerDsp,
+            context->DspGainDb,
+            context->TweeterTrimDb,
+            effectiveWooferLimit,
+            context->DspAutoGain,
+            &instance->Dsp);
+    } else if (instance->Channels == 6 && context->SpeakerDsp) {
+        // Multichannel 5.1 input downmixed and spatialized to 6 physical speakers
+        int effectiveBass = (int)context->BassDb + (context->DspLoudness ? 3 : 0);
+        int effectiveTreble = (int)context->TrebleDb + (context->DspLoudness ? 2 : 0);
+        ULONG effectiveWooferLimit = context->WooferLimitDb;
+        if (context->AntiRattle && effectiveWooferLimit < 4) {
+            effectiveWooferLimit = 4;
+        }
+
+        T2DspSetTuning(&instance->Dsp, effectiveBass, effectiveTreble,
+                       (int)context->ClarityDb, context->CompStyle);
+        T2DspRender5Point1ToSpeakers(
             Dest,
             Source,
             Frames,
@@ -788,7 +812,7 @@ T2AudioStreamSetFormat(
     status = T2AudioValidateRenderFormatEx(
         DataFormat,
         (!instance->Headphone && instance->DeviceContext != NULL &&
-         instance->DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+         (instance->DeviceContext->RawSpeakerChannels || instance->DeviceContext->SpeakerDsp)) ? TRUE : FALSE,
         (instance->DeviceContext != NULL && instance->DeviceContext->ExtraFormats) ? TRUE : FALSE,
         &channels, &bits);
     if (NT_SUCCESS(status) && instance->AudioBufferMdl != NULL &&
@@ -1358,7 +1382,7 @@ T2AudioCreateStream(
     *Stream = NULL;
     status = T2AudioValidateRenderFormatEx(
         DataFormat,
-        (!Headphone && DeviceContext != NULL && DeviceContext->RawSpeakerChannels) ? TRUE : FALSE,
+        (!Headphone && DeviceContext != NULL && (DeviceContext->RawSpeakerChannels || DeviceContext->SpeakerDsp)) ? TRUE : FALSE,
         (DeviceContext != NULL && DeviceContext->ExtraFormats) ? TRUE : FALSE,
         &channels, &bits);
     if (!NT_SUCCESS(status)) {

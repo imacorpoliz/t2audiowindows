@@ -43,6 +43,8 @@
 | ✅ | ⚡ **Live DSP tuning** | 1.0.13.11 | Real-time on-the-fly EQ/preset updates without audio restart |
 | ✅ | 🎧 **Bauer bs2b Crossfeed** | 1.0.13.11 | Binaural crossfeed DSP for natural headphone listening |
 | ✅ | 🔊 **Dynamic Loudness & Anti-Rattle** | 1.0.13.12 | Low-volume loudness curve compensation and woofer excursion protection |
+| ✅ | 🎬 **5.1 Virtual Surround** | 1.0.13.14 | 6-channel spatial downmix across 6 physical transducers with acoustic XTC soundstage expansion |
+| ✅ | 💻 **Hardware Model Auto-Detection** | 1.0.13.14 | Dynamic SMBIOS `SystemProductName` identification from BIOS registry |
 
 ## 📐 Architecture & Implementation Details
 
