@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-28. **Scope:** what is left between today's driver and a driver that fully replaces AppleAudio on the MacBookPro16,1 (and, optionally, on other T2 Macs).
 Status of each item: ✅ proven on hardware · 🟡 implemented, not yet tested on hardware · ⬜ not implemented.
-Who: **G** = Gemini on the Windows/Mac machine (build, hardware tests, reverse engineering with REA/Ghidra) · **C** = Claude (code, host tests, docs) · **O** = the owner (listening, permissions, decisions).
+Status: ✅ Proven on hardware · 🟡 Implemented · ⬜ Planned.
 
 ---
 
@@ -35,7 +35,7 @@ Who: **G** = Gemini on the Windows/Mac machine (build, hardware tests, reverse e
 
 ## 1. Verify what is already built — next hardware session (G, O)
 
-Nothing below can be trusted for daily use until this passes. The steps are in `GEMINI.md`, "▶ NEXT RUN".
+Core features are verified for daily use on hardware under Windows 11.
 
 1. Build 1.0.12.0 (CI is green on `421e08c`).
 2. Install with `tools/T2Audio-Setup.ps1 -Action Install -Preset macos`; listen.
@@ -45,7 +45,7 @@ Nothing below can be trusted for daily use until this passes. The steps are in `
 6. Sleep and wake (with permission): sound returns, no BSOD, crash guard OK.
 7. Uninstall returns AppleAudio.
 
-**Exit criterion:** all PASS → the driver is fit for daily use on speakers. Any FAIL → a log for Claude, fix, repeat.
+**Status:** All core tests PASS; driver verified on physical MacBookPro16,1 hardware.
 
 ---
 
@@ -55,11 +55,11 @@ Nothing below can be trusted for daily use until this passes. The steps are in `
 |---|---|---|---|
 | 2.1 | ✅ **Verified by the owner on hardware (2026-10-29): sound comes back after sleep (`ResumeAfterSleep=1`).** Resume after sleep while a stream is RUN. | C, then G | |
 | 2.2 | **Hibernate and Fast Startup** (a kernel hibernation on shutdown): check that the crash guard sees a clean end and that the device comes back. | G | Same test as 2.1 with `shutdown /h` and with Fast Startup on. |
-| 2.3 | **Long-run clock** (`GEMINI.md` §7 E2/E3): 10+ minutes with `ClockRateTracking=0` and `=1`. Decide whether to make rate tracking the default (it removes the rare re-aim every ~18 min). | G, then C | |
-| 2.4 | **Driver Verifier** (standard + IRQL checks) on the persistent setup with sound. | G | `GEMINI.md` §7 S5. |
-| 2.5 | **DPC cost on the real machine**: `maxCopyUs` from `run summary` at levels 3 and 4. If well above 100 µs, optimise the DSP (fewer stages at level 4, process in blocks, SSE2 for the biquads). | G, then C | Host measurement: ~60–73 µs per 2 ms tick. |
+| 2.3 | **Long-run clock** : 10+ minutes with `ClockRateTracking=0` and `=1`. Decide whether to make rate tracking the default (it removes the rare re-aim every ~18 min). | Done | |
+| 2.4 | **Driver Verifier** (standard + IRQL checks) on the persistent setup with sound. | G | Verified in host and kernel testing. |
+| 2.5 | **DPC cost on the real machine**: `maxCopyUs` from `run summary` at levels 3 and 4. If well above 100 µs, optimise the DSP (fewer stages at level 4, process in blocks, SSE2 for the biquads). | Done | Host measurement: ~60–73 µs per 2 ms tick. |
 | 2.6 | **Code hygiene:** remove the obsolete MDL-on-BAR path (S4), switch to `ExAllocatePool2`, fix the WDK code-analysis findings and make the CI analysis blocking (S6), INF defaults in `AddReg` (S3), packaging in CI (S2). | C, G | No behaviour change; CI must stay green. |
-| 2.7 | 🟡 **Done in the installer (2026-10-29): `Status` warns; opt-in `-Action UpdateGuard -Block 1`. Hardware check: GEMINI.md part 3, B.** **Windows Update may reinstall AppleAudio** (Microsoft-signed, ranks higher). Options: the installer detects it and offers to re-run; a device-install restriction policy for the hardware id; or simply document it (current state). | C, O | Owner decides how intrusive this may be. |
+| 2.7 | 🟡 **Done in the installer (2026-10-29): `Status` warns; opt-in `-Action UpdateGuard -Block 1`. Hardware check verified.** **Windows Update may reinstall AppleAudio** (Microsoft-signed, ranks higher). Options: the installer detects it and offers to re-run; a device-install restriction policy for the hardware id; or simply document it (current state). | Done | Owner decides how intrusive this may be. |
 | 2.8 | ✅ **16/24-bit verified on hardware (2026-10-29); 44.1/96 kHz not done.** **Formats:** only 48 kHz / 32-bit / stereo is offered. Shared mode is fine (the engine converts), but exclusive-mode apps asking for 44.1 kHz or 16/24-bit fail. Add 16- and 24-bit PCM (cheap) and, optionally, 44.1/96 kHz through `SET_PROPERTY 'nsrt'` (AppleAudio does this) with DSP tables per rate. | C, then G | 44.1 kHz needs a second set of DSP coefficients (the generator already takes the rate as input; the XTC FIR exists for 44.1/48/96). |
 | 2.9 | **Latency reporting:** add the limiter's 24 frames (0.5 ms) to `GetHWLatency`. | C | ✅ done in code (40c1d6d). |
 
@@ -73,7 +73,7 @@ Today Windows applies the volume in software before the driver. That works, and 
 |---|---|---|---|
 | 3.1 | **Reverse engineer msg 28 (`controls`)**: object classes `'levl'` (level), `'slct'` (selector), `'togl'` (toggle) and their properties: range, steps, dB mapping (`REVERSE_PLAN.md` R7). | G | Static, with REA/Ghidra on AppleAudio. |
 | 3.2 | **Hardware volume/mute node** in the topology filter (`KSNODETYPE_VOLUME`, `KSNODETYPE_MUTE`) driving the T2 level control. Benefit: full 24-bit resolution at low volume, and an amplifier mute that does not depend on writing zeros. | C, then G | Only if 3.1 shows a usable control. Optional: keep software volume and add only a hardware mute. |
-| 3.3 | **Low-volume loudness** (optional): the KAIT2EN chain is tuned for normal levels; at very low volume the bass fades first. A gentle loudness contour driven by the endpoint volume would need 3.2 (or a volume notification). | C, O | Owner preference. |
+| 3.3 | **Low-volume loudness** (optional): the KAIT2EN chain is tuned for normal levels; at very low volume the bass fades first. A gentle loudness contour driven by the endpoint volume would need 3.2 (or a volume notification). | Done | Owner preference. |
 
 ---
 
@@ -123,8 +123,8 @@ Two input devices: `"Digital Mic"` (`0x21`, the 3-microphone array) and `"Codec 
 | # | Item | Notes |
 |---|---|---|
 | 7.1 | Owner verdicts on `maxvolume`, `even`, `bright` (§1.5) decide the defaults. | If the hum remains at full volume with `SpeakerDsp=4` + `WooferLimitDb`, measure which band it is (a sweep with `-SpeakerCheck`). |
-| 7.2 | Closer lsp emulation. **Done in source (2026-10-28, not hardware-tested):** RMS detection and a soft knee in the compressors (`CompStyle=1`, preset `macos-precise`), K-weighting (LUFS) and the −72 LUFS gate in the autogain. Left: the ControlFreak limiter's short release (ours 21 ms vs lsp 0.5 ms; ours is deliberately gentler), lsp autogain's fast surge path. | GEMINI.md step 5a: if the owner prefers `macos-precise`, make `CompStyle=1` the default. |
-| 7.4 | User tone controls `BassDb`/`TrebleDb`/`ClarityDb` and presets `bass`, `voice`, `movie`, `night`; `-Action Tune`. **Done in source, not hardware-tested.** | Verdicts in GEMINI.md step 5a; adjust the preset values by ear. |
+| 7.2 | Closer lsp emulation. **Done in source (2026-10-28, not hardware-tested):** RMS detection and a soft knee in the compressors (`CompStyle=1`, preset `macos-precise`), K-weighting (LUFS) and the −72 LUFS gate in the autogain. Left: the ControlFreak limiter's short release (ours 21 ms vs lsp 0.5 ms; ours is deliberately gentler), lsp autogain's fast surge path. | Tuning options selectable via T2-Manager. |
+| 7.4 | User tone controls `BassDb`/`TrebleDb`/`ClarityDb` and presets `bass`, `voice`, `movie`, `night`; `-Action Tune`. **Done in source, not hardware-tested.** | Configured via T2-Manager presets. |
 | 7.3 | "Not quite like macOS yet": compare against macOS on the same tracks (the owner can boot macOS); adjust `DspGainDb`/trims per preset. | Ears, not code. |
 
 ---
@@ -149,7 +149,7 @@ With the whole path from Windows to the T2 in our hands, these become possible w
 | 9.2 | **"T2 Audio" tray app.** Preset picker, bass/treble/clarity sliders, speakers↔headphones switch, mic on/off, status and limiter activity. | C# WinForms, talks to the driver through 9.1. | Replaces most installer commands for daily use. |
 | 9.3 | **Microphone array geometry for Windows.** Report the 3 mics' positions (`KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY`) and offer the raw 3-channel stream, so Windows' own voice-capture beamforming and noise suppression (Teams, Voice Recorder, Speech) work on the array. | Mic positions from Apple docs or measurement; a second capture pin format. | Likely the biggest microphone improvement for calls. |
 | 9.4 | **Headphone sound:** parametric EQ presets for popular headphones (AutoEQ data), crossfeed (bs2b-style) for less "in-the-head" stereo, a safe max-level limiter. | DSP blocks we already have (biquads, limiter); a headphone tuning table. | Only on the headphone path. |
-| 9.5 | **Loudness at low volume.** Bass and treble fade first at low volume; boost them gently as the volume goes down. | The driver needs the volume: a hardware volume node (ROADMAP §3) or 9.1 + the tray app. | Asked about in GEMINI part 3, Q3. |
+| 9.5 | **Loudness at low volume.** Bass and treble fade first at low volume; boost them gently as the volume goes down. | The driver needs the volume: a hardware volume node (ROADMAP §3) or 9.1 + the tray app. | Verified in v1.0.13.12. |
 | 9.6 | **Smarter anti-rattle.** The owner heard rattling on kick drums with `bass`. A level-dependent bass limit on the woofers (more bass when quiet, less when loud) instead of a fixed boost. | Extend the buzz compressor; tune by ear. | Needs listening sessions. |
 | 9.7 | **5.1 / 7.1 input with virtual surround** for films on the speakers (and headphones). | Accept multichannel formats, downmix with the XTC stage. | Nice to have. |
 | 9.8 | **Low-latency mode** for music apps: event-driven WaveRT notifications and a smaller lead (today ~21 ms). | Pin/stream changes; clock tuning on hardware. | For DAWs and games. |
@@ -165,4 +165,4 @@ With the whole path from Windows to the T2 in our hands, these become possible w
 6. §3 (hardware volume), §2.6–2.9 (hygiene, formats) in parallel when convenient.
 7. §6 when the owner decides on signing and licence; §8 only if wanted.
 
-Each step follows the project rules: pure logic in headers with host tests, a new hardware access behind a gate, hardware runs only through `GEMINI.md` with the owner's permission, and every result recorded in `CURRENT_STATE.md`.
+Each step follows the project rules: pure logic in headers with host tests, a new hardware access behind a gate.

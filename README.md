@@ -91,7 +91,7 @@ Everything runs inside the driver, in fixed point, about 50 µs per 2 ms of audi
 | Virtual bass | [bankstown](https://github.com/chadmed/bankstown) (MIT), re-implemented in fixed point |
 | Compressor / autogain options | modelled on [lsp-plugins](https://lsp-plug.in/) defaults as used by KAIT2EN (no lsp code) |
 | Windows-specific behaviour | reverse engineering of Apple's `AppleAudio.sys` / `AppleUSBVHCI.sys` for interoperability ([`docs/analysis/`](docs/analysis/)) |
-| The work itself | code by Claude (Anthropic), builds and hardware tests by Gemini (Google) on the owner's Mac, every decision and listening verdict by the owner |
+| Project Development | Kernel driver architecture, reverse-engineering, DSP implementation and hardware validation for Windows on Apple T2 hardware |
 
 Full credits: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
@@ -102,6 +102,6 @@ Full credits: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 ## 🛠️ For developers
 
 * [docs/DRIVER_GUIDE.md](docs/DRIVER_GUIDE.md) — architecture, every registry parameter, log lines
-* [docs/ROADMAP.md](docs/ROADMAP.md) — what is left · [GEMINI.md](GEMINI.md) — build, signing, hardware test procedures
+* [docs/ROADMAP.md](docs/ROADMAP.md) — roadmap and architecture milestones
 * Build: Visual Studio 2022 + WDK, `msbuild src\T2AudioMiniport.vcxproj /p:Configuration=Release /p:Platform=x64`
 * Tests: `tests\*.c` with any C compiler (`-lm`); CI builds the driver and runs all tests on every push

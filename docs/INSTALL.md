@@ -4,7 +4,7 @@
 
 * MacBookPro16,1 (MacBook Pro 16", 2019) with Windows 10/11 x64 and the Boot Camp drivers (`AppleAudio`).
 * Test mode (the driver is test-signed and will stay so): `.\tools\T2Audio-Setup.ps1 -Action Prepare` (menu 8) checks Secure Boot, offers to suspend BitLocker for one reboot, runs `bcdedit /set testsigning on`; then reboot. Secure Boot must be off (macOS Recovery → Startup Security Utility → "No Security"). Windows shows "Test Mode" on the desktop while it is on.
-* A signed package: either a release zip (`packaging\`, `tools\`, `certificate\`; made by `tools\Make-ReleasePackage.ps1`) — the installer offers to trust the included test certificate — or your own build in `packaging\` (build and signing: `GEMINI.md` section 2).
+* A signed package: either a release zip (`packaging\`, `tools\`, `certificate\`; made by `tools\Make-ReleasePackage.ps1`) — the installer offers to trust the included test certificate — or your own build in `packaging\` (build and signing: `docs/DRIVER_GUIDE.md` section 9).
 
 ## Install
 
