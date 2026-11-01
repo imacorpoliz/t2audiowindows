@@ -331,7 +331,14 @@ T2AudioStreamRenderFrames(
         // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
         // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
         // the autogain in front, then the tone controls.
-        T2DspSetTuning(&instance->Dsp, (int)context->BassDb, (int)context->TrebleDb,
+        int effectiveBass = (int)context->BassDb + (context->DspLoudness ? 3 : 0);
+        int effectiveTreble = (int)context->TrebleDb + (context->DspLoudness ? 2 : 0);
+        ULONG effectiveWooferLimit = context->WooferLimitDb;
+        if (context->AntiRattle && effectiveWooferLimit < 4) {
+            effectiveWooferLimit = 4;
+        }
+
+        T2DspSetTuning(&instance->Dsp, effectiveBass, effectiveTreble,
                        (int)context->ClarityDb, context->CompStyle);
         T2DspRenderStereoToSpeakers(
             Dest,
@@ -343,7 +350,7 @@ T2AudioStreamRenderFrames(
                                                     : context->SpeakerDsp,
             context->DspGainDb,
             context->TweeterTrimDb,
-            context->WooferLimitDb,
+            effectiveWooferLimit,
             context->DspAutoGain,
             &instance->Dsp);
     } else if (instance->Channels == 2) {

@@ -773,10 +773,15 @@ T2AudioJackWorkRoutine(
 
     PAGED_CODE();
 
-    // Reload live DSP parameters from registry on the fly
-    if (context != NULL) {
-        T2AudioReloadLiveParameters(context);
+    if (context == NULL) {
+        if (workItem != NULL) {
+            IoFreeWorkItem(workItem);
+        }
+        return;
     }
+
+    // Reload live DSP parameters from registry on the fly
+    T2AudioReloadLiveParameters(context);
 
     // Clear first: a notification arriving during the read queues another
     // pass, so the last state always wins.
