@@ -78,9 +78,9 @@ if (-not $Force) {
 
 Write-Host ''
 Write-Info 'Adding driver package to the driver store...'
-$args = @('/add-driver', "$infPath")
-if ($Bind) { $args += '/install' }
-$out = & pnputil.exe @args 2>&1
+$pnputilArgs = @('/add-driver', "$infPath")
+if ($Bind) { $pnputilArgs += '/install' }
+$out = & pnputil.exe @pnputilArgs 2>&1
 $code = $LASTEXITCODE
 $out | ForEach-Object { Write-Info $_ }
 

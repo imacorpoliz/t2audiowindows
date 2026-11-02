@@ -287,6 +287,61 @@ T2AudioStreamFollowT2ClockLocked(
     }
 }
 
+// Render Frames client frames into the headphone ring at Dest.
+// Supports both stereo and 5.1 surround downmix, plus bs2b crossfeed DSP.
+static VOID
+T2AudioStreamRenderHeadphoneFrames(
+    _Inout_ PT2AUDIO_WAVERT_STREAM instance,
+    _In_ PT2AUDIO_DEVICE_CONTEXT context,
+    _Out_ volatile unsigned int *Dest,
+    _In_ const unsigned int *Source,
+    _In_ ULONG Frames)
+{
+    ULONG shift = context->HeadphoneSampleShift + context->HeadphoneAttenuation;
+    ULONG i;
+
+    if (context->HeadphoneCrossfeed) {
+        for (i = 0; i < Frames; i++) {
+            int inL, inR, outL, outR;
+            if (instance->Channels == 6) {
+                int fl = (int)T2AudioSar32(Source[i * 6], shift);
+                int fr = (int)T2AudioSar32(Source[i * 6 + 1], shift);
+                int c  = (int)T2AudioSar32(Source[i * 6 + 2], shift);
+                int sl = (int)T2AudioSar32(Source[i * 6 + 4], shift);
+                int sr = (int)T2AudioSar32(Source[i * 6 + 5], shift);
+                inL = fl + (int)(((LONGLONG)c * 46341ll) >> 16) + (int)(((LONGLONG)sl * 46341ll) >> 16);
+                inR = fr + (int)(((LONGLONG)c * 46341ll) >> 16) + (int)(((LONGLONG)sr * 46341ll) >> 16);
+            } else {
+                inL = (int)T2AudioSar32(Source[i * 2], shift);
+                inR = (int)T2AudioSar32(Source[i * 2 + 1], shift);
+            }
+            T2AudioHeadphoneProcessStereo(&instance->HeadphoneDsp, inL, inR, 1, &outL, &outR);
+            Dest[i * 2] = (unsigned int)outL;
+            Dest[i * 2 + 1] = (unsigned int)outR;
+        }
+    } else {
+        if (instance->Channels == 6) {
+            for (i = 0; i < Frames; i++) {
+                int fl = (int)T2AudioSar32(Source[i * 6], shift);
+                int fr = (int)T2AudioSar32(Source[i * 6 + 1], shift);
+                int c  = (int)T2AudioSar32(Source[i * 6 + 2], shift);
+                int sl = (int)T2AudioSar32(Source[i * 6 + 4], shift);
+                int sr = (int)T2AudioSar32(Source[i * 6 + 5], shift);
+                int outL = fl + (int)(((LONGLONG)c * 46341ll) >> 16) + (int)(((LONGLONG)sl * 46341ll) >> 16);
+                int outR = fr + (int)(((LONGLONG)c * 46341ll) >> 16) + (int)(((LONGLONG)sr * 46341ll) >> 16);
+                Dest[i * 2] = (unsigned int)outL;
+                Dest[i * 2 + 1] = (unsigned int)outR;
+            }
+        } else {
+            T2AudioConvertSamples(
+                Dest,
+                Source,
+                Frames * 2,
+                shift);
+        }
+    }
+}
+
 // Render Frames client frames (32-bit MSB-aligned samples, Channels per
 // frame) into the ring at Dest. Caller holds StreamLock and HardwareLock.
 static VOID
@@ -500,6 +555,13 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
                                         skipStart + instance->DestOffset,
                                         skippedFrames);
+            if (!instance->Headphone && context->HeadphoneBufferSize != 0) {
+                PUCHAR hpBase = (PUCHAR)context->Bar1Mapped + context->HeadphoneBufferOffset;
+                ULONG hpFrames = (ULONG)(context->HeadphoneBufferSize / T2AUDIO_HP_RING_BYTES_PER_FRAME);
+                T2AudioStreamZeroRingLocked(hpBase, hpFrames, T2AUDIO_HP_RING_BYTES_PER_FRAME,
+                                            skipStart + instance->DestOffset,
+                                            skippedFrames);
+            }
         }
 
         // A new T2 clock anchor arrived: re-check the lead of the next write
@@ -512,17 +574,13 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // and a DbgPrint with a debugger or DbgView attached takes ms).
         renderQpc = KeQueryPerformanceCounter(NULL);
 
-        // Parameters\HeadphoneAutoMute: while the headphone jack reads plugged
-        // in (JackEvents keeps it current), the speakers get silence. The
-        // cursors keep moving, so playback resumes in sync on unplug.
-        if (!instance->Headphone &&
-            context->HeadphoneAutoMute && context->HeadphoneJackPlugged != 0) {
-            T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
-                                        frame + instance->DestOffset, remainingFrames);
-            instance->JackMutedFrames += remainingFrames;
-            frame += remainingFrames;
-            remainingFrames = 0;
-        }
+        // Unified Audio Device: route sound dynamically between Speakers and Headphones.
+        // When headphones are plugged in: render to headphone ring, silence speakers.
+        // When headphones are not plugged in: render to speaker ring, silence headphones.
+        BOOLEAN routeToHeadphones = (!instance->Headphone &&
+                                     context->HeadphoneJackPlugged != 0 &&
+                                     context->HeadphoneBufferSize != 0 &&
+                                     context->HeadphoneFormatValid);
 
         while (remainingFrames > 0) {
             ULONG srcOffset = 0;
@@ -544,30 +602,78 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                 break;
             }
 
-            if (instance->BitsPerSample == 32) {
-                T2AudioStreamRenderFrames(instance, context,
-                                          (volatile unsigned int *)(hwBufferBase + dstOffset),
-                                          (const unsigned int *)(sourceBase + srcOffset),
-                                          chunkFrames);
-            } else {
-                // Parameters\ExtraFormats: 16- or 24-bit client samples are
-                // widened to 32-bit MSB-aligned in small pieces on the stack.
-                ULONG done = 0;
+            if (routeToHeadphones) {
+                PUCHAR hpBase = (PUCHAR)context->Bar1Mapped + context->HeadphoneBufferOffset;
+                ULONG hpFrameBytes = T2AUDIO_HP_RING_BYTES_PER_FRAME;
+                ULONG hpRingBytes = (ULONG)context->HeadphoneBufferSize;
+                ULONG hpChunkSrcOffset = 0, hpChunkDstOffset = 0, hpChunkLen = 0;
 
-                while (done < chunkFrames) {
-                    unsigned int wide[T2AUDIO_WIDEN_FRAMES * T2AUDIO_RING_CHANNELS];
-                    ULONG n = chunkFrames - done;
+                (VOID)T2AudioCalculateCopyChunk(
+                    frame,
+                    frame + instance->DestOffset,
+                    chunkFrames,
+                    instance->BytesPerFrame,
+                    hpFrameBytes,
+                    instance->SourceSize,
+                    hpRingBytes,
+                    &hpChunkSrcOffset,
+                    &hpChunkDstOffset,
+                    &hpChunkLen);
 
-                    if (n > T2AUDIO_WIDEN_FRAMES) {
-                        n = T2AUDIO_WIDEN_FRAMES;
+                if (instance->BitsPerSample == 32) {
+                    T2AudioStreamRenderHeadphoneFrames(instance, context,
+                                                       (volatile unsigned int *)(hpBase + hpChunkDstOffset),
+                                                       (const unsigned int *)(sourceBase + srcOffset),
+                                                       chunkFrames);
+                } else {
+                    ULONG done = 0;
+                    while (done < chunkFrames) {
+                        unsigned int wide[T2AUDIO_WIDEN_FRAMES * 6];
+                        ULONG n = chunkFrames - done;
+                        if (n > T2AUDIO_WIDEN_FRAMES) n = T2AUDIO_WIDEN_FRAMES;
+                        T2AudioWidenPcmToS32(sourceBase + srcOffset + done * instance->BytesPerFrame,
+                                             wide, n * instance->Channels, instance->BitsPerSample);
+                        T2AudioStreamRenderHeadphoneFrames(instance, context,
+                                                           (volatile unsigned int *)(hpBase + hpChunkDstOffset +
+                                                                                     done * hpFrameBytes),
+                                                           wide, n);
+                        done += n;
                     }
-                    T2AudioWidenPcmToS32(sourceBase + srcOffset + done * instance->BytesPerFrame,
-                                         wide, n * instance->Channels, instance->BitsPerSample);
+                }
+                // Silence corresponding frames in speaker ring:
+                T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
+                                            frame + instance->DestOffset, chunkFrames);
+                instance->JackMutedFrames += chunkFrames;
+            } else {
+                if (instance->BitsPerSample == 32) {
                     T2AudioStreamRenderFrames(instance, context,
-                                              (volatile unsigned int *)(hwBufferBase + dstOffset +
-                                                                        done * frameBytes),
-                                              wide, n);
-                    done += n;
+                                              (volatile unsigned int *)(hwBufferBase + dstOffset),
+                                              (const unsigned int *)(sourceBase + srcOffset),
+                                              chunkFrames);
+                } else {
+                    ULONG done = 0;
+                    while (done < chunkFrames) {
+                        unsigned int wide[T2AUDIO_WIDEN_FRAMES * T2AUDIO_RING_CHANNELS];
+                        ULONG n = chunkFrames - done;
+
+                        if (n > T2AUDIO_WIDEN_FRAMES) {
+                            n = T2AUDIO_WIDEN_FRAMES;
+                        }
+                        T2AudioWidenPcmToS32(sourceBase + srcOffset + done * instance->BytesPerFrame,
+                                             wide, n * instance->Channels, instance->BitsPerSample);
+                        T2AudioStreamRenderFrames(instance, context,
+                                                  (volatile unsigned int *)(hwBufferBase + dstOffset +
+                                                                            done * frameBytes),
+                                                  wide, n);
+                        done += n;
+                    }
+                }
+                // Silence corresponding frames in headphone ring:
+                if (!instance->Headphone && context->HeadphoneBufferSize != 0) {
+                    PUCHAR hpBase = (PUCHAR)context->Bar1Mapped + context->HeadphoneBufferOffset;
+                    ULONG hpFrames = (ULONG)(context->HeadphoneBufferSize / T2AUDIO_HP_RING_BYTES_PER_FRAME);
+                    T2AudioStreamZeroRingLocked(hpBase, hpFrames, T2AUDIO_HP_RING_BYTES_PER_FRAME,
+                                                frame + instance->DestOffset, chunkFrames);
                 }
             }
 
@@ -908,6 +1014,16 @@ T2AudioStreamSetStateLocked(
                 instance->HardwareIoStarted = TRUE;
                 InterlockedExchange(T2AudioStreamIoActive(instance, instance->DeviceContext), 1);
             }
+            if (instance->DeviceContext->BceIoEnabled && !instance->Headphone &&
+                instance->DeviceContext->HeadphoneDeviceId != 0 &&
+                instance->DeviceContext->HeadphoneBufferSize != 0 &&
+                instance->DeviceContext->HeadphoneIoActive == 0) {
+                NTSTATUS hpStart = T2AudioStartIoDevice(instance->DeviceContext,
+                                                        instance->DeviceContext->HeadphoneDeviceId);
+                if (NT_SUCCESS(hpStart)) {
+                    InterlockedExchange(&instance->DeviceContext->HeadphoneIoActive, 1);
+                }
+            }
 
             // Publish the anchor taken above.
             {
@@ -1040,6 +1156,11 @@ T2AudioStreamSetStateLocked(
                           State, status));
             }
             instance->HardwareIoStarted = FALSE;
+        }
+        if (!instance->Headphone && instance->DeviceContext != NULL &&
+            instance->DeviceContext->HeadphoneIoActive != 0) {
+            T2AudioStopIoDevice(instance->DeviceContext, instance->DeviceContext->HeadphoneDeviceId);
+            InterlockedExchange(&instance->DeviceContext->HeadphoneIoActive, 0);
         }
     }
     return STATUS_SUCCESS;

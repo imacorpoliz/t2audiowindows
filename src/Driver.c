@@ -818,13 +818,16 @@ T2AudioStartDeviceInner(
     port->Release();
     topologyPort->Release();
 
-    // Headphone filter pair (Parameters\HeadphoneOutput=1 and the "Codec
-    // Output" ring found). A failure only leaves the headphones out.
-    if (context->HeadphoneOutput && context->HeadphoneBufferSize != 0) {
+    // Separate headphone endpoint: by default (0), ONE unified audio device is exposed
+    // in Windows. Audio plays to speakers when unplugged, and automatically routes to
+    // headphones when plugged in. Setting SeparateHeadphoneEndpoint=1 registers the legacy
+    // second WaveHeadphone subdevice.
+    ULONG separateEndpoint = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SeparateHeadphoneEndpoint", 0);
+    if (separateEndpoint && context->HeadphoneOutput && context->HeadphoneBufferSize != 0) {
         NTSTATUS hpStatus = T2AudioRegisterHeadphoneFilters(DeviceObject, Irp, ResourceList, context);
 
         context->HeadphoneFiltersRegistered = NT_SUCCESS(hpStatus) ? TRUE : FALSE;
-        KdPrint(("T2Audio: headphone endpoint %s (0x%08X)\n",
+        KdPrint(("T2Audio: separate headphone endpoint %s (0x%08X)\n",
                  NT_SUCCESS(hpStatus) ? "registered" : "NOT registered", hpStatus));
     }
 

@@ -7,10 +7,9 @@
 # layout the installer expects (tools\ next to packaging\):
 #
 #   packaging\T2AudioMiniport.inf / .sys / t2audiominiport.cat
-#   tools\T2Audio-Setup.ps1, tools\Restore-AppleAudioDriver.ps1
+#   tools\T2Audio-Setup.ps1, tools\Restore-AppleAudioDriver.ps1, tools\T2-Manager.ps1
 #   certificate\<name>.cer          (only with -CertificatePath; public part only)
-#   README.md, THIRD_PARTY_LICENSES.md, LICENSE (if present), assets\banner.svg
-#   docs\GUIDE.md, docs\INSTALL.md (README links keep working inside the zip)
+#   README.md, LICENSE, THIRD_PARTY_LICENSES.md
 #   SHA256SUMS.txt
 #
 # The script refuses to package an unsigned .sys/.cat, a .sys whose INF
@@ -51,6 +50,10 @@ Copy-Item $inf, $sys, $cat -Destination (Join-Path $dest 'packaging')
 Copy-Item (Join-Path $root 'tools\T2Audio-Setup.ps1'), (Join-Path $root 'tools\Restore-AppleAudioDriver.ps1'), `
     (Join-Path $root 'tools\T2-Manager.ps1') `
     -Destination (Join-Path $dest 'tools')
+foreach ($doc in @('LICENSE', 'THIRD_PARTY_LICENSES.md', 'README.md')) {
+    $p = Join-Path $root $doc
+    if (Test-Path $p) { Copy-Item $p -Destination $dest }
+}
 if ($CertificatePath) {
     $resolvedCert = (Resolve-Path $CertificatePath).Path
     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $resolvedCert

@@ -4,7 +4,9 @@ Write-Host "Stopping Audiosrv & AudioEndpointBuilder..."
 Stop-Service Audiosrv -Force -ErrorAction SilentlyContinue
 Stop-Service AudioEndpointBuilder -Force -ErrorAction SilentlyContinue
 
-$id = "PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8"
+$dev = Get-PnpDevice | Where-Object { $_.InstanceId -like 'PCI\VEN_106B&DEV_1803*' } | Select-Object -First 1
+if (-not $dev) { throw 'Apple T2 audio device not found' }
+$id = $dev.InstanceId
 Write-Host "Disabling PnP device..."
 Disable-PnpDevice -InstanceId $id -Confirm:$false
 Start-Sleep -Seconds 1

@@ -18,6 +18,12 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.16 (2026-11-02)
+- Unified single audio endpoint in Windows: automatic dynamic routing between Speakers and Headphones.
+- When headphones are unplugged -> sound plays only on Speakers.
+- When headphones are plugged in -> sound plays only on Headphones (with bs2b crossfeed DSP & safe attenuation).
+- Fixed installer and release packaging (added LICENSE, THIRD_PARTY_LICENSES, dynamic PnP discovery).
+
 ### v1.0.13.15 (2026-11-02)
 - Fixed TOCTOU race in jack poll routine and teardown synchronization (prevents kernel UAF on device unload/stop).
 - Added cancellation and wait loop for `T2AudioResumeWorkRoutine` during PnP Stop/Remove (`T2AudioStopResumeWork`).

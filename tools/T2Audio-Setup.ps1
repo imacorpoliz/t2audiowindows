@@ -635,6 +635,7 @@ function Invoke-Install {
     # Settings before binding: the driver reads them at start.
     Write-PresetValues $Preset
     Set-Param 'EnableProduction' 1
+    Set-Param 'HeadphoneOutput' 0
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
     Write-Ok 'Persistent mode on, crash guard reset.'
@@ -676,8 +677,9 @@ function Install-PackageCertificate($signer) {
             (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $_.FullName).Thumbprint -eq $signer.Thumbprint
         } | Select-Object -First 1
     if (-not $cer) {
-        Write-Warn "The signing certificate ($($signer.Subject)) is not in TrustedPublisher; Windows may refuse the driver."
-        return $true
+        Write-Fail "The signing certificate ($($signer.Subject)) is not in TrustedPublisher and no matching .cer was found in certificate\."
+        Write-Info "Run -Action Prepare or import the test certificate into TrustedPublisher first."
+        return $false
     }
     Write-Info "The package is signed with $($signer.Subject) ($($signer.Thumbprint))."
     if (-not (Confirm-Action 'Trust this test certificate on this computer (Root + TrustedPublisher)?')) { return $false }
@@ -818,7 +820,7 @@ function Invoke-Uninstall {
 # hardware 2026-10-29). Headphones = HeadphoneOutput + JackEvents (jack
 # tracking) + HeadphoneAutoMute (speakers silent while headphones are in).
 $FeatureParams = [ordered]@{
-    Headphones       = @('HeadphoneOutput', 'JackEvents', 'HeadphoneAutoMute')
+    Headphones       = @('JackEvents', 'HeadphoneAutoMute')
     Microphone       = @('MicInput', 'MicStartIo')   # recording verified on 1.0.13.4
     ResumeAfterSleep = @('ResumeAfterSleep')
     ExtraFormats     = @('ExtraFormats')
