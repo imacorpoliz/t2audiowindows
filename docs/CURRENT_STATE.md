@@ -18,6 +18,11 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.18 (2026-11-02)
+- Upgraded headphone bs2b crossfeed IIR state from 32-bit `int` to 64-bit `long long`, eliminating 32-bit integer overflow on 24-bit audio that caused severe digital distortion/crackling.
+- Disabled `HeadphoneCrossfeed` by default (`0`) for pure, uncolored bit-exact direct headphone passthrough.
+- Retained full crossfeed capability with safe 64-bit fixed-point arithmetic if enabled.
+
 ### v1.0.13.17 (2026-11-02)
 - Fixed headphone BCE stream query condition (`HeadphoneOutput == 1` gate removed) ensuring physical audio format is valid.
 - Fixed `HeadphoneDeviceId` initialization in `Driver.c` in unified single-endpoint mode (bypassing separate filter registration check).

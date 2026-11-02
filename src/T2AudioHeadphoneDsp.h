@@ -31,8 +31,8 @@ typedef struct _T2AUDIO_HEADPHONE_DSP_STATE {
     int LeftDelay[T2AUDIO_HP_DELAY_BUF_SIZE];
     int RightDelay[T2AUDIO_HP_DELAY_BUF_SIZE];
     unsigned int DelayIndex;
-    int LeftIirState;   // Q16
-    int RightIirState;  // Q16
+    long long LeftIirState;   // 64-bit Q16 accumulator (prevents 24-bit audio overflow)
+    long long RightIirState;  // 64-bit Q16 accumulator
 } T2AUDIO_HEADPHONE_DSP_STATE;
 
 static __inline void
