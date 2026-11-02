@@ -8,11 +8,16 @@
 
 param(
     [int[]]$Variants = @(0, 1, 2, 3, 4),
-    [string]$InstanceId = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3ac8fc3&0&03D8',
+    [string]$InstanceId = '',
     [string]$HwId = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $InstanceId) {
+    $t2Dev = Get-PnpDevice | Where-Object { $_.InstanceId -like "$HwId*" } | Select-Object -First 1
+    if ($t2Dev) { $InstanceId = $t2Dev.InstanceId } else { $InstanceId = $HwId }
+}
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $DbgView = @(

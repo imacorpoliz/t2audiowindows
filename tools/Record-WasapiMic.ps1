@@ -1,6 +1,6 @@
 # Record-WasapiMic.ps1 - Record a short WAV file from default capture device and report audio energy
 param(
-    [string]$OutFile = "C:\Users\othysa\Desktop\mic_test.wav",
+    [string]$OutFile = "$PSScriptRoot\mic_test.wav",
     [int]$DurationSeconds = 3
 )
 

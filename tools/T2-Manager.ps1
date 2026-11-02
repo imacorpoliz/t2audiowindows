@@ -94,9 +94,22 @@ function Set-SoundPreset([string]$name) {
         }
     }
 
-    Write-Ok "Preset '$name' ($($p.Title)) applied in real-time!"
-    Write-Info "Active tuning: Bass=$($p.BassDb) dB | Treble=$($p.TrebleDb) dB | Clarity=$($p.ClarityDb) dB | Gain=$($p.DspGainDb) dB"
-    Write-Info "Driver live DSP updates parameters within 500 ms without stopping audio."
+    $drv = Get-CurrentDriverType
+    $jackEvents = (Get-ItemProperty -Path $paramPath -Name "JackEvents" -ErrorAction SilentlyContinue).JackEvents
+    if ($drv -ne "T2AudioPort") {
+        Write-Warn "T2AudioPort driver is not currently active ($drv in use)."
+        Write-Info "Preset saved to registry; it will take effect when T2AudioPort is enabled."
+    } elseif ($jackEvents -eq 0) {
+        Write-Warn "Headphone JackEvents is disabled; periodic live parameter reload in driver is inactive."
+        Write-Info "Restarting audio device to apply changes..."
+        if (Test-Path $T2SetupScript) {
+            powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Restart -Force
+        }
+    } else {
+        Write-Ok "Preset '$name' ($($p.Title)) applied in real-time!"
+        Write-Info "Active tuning: Bass=$($p.BassDb) dB | Treble=$($p.TrebleDb) dB | Clarity=$($p.ClarityDb) dB | Gain=$($p.DspGainDb) dB"
+        Write-Info "Driver live DSP updates parameters within 500 ms without stopping audio."
+    }
 }
 
 # -------------------------------------------------------------
@@ -315,15 +328,24 @@ function Show-StatusSummary {
     $model = (Get-ItemProperty -Path "HKLM:\HARDWARE\DESCRIPTION\System\BIOS" -Name "SystemProductName" -ErrorAction SilentlyContinue).SystemProductName
     if (-not $model) { $model = "MacBookPro16,1" }
     Write-Host ("   Hardware Model:     {0}" -f $model) -ForegroundColor White
-    Write-Host ("   Hardware Status:    {0}" -f ($dev.Status)) -ForegroundColor Green
+    $statusText = if ($dev -and $dev.Status) { $dev.Status } else { "Not Present" }
+    $statusColor = if ($dev -and $dev.Status -eq "OK") { "Green" } elseif ($dev) { "Yellow" } else { "Red" }
+    Write-Host ("   Hardware Status:    {0}" -f $statusText) -ForegroundColor $statusColor
     
     if ($drv -eq "T2AudioPort") {
-        $preset = if ($params.BassDb -eq 6) { "bass" } `
-                  elseif ($params.TrebleDb -eq 5) { "bright" } `
-                  elseif ($params.BassDb -eq 3 -and $params.TrebleDb -eq 3) { "movie" } `
-                  elseif ($params.ClarityDb -eq 5) { "voice" } `
-                  elseif ($params.WooferLimitDb -eq 6 -and $params.BassDb -eq -5) { "night" } `
-                  else { "macos (standard)" }
+        $preset = "Custom"
+        foreach ($pName in $PresetDefinitions.Keys) {
+            $def = $PresetDefinitions[$pName]
+            if ($params.BassDb -eq $def.BassDb -and
+                $params.TrebleDb -eq $def.TrebleDb -and
+                $params.ClarityDb -eq $def.ClarityDb -and
+                $params.DspGainDb -eq $def.DspGainDb -and
+                $params.TweeterTrimDb -eq $def.TweeterTrimDb -and
+                $params.WooferLimitDb -eq $def.WooferLimitDb) {
+                $preset = "$pName ($($def.Title))"
+                break
+            }
+        }
 
         $bass = if ($null -ne $params.BassDb) { "$($params.BassDb) dB" } else { "0 dB" }
         $treble = if ($null -ne $params.TrebleDb) { "$($params.TrebleDb) dB" } else { "0 dB" }
@@ -417,6 +439,9 @@ function Show-MainMenu {
                 $newVal = if ($cur -eq 1) { 0 } else { 1 }
                 Set-ItemProperty -Path $paramPath -Name "HeadphoneCrossfeed" -Value $newVal -Type DWord
                 Write-Ok ("Headphone Crossfeed is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                if (((Get-ItemProperty $paramPath -Name "JackEvents" -ErrorAction SilentlyContinue).JackEvents -eq 0) -and (Test-Path $T2SetupScript)) {
+                    powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Restart -Force
+                }
                 Start-Sleep -Milliseconds 700
             }
             "U" {
@@ -425,6 +450,9 @@ function Show-MainMenu {
                 $newVal = if ($cur -eq 1) { 0 } else { 1 }
                 Set-ItemProperty -Path $paramPath -Name "DspLoudness" -Value $newVal -Type DWord
                 Write-Ok ("Dynamic Loudness is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                if (((Get-ItemProperty $paramPath -Name "JackEvents" -ErrorAction SilentlyContinue).JackEvents -eq 0) -and (Test-Path $T2SetupScript)) {
+                    powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Restart -Force
+                }
                 Start-Sleep -Milliseconds 700
             }
             "A" {
@@ -433,6 +461,9 @@ function Show-MainMenu {
                 $newVal = if ($cur -eq 1) { 0 } else { 1 }
                 Set-ItemProperty -Path $paramPath -Name "AntiRattle" -Value $newVal -Type DWord
                 Write-Ok ("Anti-Rattle Protection is now {0}!" -f $(if ($newVal -eq 1) { "ENABLED" } else { "DISABLED" }))
+                if (((Get-ItemProperty $paramPath -Name "JackEvents" -ErrorAction SilentlyContinue).JackEvents -eq 0) -and (Test-Path $T2SetupScript)) {
+                    powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Restart -Force
+                }
                 Start-Sleep -Milliseconds 700
             }
             "T" { Invoke-SoundTest; Pause-Menu }

@@ -148,7 +148,7 @@ $ErrorActionPreference = 'Stop'
 $ToneAmplitudeGiven = $PSBoundParameters.ContainsKey('ToneAmplitude')
 
 $HardwareId       = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
-$KnownInstanceId  = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8'
+$KnownInstanceId  = $HardwareId
 $ServiceKeyPath   = 'SYSTEM\CurrentControlSet\Services\T2AudioMiniport'
 $TestSubKey       = 'TestSession'
 $AutoTaskName     = 'T2Audio-AutoCapture-AfterBoot'

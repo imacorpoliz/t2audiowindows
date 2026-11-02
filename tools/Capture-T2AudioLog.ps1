@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param(
     [int]$Duration = 60,
-    [string]$InstanceId = "PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01\4&3AC8FC3&0&03D8",
+    [string]$InstanceId = "",
     [switch]$RestartDevice
 )
 
@@ -32,6 +32,11 @@ $ErrorActionPreference = "Stop"
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Error "This script requires Administrator privileges. Please run as Administrator."
     exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($InstanceId)) {
+    $t2Dev = Get-PnpDevice | Where-Object { $_.InstanceId -like "PCI\VEN_106B&DEV_1803*" } | Select-Object -First 1
+    if ($t2Dev) { $InstanceId = $t2Dev.InstanceId } else { $InstanceId = "PCI\VEN_106B&DEV_1803" }
 }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

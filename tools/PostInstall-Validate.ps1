@@ -24,10 +24,14 @@ function Test-Component {
     
     try {
         $result = & $Test
-        if ($result) {
+        if ($result -eq $true) {
             Write-Host "    [PASS]" -ForegroundColor Green
             $script:testsPassed++
             return $true
+        } elseif ($result -eq "SKIP") {
+            Write-Host "    [SKIP] (No active debugger/log to inspect)" -ForegroundColor Yellow
+            $script:testsTotal--
+            return $null
         } else {
             Write-Host "    [FAIL]" -ForegroundColor Red
             return $false
@@ -73,7 +77,7 @@ Test-Component "Device Manager status" {
 
 # Test 3: Check driver file in System32\drivers
 Test-Component "Driver file present" {
-    $driverPath = "C:\Windows\System32\drivers\T2AudioMiniport.sys"
+    $driverPath = Join-Path $env:SystemRoot "System32\drivers\T2AudioMiniport.sys"
     if (Test-Path -LiteralPath $driverPath) {
         $fileSize = (Get-Item -LiteralPath $driverPath).Length
         Write-Host "      Path: $driverPath" -ForegroundColor Gray
@@ -92,19 +96,18 @@ Test-Component "Windows Audio service" {
 
 # Test 5: Check audio endpoints
 Test-Component "Audio endpoints enumeration" {
-    Add-Type -AssemblyName System.Speech
-    $endpoints = Get-CimInstance -ClassName Win32_SoundDevice | Where-Object {
-        $_.Name -like "*Apple*" -or $_.Name -like "*T2*"
+    $endpoints = Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object {
+        ($_.FriendlyName -like "*Apple*" -or $_.FriendlyName -like "*T2*") -and $_.Status -eq "OK"
     }
     
     if ($endpoints) {
         foreach ($ep in $endpoints) {
-            Write-Host "      Found: $($ep.Name)" -ForegroundColor Gray
+            Write-Host "      Found: $($ep.FriendlyName)" -ForegroundColor Gray
             Write-Host "      Status: $($ep.Status)" -ForegroundColor Gray
         }
         return $true
     } else {
-        Write-Host "      No T2 audio endpoints found" -ForegroundColor Yellow
+        Write-Host "      No active T2 audio endpoints found" -ForegroundColor Yellow
         return $false
     }
 }
@@ -124,14 +127,26 @@ Test-Component "Kernel debug messages" {
     }
     Write-Host "      (Check via kernel debugger or DbgView)" -ForegroundColor Yellow
     
-    # Cannot verify without debugger attached, assume pass if driver loaded
-    return $true
+    $recentLog = Get-ChildItem -Path (Join-Path $PSScriptRoot "..\docs\logs") -Filter "*.log" -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($recentLog) {
+        $found = Select-String -Path $recentLog.FullName -Pattern "T2Audio:" -SimpleMatch -Quiet
+        if ($found) {
+            Write-Host "      Found T2Audio messages in $($recentLog.Name)" -ForegroundColor Gray
+            return $true
+        }
+    }
+    Write-Host "      (No active debugger or recent DbgView log found)" -ForegroundColor Yellow
+    return "SKIP"
 }
 
 # Test 7: Check BCE transport
 Test-Component "BCE transport availability" {
-    $vhciService = Get-Service | Where-Object { 
-        $_.Name -like "*USBVHCI*" -or $_.Name -like "*AppleUSBVHCI*" 
+    $vhciService = Get-Service -Name "AppleUSBVHCI" -ErrorAction SilentlyContinue
+    if (-not $vhciService) {
+        $vhciService = Get-Service | Where-Object { 
+            $_.Name -like "*USBVHCI*" -or $_.Name -like "*AppleUSBVHCI*" 
+        }
     }
     
     if ($vhciService) {
@@ -146,8 +161,15 @@ Test-Component "BCE transport availability" {
 
 # Test 8: Check Event Viewer for driver errors
 Test-Component "Event Viewer errors" {
-    $errors = Get-EventLog -LogName System -Source "Application Popup" -Newest 10 -ErrorAction SilentlyContinue | 
-        Where-Object { $_.Message -like "*T2Audio*" }
+    $errors = $null
+    try {
+        $filter = @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-1) }
+        $errors = Get-WinEvent -FilterHashtable $filter -MaxEvents 50 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -like "*T2Audio*" -and $_.LevelDisplayName -in @("Error", "Critical") }
+    } catch {
+        $errors = Get-EventLog -LogName System -Newest 10 -ErrorAction SilentlyContinue | 
+            Where-Object { $_.Message -like "*T2Audio*" -and $_.EntryType -in @("Error") }
+    }
     
     if ($errors) {
         Write-Host "      Found driver-related errors:" -ForegroundColor Yellow
@@ -230,14 +252,20 @@ Get-CimInstance -ClassName Win32_SoundDevice | Format-Table Name, Status, Manufa
 
 Write-Host ""
 Write-Host "Driver Files:" -ForegroundColor Yellow
-Get-ChildItem -Path "C:\Windows\System32\drivers" -Filter "*T2Audio*" -ErrorAction SilentlyContinue | 
+Get-ChildItem -Path (Join-Path $env:SystemRoot "System32\drivers") -Filter "*T2Audio*" -ErrorAction SilentlyContinue | 
     Format-Table Name, Length, LastWriteTime -AutoSize
 
 Write-Host ""
-Write-Host "Recent System Events (last 10):" -ForegroundColor Yellow
-Get-EventLog -LogName System -Newest 10 -ErrorAction SilentlyContinue | 
-    Where-Object { $_.Source -like "*Audio*" -or $_.Source -like "*PnP*" } |
-    Format-Table TimeGenerated, Source, EventID, Message -AutoSize
+Write-Host "Recent System Events:" -ForegroundColor Yellow
+try {
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-1) } -MaxEvents 10 -ErrorAction SilentlyContinue | 
+        Where-Object { $_.ProviderName -like "*Audio*" -or $_.ProviderName -like "*PnP*" } |
+        Format-Table TimeCreated, ProviderName, Id, Message -AutoSize
+} catch {
+    Get-EventLog -LogName System -Newest 10 -ErrorAction SilentlyContinue | 
+        Where-Object { $_.Source -like "*Audio*" -or $_.Source -like "*PnP*" } |
+        Format-Table TimeGenerated, Source, EventID, Message -AutoSize
+}
 
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
