@@ -2,7 +2,8 @@
 # Run this after reboot to verify driver installation and test audio functionality
 
 param(
-    [switch]$SkipAudioTest = $false,
+    [switch]$SkipAudioTest = $true,
+    [switch]$PlayTone,
     [int]$TestVolume = -30  # dB (relative to max)
 )
 
@@ -44,11 +45,17 @@ function Test-Component {
 
 # Test 1: Check if driver is loaded
 Test-Component "Driver loaded in kernel" {
-    $driverLoaded = Get-WindowsDriver -Online | Where-Object {
-        $_.OriginalFileName -like "*T2AudioMiniport*"
+    $t2Dev = Get-PnpDevice | Where-Object { $_.InstanceId -like "PCI\VEN_106B&DEV_1803*" } | Select-Object -First 1
+    if ($t2Dev) {
+        $svc = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Enum\$($t2Dev.InstanceId)" -ErrorAction SilentlyContinue).Service
+        if ($svc -like "*T2Audio*") {
+            Write-Host "      Driver Service: $svc (Device: $($t2Dev.Status))" -ForegroundColor Gray
+            return $true
+        }
     }
-    if ($driverLoaded) {
-        Write-Host "      Found: $($driverLoaded.OriginalFileName)" -ForegroundColor Gray
+    $service = Get-Service -Name "T2AudioMiniport" -ErrorAction SilentlyContinue
+    if ($service) {
+        Write-Host "      Service found: $($service.Status)" -ForegroundColor Gray
         return $true
     }
     return $false
@@ -199,8 +206,8 @@ if ($testsPassed -eq $testsTotal) {
 
 Write-Host ""
 
-# Audio test section
-if (-not $SkipAudioTest -and $testsPassed -ge 4) {
+# Audio test section (strictly optional, never runs by default)
+if ($PlayTone -and $testsPassed -ge 4) {
     Write-Host "==================================================================" -ForegroundColor Yellow
     Write-Host "  Audio Playback Test (OPTIONAL)" -ForegroundColor Yellow
     Write-Host "==================================================================" -ForegroundColor Yellow

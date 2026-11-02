@@ -18,6 +18,14 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.21 (2026-11-02)
+- Fixed headphone auto-switching: corrected initial presence reporting in `Topology.c` (`KSJACK_DESCRIPTION2.DeviceStateInfo`) and hardware validation in `BceTransport.c` (`T2AudioProbeBceDevices` sets `JackSeenPlugged` on successful property read).
+- Restored clean direct headphone rendering: delegated headphone frame processing to `T2AudioStreamRenderHeadphoneFrames` supporting both stereo and surround downmixing with pure passthrough (crossfeed off by default).
+- Added hardware speaker auto-cut: speaker stream automatically zeroes output frames while headphones are plugged in when `HeadphoneAutoMute=1`.
+- Defaulted `JackEvents=1` and `HeadphoneAutoMute=1` across the kernel driver and installer.
+- Unified all management and installation scripts into `tools\T2Audio-Setup.ps1` with companion wrapper `tools\T2-Manager.ps1`.
+- Expanded `Set-T2Volume` to initialize, unmute, and balance both Speakers and Headphones endpoints.
+
 ### v1.0.13.20 (2026-11-02)
 - Fixed jack polling admission and teardown synchronization; the poll now starts
   only when jack events and a valid headphone device are available.

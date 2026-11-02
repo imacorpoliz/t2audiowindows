@@ -362,26 +362,8 @@ T2AudioStreamRenderFrames(
     // compose, so the raw path adds it to the sample shift). Frames
     // are 4-byte aligned in both rings.
     if (instance->Headphone) {
-        // Headphones: stereo straight into the 2-channel ring (same
-        // 4-byte slots as the client), with the headphone safety cut.
-        if (context->HeadphoneCrossfeed) {
-            ULONG shift = context->HeadphoneSampleShift + context->HeadphoneAttenuation;
-            ULONG i;
-            for (i = 0; i < Frames; i++) {
-                int inL = (int)T2AudioSar32(Source[i * 2], shift);
-                int inR = (int)T2AudioSar32(Source[i * 2 + 1], shift);
-                int outL, outR;
-                T2AudioHeadphoneProcessStereo(&instance->HeadphoneDsp, inL, inR, 1, &outL, &outR);
-                Dest[i * 2] = (unsigned int)outL;
-                Dest[i * 2 + 1] = (unsigned int)outR;
-            }
-        } else {
-            T2AudioConvertSamples(
-                Dest,
-                Source,
-                Frames * instance->Channels,
-                context->HeadphoneSampleShift + context->HeadphoneAttenuation);
-        }
+        T2AudioStreamRenderHeadphoneFrames(instance, context, Dest, Source, Frames);
+        return;
     } else if (instance->Channels == 2 && context->SpeakerDsp) {
         // KAIT2EN 16_1 chain + lookahead limiter (T2AudioDsp.h);
         // levels 2-4 add virtual bass / compressor / buzz, DspAutoGain
@@ -642,6 +624,11 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                     }
                 }
                 // Silence corresponding frames in speaker ring:
+                T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
+                                            frame + instance->DestOffset, chunkFrames);
+                instance->JackMutedFrames += chunkFrames;
+            } else if (!instance->Headphone && context->HeadphoneAutoMute && context->HeadphoneJackPlugged != 0) {
+                // Auto-mute speakers while headphones are plugged in:
                 T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
                                             frame + instance->DestOffset, chunkFrames);
                 instance->JackMutedFrames += chunkFrames;

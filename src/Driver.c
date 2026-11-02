@@ -634,7 +634,7 @@ T2AudioStartDeviceInner(
     // (read-only); JackEvents subscribes to the headphone jack and tracks it;
     // HeadphoneAutoMute (with JackEvents) silences speakers while plugged in.
     context->ExtendedProbe = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtendedProbe", 0) ? 1u : 0u;
-    context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
+    context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 1) ? 1u : 0u;
     // Experiment (read-only, needs JackEvents): read the jack at 8 addresses.
     context->JackProbeAll = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackProbeAll", 0)) ? 1u : 0u;
@@ -642,7 +642,7 @@ T2AudioStartDeviceInner(
     context->DspLoudness = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspLoudness", 0) ? 1u : 0u;
     context->AntiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
-        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 1)) ? 1u : 0u;
     // Headphone endpoint is available by default; jack tracking, microphone
     // capture, and resume-after-sleep remain opt-in safety features.
     context->HeadphoneOutput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneOutput", 1) ? 1u : 0u;

@@ -166,6 +166,9 @@ T2AudioTopologyInit(
         if (NT_SUCCESS(Port->lpVtbl->QueryInterface((PVOID)Port, &IID_IPortEvents, &events)) &&
             events != NULL) {
             instance->DeviceContext->HeadphonePortEvents = events;
+            if (instance->DeviceContext->JackEvents && instance->DeviceContext->JackSeenPlugged) {
+                T2AudioNotifyJackChange(instance->DeviceContext);
+            }
         }
     }
     KdPrint(("T2Audio: Topology Init success (headphone=%u)\n", instance->Headphone ? 1u : 0u));
@@ -318,7 +321,7 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
         PKSJACK_DESCRIPTION2 jack2 = (PKSJACK_DESCRIPTION2)(item + 1);
 
         RtlZeroMemory(jack2, sizeof(*jack2));
-        jack2->DeviceStateInfo = 0;
+        jack2->DeviceStateInfo = T2AudioTopologyJackConnected(instance->DeviceContext) ? 1 : 0;
         // Presence detection when JackEvents is enabled and verified on hardware
         jack2->JackCapabilities = (instance->DeviceContext != NULL &&
                                    instance->DeviceContext->JackEvents)

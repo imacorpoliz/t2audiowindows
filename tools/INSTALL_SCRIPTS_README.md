@@ -1,285 +1,69 @@
-# T2AudioPort Installation Package
-# Complete driver installation suite for Apple T2 Audio Device
-# MacBook Pro 16,1 (2019) - Windows 11
+# T2AudioPort - Management & Installation Suite
+**MacBook Pro 16" (2019, MacBookPro16,1) · Apple T2 Audio for Windows**
 
-## Contents
+## Overview
 
-```
-packaging/                        - Canonical signed driver package (single source of truth)
-├── T2AudioMiniport.sys          - Driver binary (38416 bytes, signed)
-├── T2AudioMiniport.inf          - Driver installation information
-├── t2audiominiport.cat          - Signed catalog
-└── t2audio.cdf                  - Catalog definition (makecat input)
+The entire lifecycle of the T2AudioPort driver — preparation, installation, real-time preset switching, DSP equalization, feature toggles, volume balancing, diagnostics, and rollback — is unified into a single master utility:
 
-tools/                            - Installation and diagnostics scripts
-├── PreInstall-Check.ps1         - Safety check and backup script
-├── Install-T2AudioDriver.ps1    - Main installation script (reads ..\packaging)
-├── PostInstall-Validate.ps1     - Validation and testing script
-├── Rollback-T2AudioDriver.ps1   - Emergency rollback script
-├── Capture-T2AudioLog.ps1       - Kernel debug log capture
-└── README.md                    - Script documentation
-```
+👉 **`tools\T2Audio-Setup.ps1`** (also accessible via companion alias `tools\T2-Manager.ps1`)
 
-> `packaging/` is the ONLY canonical location for the driver binaries. The
-> scripts resolve it as `$PSScriptRoot\..\packaging`; there are no duplicate
-> copies under `tools/`.
-
-## Quick Start
-
-### Prerequisites
-
-- **Hardware:** MacBook Pro 16,1 (2019) with Apple T2 chip
-- **OS:** Windows 11 (or Windows 10 with latest updates)
-- **Privileges:** Administrator rights required
-- **Test Signing:** Must be enabled (driver is unsigned)
-- **Kernel Debugger:** STRONGLY recommended for first installation
-
-### Installation Steps
-
-1. **Run Pre-Installation Check:**
-   ```powershell
-   cd C:\Users\<your-username>\Desktop\mbp\T2AudioPort\tools
-   .\PreInstall-Check.ps1
-   ```
-   This will:
-   - Verify system requirements
-   - Create backup of AppleAudio.sys
-   - Check test signing status
-   - Optionally enable kernel debugging
-
-2. **Install Driver:**
-   ```powershell
-   .\Install-T2AudioDriver.ps1
-   ```
-   This will:
-   - Stop audio services
-   - Disable AppleAudio.sys
-   - Install T2AudioMiniport driver
-   - Reboot system (required)
-
-3. **After Reboot - Validate Installation:**
-   ```powershell
-   .\PostInstall-Validate.ps1
-   ```
-   This will:
-   - Check driver status
-   - Verify audio endpoints
-   - Run diagnostic tests
-   - Optionally test audio playback
-
-### If Something Goes Wrong
-
-**Option 1: PowerShell Rollback**
-```powershell
-.\Rollback-T2AudioDriver.ps1
-```
-
-**Option 2: Safe Mode Rollback**
-1. Boot to Safe Mode (F8 during boot)
-2. Run rollback script
-3. Reboot normally
-
-**Option 3: WinRE Manual Recovery**
-1. Boot to WinRE (Shift+Restart → Troubleshoot → Command Prompt)
-2. Navigate to backup directory
-3. Copy AppleAudio.sys backup to C:\Windows\System32\drivers\
-4. Reboot
-
-## What This Driver Does
-
-T2AudioMiniport is a native Windows PortCls audio driver that enables **6-channel speaker output** on MacBook Pro 16,1 under Windows. It replaces the default AppleAudio.sys driver which is limited to stereo.
-
-### Features
-- ✅ 6-channel audio (5.1 surround)
-- ✅ 48 kHz sample rate
-- ✅ 24-bit depth (in 32-bit containers)
-- ✅ Direct MMIO access to T2 chip
-- ✅ BCE protocol integration
-- ✅ QPC-based position tracking
-
-### Known Limitations
-- ⚠️ No hardware volume control (software only)
-- ⚠️ Fixed 48 kHz rate (no multi-rate support)
-- ⚠️ No jack detection
-- ⚠️ No microphone input support yet
-
-## Architecture
-
-The driver implements a Pure PortCls adapter with WaveRT miniport:
-
-```
-Windows Audio Engine
-       ↓
-   PortCls.sys (WaveRT)
-       ↓
-T2AudioMiniport.sys
-       ↓
-   ┌─────────────┬─────────────────┐
-   │             │                 │
-BAR1/BAR2     AppleUSBVHCI    QPC Timer
-(MMIO)        (BCE Protocol)  (Position)
-   │             │                 │
-   └─────────────┴─────────────────┘
-                 ↓
-          Apple T2 Chip
-                 ↓
-            6 Speakers
-```
-
-### Components
-
-**BceTransport.c:** Kernel-mode wrapper for AppleUSBVHCI.sys, sends START_IO/STOP_IO commands via IOCTL 0x222018.
-
-**Device.c:** BAR1/BAR2 MMIO mapping, GPR validation, BufferStruct parsing, Speaker buffer discovery.
-
-**Phase4.c:** MMIO MDL construction, T2 protocol message serialization.
-
-**WaveRTStream.c:** IMiniportWaveRTStream implementation, buffer allocation, position tracking, state machine.
-
-## Safety & Risks
-
-⚠️ **WARNING: This driver modifies system audio drivers and directly accesses hardware.**
-
-### Potential Risks
-- BSOD during or after installation
-- No audio output
-- Audio distortion or clicks
-- System instability
-- **Hardware damage (speaker failure)** - unlikely but possible
-
-### Safety Measures
-- Automatic backup before installation
-- Test signing validation
-- Volume limited to -30 dB during testing
-- Rollback script included
-- Kernel debugger support
-
-### When NOT to Install
-- ❌ Production system with important work
-- ❌ No kernel debugger available
-- ❌ No WinRE recovery USB prepared
-- ❌ Not comfortable with potential BSOD
-- ❌ Cannot afford audio hardware failure
-
-## Troubleshooting
-
-### Driver Won't Load
-
-**Problem:** Device Manager shows error code 52 (unsigned driver)
-**Solution:** Enable test signing:
-```powershell
-bcdedit.exe /set testsigning on
-```
-Reboot required.
-
-**Problem:** Device Manager shows error code 10 (device cannot start)
-**Solution:** Check Event Viewer (System log) for details. Common causes:
-- BAR mapping failed (bad PCI resources)
-- BCE transport unavailable (AppleUSBVHCI not running)
-- START_IO command rejected
-
-### No Audio Output
-
-**Problem:** Endpoint appears but no sound
-**Solution:** 
-1. Check volume (should not be muted)
-2. Verify device is default playback device
-3. Test with simple audio (Windows sounds)
-4. Check kernel debugger for START_IO status
-
-**Problem:** Audio distorted or clicking
-**Solution:** STOP PLAYBACK IMMEDIATELY. Possible causes:
-- Incorrect buffer mapping (MMIO cache type wrong)
-- T2 chip not in correct mode
-- Buffer overflow/underflow
-Run rollback script and file issue report.
-
-### BCE Transport Failed
-
-**Problem:** "BCE transport unavailable: 0xC0000034"
-**Solution:** AppleUSBVHCI.sys not loaded. Check:
-```powershell
-Get-Service | Where-Object {$_.Name -like "*USBVHCI*"}
-```
-Driver will still load but START_IO commands will fail. Audio may not work without BCE.
-
-## Technical Details
-
-### Hardware Specifications
-- **PCI ID:** VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01
-- **BAR0:** Not used
-- **BAR1:** Audio buffers (~1 MB, PAGE_READONLY | PAGE_WRITECOMBINE)
-- **BAR2:** Control registers/GPR (PAGE_READONLY | PAGE_NOCACHE)
-- **GPR Offset:** 0xC000
-- **BufferStruct Signature:** 0x19870423
-
-### Audio Format
-```
-Sample Rate:    48000 Hz
-Channels:       6 (FL, FR, FC, LFE, SL, SR)
-Bit Depth:      24-bit
-Container:      32-bit (LSB-aligned)
-Frame Size:     24 bytes (6 × 4)
-Buffer Size:    ~983 KB (from T2 firmware)
-FIFO Latency:   512 frames (~10.6 ms)
-```
-
-### Protocol Messages (BCE)
-```
-GET_DEVICE_LIST:   Message ID 101 (command)
-GET_DEVICE_LIST_R: Message ID 102 (response)
-START_IO:          Message ID 0   (command)
-STOP_IO:           Message ID 2   (command)
-```
-
-Message format: Tag[4] + Type(1) + DeviceId(8) + MessageId(4) + Status(4)
-
-## Development Notes
-
-This driver was developed by reverse engineering:
-- Linux KAIT2EN driver (github.com/kekrby/linux-t2)
-- AppleAudio.sys behavior via kernel debugging
-- User-mode AppleUSBVHCI IOCTL testing
-
-Build environment:
-- Visual Studio 2022 Community
-- WDK 10.0.28000.0
-- WindowsKernelModeDriver10.0 toolset
-- PortCls and KS libraries
-
-## Version History
-
-**v1.0.0 (2026-10-05)** - Initial release
-- Phase 1-4: Core driver implementation
-- Phase 5: BCE transport integration
-- Phase 6: Device enumeration
-- Phase 7: MMIO buffer activation
-- Phase 8: QPC position tracking
-- Phase 9: Hardware latency configuration
-- Phase 10: INF and installation scripts
-
-## Credits
-
-- **Linux KAIT2EN:** kekrby and contributors
-- **T2 Reverse Engineering Community**
-- **Windows Driver Kit Documentation:** Microsoft
-
-## License
-
-This driver is provided "AS IS" without warranty of any kind. Use at your own risk.
-
-The authors are not responsible for any damage to hardware, software, or data.
-
-## Support
-
-For issues, questions, or contributions:
-- Check PHASE5_10_COMPLETE.md for detailed documentation
-- Review kernel debugger output
-- Check Event Viewer (System log)
-- Run PostInstall-Validate.ps1 for diagnostics
+All companion scripts in `tools\` share the exact same configuration, validation rules, and device management paths.
 
 ---
 
-**Last Updated:** 2026-10-05  
-**Driver Version:** 1.0.0  
-**Build:** 38416 bytes, x64 (signed package in `packaging/`)
+## Unified Command Center: `T2Audio-Setup.ps1`
+
+### 1. Interactive Switchboard & Dashboard
+Run PowerShell as Administrator:
+```powershell
+.\tools\T2Audio-Setup.ps1
+```
+This opens the unified interactive console with live driver status, volume levels for both speakers and headphones, crash guard health, and a single-keystroke feature switchboard.
+
+### 2. Quick CLI Actions
+
+| Action | Command | Description |
+|---|---|---|
+| **Status** | `.\tools\T2Audio-Setup.ps1 -Action Status` | Live status dashboard (driver version, PnP health, speaker/headphone volume, active features). |
+| **Prepare** | `.\tools\T2Audio-Setup.ps1 -Action Prepare` | Verifies Secure Boot is off and enables Windows test-signing mode. |
+| **Install** | `.\tools\T2Audio-Setup.ps1 -Action Install -Preset macos` | Stages signed package, sets production parameters, un-mutes endpoints, and activates driver. |
+| **Preset** | `.\tools\T2Audio-Setup.ps1 -Action Preset -Preset bright` | Switches sound profile (`macos`, `bright`, `bass`, `loud`, `movie`, `voice`, `night`, `warm`, `natural`, `raw`). |
+| **Tune** | `.\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb 2` | Fine-tunes hardware tone controls (-12 dB to +12 dB) and compressor style. |
+| **Balance** | `.\tools\T2Audio-Setup.ps1 -Action Balance -Volume 0.25` | Unmutes and equalizes Left/Right balance across both Speakers and Headphones. |
+| **Switch** | `.\tools\T2Audio-Setup.ps1 -Action Switch -To Toggle` | Toggles default Windows playback endpoint between Speakers and Headphones. |
+| **Features** | `.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1` | Enables/disables optional driver subsystems with a single safe PnP cycle. |
+| **Doctor** | `.\tools\T2Audio-Setup.ps1 -Action Doctor` | Automated diagnostic audit of driver, services, registry, endpoints, and crash guard. |
+| **Shortcut** | `.\tools\T2Audio-Setup.ps1 -Action Shortcut` | Creates a desktop shortcut with hotkey `Ctrl+Alt+H` to instantly switch outputs. |
+| **Backup** | `.\tools\T2Audio-Setup.ps1 -Action Backup` | Exports current DSP and driver configuration to a timestamped JSON file. |
+| **Restore** | `.\tools\T2Audio-Setup.ps1 -Action Restore` | Restores DSP settings from a previously saved JSON snapshot. |
+| **ResetGuard**| `.\tools\T2Audio-Setup.ps1 -Action ResetGuard` | Clears watchdog crash guard strikes if an unclean shutdown occurred. |
+| **Uninstall** | `.\tools\T2Audio-Setup.ps1 -Action Uninstall` | Completely removes T2AudioPort and restores Apple's official `AppleAudio.sys`. |
+
+---
+
+## Feature Switchboard Toggles
+
+All features can be toggled via the interactive menu or CLI (`-Action Features`):
+
+1. **Headphones (`-Headphones 1/0`)** — Exposes separate native 3.5 mm output endpoint in Windows with hardware jack auto-sensing and automatic speaker muting.
+2. **Built-in Microphones (`-Microphone 1/0`)** — 3-microphone studio beamforming array.
+3. **Resume Sound After Sleep (`-ResumeAfterSleep 1/0`)** — Automatically restarts audio streams upon lid open / power wake.
+4. **16/24-bit Exclusive Formats (`-ExtraFormats 1/0`)** — Low-latency formats for DAWs and exclusive-mode WASAPI/ASIO clients.
+5. **Headphone bs2b Crossfeed (`-HeadphoneCrossfeed 1/0`)** — Bauer stereophonic-to-binaural DSP in 64-bit fixed point (off by default for pure clean passthrough).
+6. **Loudness Compensation (`-DspLoudness 1/0`)** — Fletcher-Munson dynamic low-volume bass and treble compensation.
+7. **Woofer Anti-Rattle (`-AntiRattle 1/0`)** — Dynamic limiter preventing mechanical cone bottoming on heavy transients.
+
+---
+
+## Companion Scripts (Unified Wrappers)
+
+To ensure muscle-memory compatibility, the specialized scripts forward to the unified core:
+
+- **`T2-Manager.ps1`** — Drop-in alias for `T2Audio-Setup.ps1`.
+- **`Install-T2AudioDriver.ps1`** — 1-click installer forwarding to `T2Audio-Setup.ps1 -Action Install`.
+- **`Rollback-T2AudioDriver.ps1`** — 1-click restore forwarding to `T2Audio-Setup.ps1 -Action Uninstall`.
+- **`Set-DefaultAudioDevice.ps1`** — PolicyConfig helper to switch Windows default output.
+- **`Restart-T2AudioService.ps1`** — Gracefully cycles `AudioEndpointBuilder`, `Audiosrv`, and the T2 PnP device without hanging.
+- **`PostInstall-Validate.ps1`** — Non-blocking 8-point automated sanity verification.
+- **`Make-ReleasePackage.ps1`** — Builds distribution zips including catalog, driver, licenses, and documentation.
+- **`Capture-T2AudioLog.ps1`** — Captures kernel debug output via DbgViewCLI with dynamic device ID resolution.

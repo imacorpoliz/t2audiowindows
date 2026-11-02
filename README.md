@@ -42,9 +42,7 @@ Open **PowerShell as Administrator** in the folder and run:
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 ```
 
-**That's it!** Your T2 speakers and the separate headphone endpoint are active.
-Automatic jack switching and microphone capture can be enabled later from the
-installer menu.
+**That's it!** Your T2 speakers and the separate headphone endpoint are active with automatic hardware jack sensing and independent volume controls. Sound plays through speakers when unplugged, and automatically moves to headphones when plugged in. Microphone capture and experimental DSP options can be toggled anytime from the unified switchboard.
 
 ---
 

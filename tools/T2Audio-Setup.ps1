@@ -466,15 +466,41 @@ function Get-T2Endpoint {
     return $first
 }
 
+function Get-T2HeadphoneEndpoint {
+    $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+    if (-not (Test-Path $root)) { return $null }
+    $prop = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
+    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    foreach ($k in Get-ChildItem $root) {
+        $props = Join-Path $k.PSPath 'Properties'
+        if (-not (Test-Path $props)) { continue }
+        $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
+        $v = $all.$prop
+        if (-not ($v -and $v.StartsWith($HardwareId))) { continue }
+        if ("$($all.$descProp)" -match 'Headphone') {
+            return '{0.0.0.00000000}.' + $k.PSChildName
+        }
+    }
+    return $null
+}
+
 function Set-T2Volume([double]$level) {
     if ($level -lt 0) { return }
-    $ep = $null
-    for ($i = 0; $i -lt 10 -and -not $ep; $i++) { $ep = Get-T2Endpoint; if (-not $ep) { Start-Sleep -Seconds 1 } }
-    if (-not $ep) { Write-Warn 'The T2 speaker endpoint has not appeared in Windows yet; volume unchanged.'; return }
+    $epSpk = $null
+    for ($i = 0; $i -lt 10 -and -not $epSpk; $i++) { $epSpk = Get-T2Endpoint; if (-not $epSpk) { Start-Sleep -Seconds 1 } }
+    $epHp = Get-T2HeadphoneEndpoint
     try {
         if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
-        $r = [T2Setup.Volume]::Set($ep, [float]$level)
-        Write-Ok "T2 speakers: unmuted, volume $([int]($level * 100)) %, L/R balance evened ($r)"
+        if ($epSpk) {
+            $r = [T2Setup.Volume]::Set($epSpk, [float]$level)
+            Write-Ok "T2 speakers: unmuted, volume $([int]($level * 100)) %, L/R balance evened ($r)"
+        } else {
+            Write-Warn 'The T2 speaker endpoint has not appeared in Windows yet; volume unchanged.'
+        }
+        if ($epHp) {
+            $rHp = [T2Setup.Volume]::Set($epHp, [float]0.25)
+            Write-Ok "T2 headphones: unmuted, volume 25 %, L/R balance evened ($rHp)"
+        }
     } catch {
         Write-Warn "Could not set the volume: $_"
     }
@@ -542,8 +568,10 @@ function Restart-T2Device {
         return $true
     }
     Write-Info 'Restarting the device so the driver reads the settings (sound stops for a few seconds)...'
-    $r = Invoke-Pnp @('/restart-device', $d.InstanceId)
-    $d = Wait-DeviceService $ServiceName
+    $null = Invoke-Pnp @('/disable-device', $d.InstanceId)
+    Start-Sleep -Milliseconds 600
+    $r = Invoke-Pnp @('/enable-device', $d.InstanceId)
+    $d = Wait-DeviceService $ServiceName 15
     if ($d -and $d.Status -eq 'OK') { Write-Ok 'Device restarted.'; return $true }
     Write-Warn "Device after restart: $($d.Status) (pnputil code $($r.Code)). A reboot may be needed."
     return $false
@@ -581,17 +609,22 @@ function Invoke-Status {
         Write-Host '   Crash guard:    OK' -ForegroundColor White
     }
     $ep = Get-T2Endpoint
-    if ($ep) {
-        try {
-            if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
+    $epHp = Get-T2HeadphoneEndpoint
+    try {
+        if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDefinition $code }
+        if ($ep) {
             $vol = [T2Setup.Volume]::Get($ep)
-            Write-Host ("   T2 volume:      {0}" -f $vol) -ForegroundColor White
+            Write-Host ("   Speakers vol:   {0}" -f $vol) -ForegroundColor White
             if ($vol -match 'L=([\d.,]+) R=([\d.,]+)') {
                 $l = [double]($Matches[1] -replace ',', '.'); $r = [double]($Matches[2] -replace ',', '.')
-                if ([math]::Abs($l - $r) -gt 0.02) { Write-Warn 'L/R balance is uneven (Sound settings, Levels, Balance). Fix: .\T2Audio-Setup.ps1 -Action Balance' }
+                if ([math]::Abs($l - $r) -gt 0.02) { Write-Warn 'L/R balance is uneven. Fix: .\T2Audio-Setup.ps1 -Action Balance' }
             }
-        } catch { }
-    }
+        }
+        if ($epHp) {
+            $volHp = [T2Setup.Volume]::Get($epHp)
+            Write-Host ("   Headphones vol: {0}" -f $volHp) -ForegroundColor White
+        }
+    } catch { }
     Show-Features
     $ts = if (Test-TestSigning) { 'on' } else { 'OFF' }
     Write-Host ("   testsigning:    {0}" -f $ts) -ForegroundColor White
@@ -640,6 +673,9 @@ function Invoke-Install {
     Set-Param 'EnableProduction' 1
     Set-Param 'HeadphoneOutput' 1
     Set-Param 'SeparateHeadphoneEndpoint' 1
+    Set-Param 'JackEvents' 1
+    Set-Param 'HeadphoneAutoMute' 1
+    Set-Param 'HeadphoneCrossfeed' 0
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
     Write-Ok 'Persistent mode on, crash guard reset.'
@@ -654,7 +690,7 @@ function Invoke-Install {
         Write-Info ($r.Out.Trim())
         return
     }
-    $d = Wait-DeviceService $ServiceName 30
+    $d = Wait-DeviceService $ServiceName 15 30
     if ($d -and $d.Status -eq 'OK' -and (Get-DeviceService $d) -eq $ServiceName) {
         Write-Ok 'T2AudioPort is installed and running.'
         Set-T2Volume $Volume
@@ -878,7 +914,7 @@ function Invoke-Restart {
 # Effective defaults are important: an absent registry value is not always
 # equivalent to zero (HeadphoneOutput and SeparateHeadphoneEndpoint default 1).
 $FeatureDefaults = @{
-    HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 0; HeadphoneAutoMute = 0
+    HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 1; HeadphoneAutoMute = 1
     MicInput = 0; MicStartIo = 0; ResumeAfterSleep = 0; ExtraFormats = 0
     HeadphoneCrossfeed = 0; DspLoudness = 0; AntiRattle = 0
 }
