@@ -555,7 +555,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
             T2AudioStreamZeroRingLocked(hwBufferBase, hwFrames, frameBytes,
                                         skipStart + instance->DestOffset,
                                         skippedFrames);
-            if (!instance->Headphone && context->HeadphoneBufferSize != 0) {
+            if (!instance->Headphone && !context->HeadphoneFiltersRegistered && context->HeadphoneBufferSize != 0) {
                 PUCHAR hpBase = (PUCHAR)context->Bar1Mapped + context->HeadphoneBufferOffset;
                 ULONG hpFrames = (ULONG)(context->HeadphoneBufferSize / T2AUDIO_HP_RING_BYTES_PER_FRAME);
                 T2AudioStreamZeroRingLocked(hpBase, hpFrames, T2AUDIO_HP_RING_BYTES_PER_FRAME,
@@ -578,6 +578,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
         // When headphones are plugged in: render to headphone ring, silence speakers.
         // When headphones are not plugged in: render to speaker ring, silence headphones.
         BOOLEAN routeToHeadphones = (!instance->Headphone &&
+                                     !context->HeadphoneFiltersRegistered &&
                                      context->HeadphoneJackPlugged != 0 &&
                                      context->HeadphoneBufferSize != 0 &&
                                      context->HeadphoneFormatValid);
@@ -669,7 +670,7 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                     }
                 }
                 // Silence corresponding frames in headphone ring:
-                if (!instance->Headphone && context->HeadphoneBufferSize != 0) {
+                if (!instance->Headphone && !context->HeadphoneFiltersRegistered && context->HeadphoneBufferSize != 0) {
                     PUCHAR hpBase = (PUCHAR)context->Bar1Mapped + context->HeadphoneBufferOffset;
                     ULONG hpFrames = (ULONG)(context->HeadphoneBufferSize / T2AUDIO_HP_RING_BYTES_PER_FRAME);
                     T2AudioStreamZeroRingLocked(hpBase, hpFrames, T2AUDIO_HP_RING_BYTES_PER_FRAME,
@@ -1015,6 +1016,7 @@ T2AudioStreamSetStateLocked(
                 InterlockedExchange(T2AudioStreamIoActive(instance, instance->DeviceContext), 1);
             }
             if (instance->DeviceContext->BceIoEnabled && !instance->Headphone &&
+                !instance->DeviceContext->HeadphoneFiltersRegistered &&
                 instance->DeviceContext->HeadphoneDeviceId != 0 &&
                 instance->DeviceContext->HeadphoneBufferSize != 0 &&
                 instance->DeviceContext->HeadphoneIoActive == 0) {

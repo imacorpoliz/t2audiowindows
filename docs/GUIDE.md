@@ -39,7 +39,7 @@ flowchart LR
 
 ## 2. Unpack the release
 
-1. Download `T2AudioPort-1.0.13.18.zip` from [Releases](https://github.com/imacorpoliz/t2audiowindows/releases).
+1. Download `T2AudioPort-1.0.13.19.zip` from [Releases](https://github.com/imacorpoliz/t2audiowindows/releases).
 2. Unpack the zip file to a clean folder, e.g. `C:\T2AudioPort`.
 3. Open **PowerShell as Administrator** (Start → search `powershell` → right-click → *Run as administrator*) and run:
 

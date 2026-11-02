@@ -636,7 +636,7 @@ function Invoke-Install {
     Write-PresetValues $Preset
     Set-Param 'EnableProduction' 1
     Set-Param 'HeadphoneOutput' 1
-    Set-Param 'SeparateHeadphoneEndpoint' 0
+    Set-Param 'SeparateHeadphoneEndpoint' 1
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
     Write-Ok 'Persistent mode on, crash guard reset.'

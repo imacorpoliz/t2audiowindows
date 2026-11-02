@@ -18,6 +18,11 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.19 (2026-11-02)
+- Re-enabled separate native Windows audio endpoints (`SeparateHeadphoneEndpoint = 1`) by default.
+- Windows exposes independent `Speakers` and `Headphones` endpoints with individual volume controls.
+- Automatic hardware jack detection (`KSEVENT_PINCAPS_JACKINFOCHANGE`) seamlessly switches default device and preserves independent volume levels between speakers and headphones.
+
 ### v1.0.13.18 (2026-11-02)
 - Upgraded headphone bs2b crossfeed IIR state from 32-bit `int` to 64-bit `long long`, eliminating 32-bit integer overflow on 24-bit audio that caused severe digital distortion/crackling.
 - Disabled `HeadphoneCrossfeed` by default (`0`) for pure, uncolored bit-exact direct headphone passthrough.

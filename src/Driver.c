@@ -822,7 +822,7 @@ T2AudioStartDeviceInner(
     // in Windows. Audio plays to speakers when unplugged, and automatically routes to
     // headphones when plugged in. Setting SeparateHeadphoneEndpoint=1 registers the legacy
     // second WaveHeadphone subdevice.
-    ULONG separateEndpoint = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SeparateHeadphoneEndpoint", 0);
+    ULONG separateEndpoint = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SeparateHeadphoneEndpoint", 1);
     if (separateEndpoint && context->HeadphoneOutput && context->HeadphoneBufferSize != 0) {
         NTSTATUS hpStatus = T2AudioRegisterHeadphoneFilters(DeviceObject, Irp, ResourceList, context);
 
