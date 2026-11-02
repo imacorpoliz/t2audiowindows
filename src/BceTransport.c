@@ -768,6 +768,10 @@ T2AudioJackWorkComplete(
 {
     KIRQL oldIrql;
 
+    if (WorkItem != NULL) {
+        IoFreeWorkItem(WorkItem);
+    }
+
     // Keep the running-count transition and event state under the same lock
     // as admission. Otherwise a new item could clear the event just before
     // this completion sets it, letting PnP teardown return too early.
@@ -777,9 +781,6 @@ T2AudioJackWorkComplete(
         KeSetEvent(&Context->JackWorkDone, IO_NO_INCREMENT, FALSE);
     }
     KeReleaseSpinLock(&Context->JackWorkLock, oldIrql);
-    if (WorkItem != NULL) {
-        IoFreeWorkItem(WorkItem);
-    }
 }
 
 static VOID

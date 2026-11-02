@@ -92,6 +92,10 @@ T2AudioResumeWorkComplete(
 {
     KIRQL oldIrql;
 
+    if (WorkItem != NULL) {
+        IoFreeWorkItem(WorkItem);
+    }
+
     // Keep the running-count transition and event state under the same lock
     // as admission, so a newly queued item cannot be hidden by an older
     // completion's event signal.
@@ -101,9 +105,6 @@ T2AudioResumeWorkComplete(
         KeSetEvent(&Context->ResumeWorkDone, IO_NO_INCREMENT, FALSE);
     }
     KeReleaseSpinLock(&Context->ResumeWorkLock, oldIrql);
-    if (WorkItem != NULL) {
-        IoFreeWorkItem(WorkItem);
-    }
 }
 
 static VOID

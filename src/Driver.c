@@ -349,9 +349,18 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     LONG oldTreble;
     LONG oldClarity;
     ULONG oldGain;
+    ULONG newDsp;
     ULONG dspGain;
     ULONG tweetTrim;
     ULONG woofLimit;
+    ULONG dspAutoGain;
+    LONG bassDb;
+    LONG trebleDb;
+    LONG clarityDb;
+    ULONG compStyle;
+    ULONG hpCrossfeed;
+    ULONG dspLoudness;
+    ULONG antiRattle;
 
     if (Context == NULL) {
         return;
@@ -363,25 +372,40 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     oldClarity = Context->ClarityDb;
     oldGain = Context->DspGainDb;
 
-    Context->SpeakerDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 3);
+    newDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SpeakerDsp", 3);
     
     dspGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspGainDb", 6);
-    Context->DspGainDb = (dspGain > 12) ? 12 : dspGain;
+    if (dspGain > 12) dspGain = 12;
 
     tweetTrim = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TweeterTrimDb", 0);
-    Context->TweeterTrimDb = (tweetTrim > 12) ? 12 : tweetTrim;
+    if (tweetTrim > 12) tweetTrim = 12;
 
     woofLimit = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"WooferLimitDb", 0);
-    Context->WooferLimitDb = (woofLimit > 12) ? 12 : woofLimit;
+    if (woofLimit > 12) woofLimit = 12;
 
-    Context->DspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
-    Context->BassDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"BassDb", 0));
-    Context->TrebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
-    Context->ClarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
-    Context->CompStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
-    Context->HeadphoneCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
-    Context->DspLoudness = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspLoudness", 0) ? 1u : 0u;
-    Context->AntiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
+    dspAutoGain = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspAutoGain", 0) ? 1u : 0u;
+    bassDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"BassDb", 0));
+    trebleDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"TrebleDb", 0));
+    clarityDb = T2AudioClampSignedDb(T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ClarityDb", 0));
+    compStyle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"CompStyle", 0) ? 1u : 0u;
+    hpCrossfeed = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneCrossfeed", 0) ? 1u : 0u;
+    dspLoudness = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"DspLoudness", 0) ? 1u : 0u;
+    antiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
+
+    // Stage all parameters in local variables first, then update atomically in memory
+    // with SpeakerDsp updated last so the DSP engine does not compute with partial state.
+    Context->DspGainDb = dspGain;
+    Context->TweeterTrimDb = tweetTrim;
+    Context->WooferLimitDb = woofLimit;
+    Context->DspAutoGain = dspAutoGain;
+    Context->BassDb = bassDb;
+    Context->TrebleDb = trebleDb;
+    Context->ClarityDb = clarityDb;
+    Context->CompStyle = compStyle;
+    Context->HeadphoneCrossfeed = hpCrossfeed;
+    Context->DspLoudness = dspLoudness;
+    Context->AntiRattle = antiRattle;
+    Context->SpeakerDsp = newDsp;
 
     if (oldDsp != Context->SpeakerDsp || oldBass != Context->BassDb ||
         oldTreble != Context->TrebleDb || oldClarity != Context->ClarityDb ||

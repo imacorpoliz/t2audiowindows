@@ -1147,6 +1147,7 @@ T2AudioStreamSetStateLocked(
             instance->HardwareIoStarted = FALSE;
         }
         if (!instance->Headphone && instance->DeviceContext != NULL &&
+            !instance->DeviceContext->HeadphoneFiltersRegistered &&
             instance->DeviceContext->HeadphoneIoActive != 0) {
             T2AudioStopIoDevice(instance->DeviceContext, instance->DeviceContext->HeadphoneDeviceId);
             InterlockedExchange(&instance->DeviceContext->HeadphoneIoActive, 0);
