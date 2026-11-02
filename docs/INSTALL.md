@@ -31,6 +31,10 @@ Or run directly via commands:
 
 `-Force` skips confirmation prompts.
 
+To apply the current registry settings without changing them, use
+`-Action Restart`. Feature switches restart the device once after all selected
+changes; audio is briefly interrupted.
+
 ## Presets
 
 | Preset | Description |

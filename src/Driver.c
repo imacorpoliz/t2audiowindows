@@ -519,6 +519,10 @@ T2AudioStartDeviceInner(
     KeInitializeMutex(&context->StreamMutex, 0);
     KeInitializeSpinLock(&context->HardwareLock);
     KeInitializeSpinLock(&context->ClockLock);
+    KeInitializeSpinLock(&context->JackWorkLock);
+    KeInitializeEvent(&context->JackWorkDone, NotificationEvent, TRUE);
+    KeInitializeSpinLock(&context->ResumeWorkLock);
+    KeInitializeEvent(&context->ResumeWorkDone, NotificationEvent, TRUE);
     T2AudioDetectHardwareModel(context);
 
     // Never start in Safe Mode. This driver programs device memory, and a fault
@@ -626,10 +630,9 @@ T2AudioStartDeviceInner(
     T2AudioReloadLiveParameters(context);
 
     // Groundwork for headphones and microphones (docs/ROADMAP.md sections 4-5),
-    // all 0/1 and off by default: ExtendedProbe logs every BCE device and the
-    // BufferStruct table (read-only); JackEvents subscribes to the headphone
-    // jack and tracks it; HeadphoneAutoMute (with JackEvents) silences the
-    // speakers while headphones are plugged in.
+    // all 0/1: ExtendedProbe logs every BCE device and the BufferStruct table
+    // (read-only); JackEvents subscribes to the headphone jack and tracks it;
+    // HeadphoneAutoMute (with JackEvents) silences speakers while plugged in.
     context->ExtendedProbe = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtendedProbe", 0) ? 1u : 0u;
     context->JackEvents = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"JackEvents", 0) ? 1u : 0u;
     // Experiment (read-only, needs JackEvents): read the jack at 8 addresses.
@@ -640,8 +643,8 @@ T2AudioStartDeviceInner(
     context->AntiRattle = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AntiRattle", 0) ? 1u : 0u;
     context->HeadphoneAutoMute = (context->JackEvents &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
-    // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off
-    // by default, so the default configuration is unchanged.
+    // Headphone endpoint is available by default; jack tracking, microphone
+    // capture, and resume-after-sleep remain opt-in safety features.
     context->HeadphoneOutput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneOutput", 1) ? 1u : 0u;
     context->HeadphoneAttenuation = T2AudioClampAttenuation(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
@@ -818,10 +821,9 @@ T2AudioStartDeviceInner(
     port->Release();
     topologyPort->Release();
 
-    // Separate headphone endpoint: by default (0), ONE unified audio device is exposed
-    // in Windows. Audio plays to speakers when unplugged, and automatically routes to
-    // headphones when plugged in. Setting SeparateHeadphoneEndpoint=1 registers the legacy
-    // second WaveHeadphone subdevice.
+    // Separate headphone endpoint: by default (1), Windows exposes the speaker
+    // and headphone filters as independent endpoints. Setting this to 0 uses
+    // the legacy unified path instead.
     ULONG separateEndpoint = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"SeparateHeadphoneEndpoint", 1);
     if (separateEndpoint && context->HeadphoneOutput && context->HeadphoneBufferSize != 0) {
         NTSTATUS hpStatus = T2AudioRegisterHeadphoneFilters(DeviceObject, Irp, ResourceList, context);

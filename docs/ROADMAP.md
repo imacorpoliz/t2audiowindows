@@ -1,6 +1,6 @@
 # T2AudioPort — Project Roadmap & Milestone Verification
 
-**Current Release:** v1.0.13.19  
+**Current Release:** v1.0.13.20
 **Target Hardware:** Apple MacBook Pro 16" (2019, `MacBookPro16,1`), Apple T2 Security Chip (`PCI\VEN_106B&DEV_1803`), Windows 11 Pro 64-bit.
 
 ---
@@ -16,9 +16,9 @@
 | **KAIT2EN Profile 16_1 DSP** | ✅ | ✅ Verified | 1.0.11 | Apple EQ biquads, crossover, lookahead peak limiter |
 | **Virtual Bass Synthesis (Bankstown)** | ✅ | ✅ Verified | 1.0.11 | Missing-fundamental harmonic generation (40–90 Hz) |
 | **Dynamic Loudness & Anti-Rattle** | ✅ | ✅ Verified | 1.0.13.12 | Fletcher-Munson low-volume boost + cone rattle limiter |
-| **Live DSP Parameter Tuning** | ✅ | ✅ Verified | 1.0.13.12 | 500 ms live reload of tone/presets without stream restart |
+| **Live DSP Parameter Tuning** | ✅ | ✅ Verified | 1.0.13.12 | 500 ms reload when `JackEvents=1`; installer applies changes with one safe device restart otherwise |
 | **Persistent Boot Mode & Crash Guard** | ✅ | ✅ Verified | 1.0.12 | Automatic Safe Mode after 2 unclean shutdowns |
-| **Sleep / Wake State Transitions** | ✅ | ✅ Verified | 1.0.13 | Clean power D0/D3 handling, audio resumes on lid open |
+| **Sleep / Wake State Transitions** | ✅ | ✅ Verified | 1.0.13 | Clean power D0/D3 handling; optional stream resume on lid open |
 | **Unified Headphone / Speaker Routing** | ✅ | ✅ Verified | 1.0.13.17 | Dynamic seamless switching between 6 speakers and 3.5 mm headphones with bs2b crossfeed and −12 dB attenuation |
 | **Bauer bs2b Binaural Crossfeed** | ✅ | ✅ Verified | 1.0.13.11 | Headphone crossfeed in 64-bit Q16 fixed point |
 | **Bidirectional Jack Auto-Switching** | ✅ | ✅ Verified | 1.0.13.13 | Hardware register poll + `KSEVENT_PINCAPS_JACKINFOCHANGE` |
@@ -33,13 +33,13 @@
 
 ## 1. Core Milestones (MacBookPro16,1) — 100% COMPLETE
 
-All primary objectives required to completely replace `AppleAudio.sys` on the 16-inch MacBook Pro have been implemented, verified on physical hardware, and delivered in release v1.0.13.19:
+All primary objectives required to completely replace `AppleAudio.sys` on the 16-inch MacBook Pro have been implemented, verified on physical hardware, and delivered in release v1.0.13.20:
 
 1. ✅ **Audio Quality:** Full 6-speaker macOS soundstage with deep bass and clean highs.
 2. ✅ **Reliability:** Zero crashes on boot, sleep, wake, or format switching.
 3. ✅ **Seamless I/O:** Automatic plug/unplug switching between 3.5 mm headphones and internal speakers.
 4. ✅ **Input:** Studio-quality beamforming microphone recording.
-5. ✅ **Live Control:** Instant sound preset and tone switching via `T2Audio-Setup.ps1`.
+5. ✅ **Live Control:** Sound preset and tone switching via `T2Audio-Setup.ps1`, with one safe device restart.
 
 ---
 

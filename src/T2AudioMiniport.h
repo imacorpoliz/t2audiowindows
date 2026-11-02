@@ -96,9 +96,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // before D3) sends the one matching STOP_IO.
     volatile LONG HardwareIoActive;
     ULONG64 BceSpeakerDeviceId;
-    // Headphone jack (first step, read-only): the BCE device "Codec Output"
-    // and its 'jack' state at probe time (1 = plugged). Logged only; the
-    // headphone output itself is not driven yet (docs/HEADPHONES.md).
+    // Headphone jack: the BCE device "Codec Output" and its 'jack' state
+    // (1 = plugged). Jack reads drive the separate headphone endpoint's
+    // Windows jack state when JackEvents is enabled.
     ULONG64 BceHeadphoneDeviceId;
     volatile LONG HeadphoneJackPlugged;
     // Jack events (Parameters\JackEvents=1): a PROPERTY_LISTENER on
@@ -112,6 +112,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG DspLoudness;
     ULONG AntiRattle;
     BOOLEAN JackListenerRegistered;
+    // Serialises jack-work admission with PnP stop. The stop flag alone is
+    // not sufficient: a queue request could pass its check while teardown
+    // was already waiting for the old running count.
+    KSPIN_LOCK JackWorkLock;
+    KEVENT JackWorkDone;
     volatile LONG JackWorkPending;
     volatile LONG JackEventCount;
     // Jack polling (with JackEvents): bridgeOS sent no PROPERTY_CHANGED on
@@ -137,7 +142,7 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 HeadsetMicStreamId;
     BOOLEAN HeadsetMicFormatValid;
     ULONG HeadsetMicLatencyFrames;
-    // Headphone output (Parameters\HeadphoneOutput=1, default 0; ROADMAP 4.4).
+    // Headphone output (Parameters\HeadphoneOutput=1, default 1; ROADMAP 4.4).
     // A second WaveRT + topology filter pair renders to the "Codec Output"
     // device: its ring is located in BufferStruct at MapResources, its
     // stream format read at the BCE probe, and its START_IO/STOP_IO use the
@@ -208,6 +213,10 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // serialises that with SetState. Index 0 = speaker, 1 = headphones.
     ULONG ResumeAfterSleep;
     KMUTEX StreamMutex;
+    // Serialises resume-work admission with PnP stop and lets stop wait for
+    // both queued and currently executing work items without a timeout.
+    KSPIN_LOCK ResumeWorkLock;
+    KEVENT ResumeWorkDone;
     PVOID RunningStream[2];
     volatile LONG ResumeWorkPending;
     volatile LONG ResumeWorkRunning;

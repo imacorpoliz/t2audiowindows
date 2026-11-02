@@ -61,7 +61,8 @@ function Get-CurrentDriverType {
     return $svc
 }
 
-# Preset definitions for instant on-the-fly switching
+# Preset definitions for quick switching. The setup script restarts the audio
+# device once after writing them, so the kernel driver cannot keep stale state.
 $PresetDefinitions = [ordered]@{
     "macos"   = @{ Title = "Like macOS (Balanced & Clean)"; BassDb = 0;  TrebleDb = 0; ClarityDb = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 0; DspAutoGain = 0; CompStyle = 0; SpeakerDsp = 3 }
     "bass"    = @{ Title = "Deep Punchy Bass Boost";       BassDb = 6;  TrebleDb = 0; ClarityDb = 0; DspGainDb = 6; TweeterTrimDb = 0; WooferLimitDb = 2; DspAutoGain = 0; CompStyle = 1; SpeakerDsp = 4 }
@@ -72,7 +73,7 @@ $PresetDefinitions = [ordered]@{
 }
 
 # -------------------------------------------------------------
-# Quick Preset Switcher (Instant On-The-Fly)
+# Quick Preset Switcher
 # -------------------------------------------------------------
 function Set-SoundPreset([string]$name) {
     Write-Header "Applying Sound Preset: $name"
@@ -95,20 +96,23 @@ function Set-SoundPreset([string]$name) {
     }
 
     $drv = Get-CurrentDriverType
-    $jackEvents = (Get-ItemProperty -Path $paramPath -Name "JackEvents" -ErrorAction SilentlyContinue).JackEvents
     if ($drv -ne "T2AudioPort") {
         Write-Warn "T2AudioPort driver is not currently active ($drv in use)."
         Write-Info "Preset saved to registry; it will take effect when T2AudioPort is enabled."
-    } elseif ($jackEvents -eq 0) {
-        Write-Warn "Headphone JackEvents is disabled; periodic live parameter reload in driver is inactive."
-        Write-Info "Restarting audio device to apply changes..."
-        if (Test-Path $T2SetupScript) {
-            powershell -ExecutionPolicy Bypass -File $T2SetupScript -Action Restart -Force
-        }
     } else {
-        Write-Ok "Preset '$name' ($($p.Title)) applied in real-time!"
-        Write-Info "Active tuning: Bass=$($p.BassDb) dB | Treble=$($p.TrebleDb) dB | Clarity=$($p.ClarityDb) dB | Gain=$($p.DspGainDb) dB"
-        Write-Info "Driver live DSP updates parameters within 500 ms without stopping audio."
+        Write-Info "Restarting the audio device once to apply the preset safely..."
+        if (Test-Path $T2SetupScript) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $T2SetupScript -Action Preset -Preset $key -Force
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "Preset '$name' ($($p.Title)) applied."
+                Write-Info "Active tuning: Bass=$($p.BassDb) dB | Treble=$($p.TrebleDb) dB | Clarity=$($p.ClarityDb) dB | Gain=$($p.DspGainDb) dB"
+            } else {
+                Write-Warn "The preset was saved, but the device restart returned code $LASTEXITCODE."
+            }
+        } else {
+            Write-Warn "Setup script not found: $T2SetupScript"
+            Write-Info "The preset was saved; restart the T2 device or run T2Audio-Setup.ps1 -Action Preset manually."
+        }
     }
 }
 
@@ -392,7 +396,7 @@ function Show-MainMenu {
      [3] Save manual settings snapshot
      [R] Restore settings snapshot
 
-   SOUND PRESETS (Instant On-The-Fly Switching):
+   SOUND PRESETS (Safe switching with one device restart):
      [4] Preset 'macos'  (Balanced & clean Apple tone)
      [5] Preset 'bass'   (Deep punchy bass boost)
      [6] Preset 'bright' (Crystal clear treble & air)

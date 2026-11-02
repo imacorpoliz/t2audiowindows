@@ -1,9 +1,10 @@
 [Version]
 Signature="$WINDOWS NT$"
+PnpLockdown=1
 Class=Media
 ClassGuid={4D36E96C-E325-11CE-BFC1-08002BE10318}
 Provider=%ProviderName%
-DriverVer=11/02/2026,1.0.13.19
+DriverVer=11/02/2026,1.0.13.20
 CatalogFile=T2AudioMiniport.cat
 
 [Manufacturer]

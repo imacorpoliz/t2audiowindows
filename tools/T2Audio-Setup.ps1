@@ -28,12 +28,12 @@
 # Safe Mode.
 #
 # Needs administrator rights, testsigning on and a signed package in
-# packaging\ (T2AudioMiniport.inf/.sys/.cat), built as in GEMINI.md section 2.
+# packaging\ (T2AudioMiniport.inf/.sys/.cat).
 # Saved as UTF-8 with BOM (Windows PowerShell 5.1 needs it for the symbols).
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Prepare', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'UpdateGuard', 'Status',
+    [ValidateSet('Menu', 'Prepare', 'Install', 'Preset', 'Tune', 'Balance', 'Features', 'Restart', 'UpdateGuard', 'Status',
                  'Doctor', 'Switch', 'Shortcut', 'SoundTest', 'MicTest', 'Backup', 'Restore', 'Report',
                  'ResetGuard', 'Uninstall')]
     [string]$Action = 'Menu',
@@ -54,6 +54,9 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$Microphone,      # built-in microphones
     [ValidateRange(0, 1)] [Nullable[int]]$ResumeAfterSleep,# sound comes back after sleep by itself
     [ValidateRange(0, 1)] [Nullable[int]]$ExtraFormats,    # 16/24-bit for exclusive-mode apps
+    [ValidateRange(0, 1)] [Nullable[int]]$HeadphoneCrossfeed, # bs2b headphone crossfeed
+    [ValidateRange(0, 1)] [Nullable[int]]$DspLoudness,     # low-volume loudness curve
+    [ValidateRange(0, 1)] [Nullable[int]]$AntiRattle,      # extra woofer protection
 
     # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
     # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
@@ -608,7 +611,7 @@ function Invoke-Install {
         return
     }
     foreach ($f in @($InfPath, $SysPath, $CatPath)) {
-        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Package file missing: $f (build and sign it as in GEMINI.md section 2)"; return }
+        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Package file missing: $f (build and sign the driver package first)"; return }
     }
     $sig = Get-AuthenticodeSignature -LiteralPath $SysPath
     if (-not $sig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys is not signed.'; return }
@@ -657,7 +660,7 @@ function Invoke-Install {
         Set-T2Volume $Volume
         Write-Host ''
         Write-Info 'Pick the Apple T2 "Speakers" as the output in Sound settings if Windows did not do it by itself.'
-        Write-Info 'Change the preset any time: .\T2Audio-Setup.ps1 -Action Preset -Preset bright'
+        Write-Info 'Change the preset any time: .\T2Audio-Setup.ps1 -Action Preset -Preset bright (the device restarts once)'
     } elseif ($r.Code -eq 3010) {
         Write-Warn 'Windows asks for a reboot to finish the installation.'
     } else {
@@ -817,52 +820,183 @@ function Invoke-Uninstall {
     }
 }
 
-# Optional driver features (1.0.13.x; all off by default, all verified on
-# hardware 2026-10-29). Headphones = HeadphoneOutput + JackEvents (jack
-# tracking) + HeadphoneAutoMute (speakers silent while headphones are in).
-$FeatureParams = [ordered]@{
-    Headphones       = @('JackEvents', 'HeadphoneAutoMute')
-    Microphone       = @('MicInput', 'MicStartIo')   # recording verified on 1.0.13.4
-    ResumeAfterSleep = @('ResumeAfterSleep')
-    ExtraFormats     = @('ExtraFormats')
-}
-$FeatureTitles = @{
-    Headphones = 'Headphones (3.5 mm output)'; Microphone = 'Built-in microphones'
-    ResumeAfterSleep = 'Sound back after sleep by itself'; ExtraFormats = '16/24-bit formats'
-}
-
-function Show-Features {
-    foreach ($f in $FeatureParams.Keys) {
-        $on = ((Get-Param $FeatureParams[$f][0]) -eq 1)
-        Write-Host ("   {0,-46} {1}" -f $FeatureTitles[$f], $(if ($on) { 'on' } else { 'off' })) -ForegroundColor White
+# Optional driver features. Every group has explicit ON and OFF values so the
+# menu can safely turn a feature off again instead of changing only its first
+# registry value. All values are read when the device starts; applying a group
+# therefore performs one device restart after all changes.
+$FeatureDefinitions = [ordered]@{
+    Headphones = [ordered]@{
+        Title = 'Headphones (3.5 mm output + auto-switch)'
+        Params = @('HeadphoneOutput', 'SeparateHeadphoneEndpoint', 'JackEvents', 'HeadphoneAutoMute')
+        On = @{ HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 1; HeadphoneAutoMute = 1 }
+        Off = @{ HeadphoneOutput = 0; SeparateHeadphoneEndpoint = 0; JackEvents = 0; HeadphoneAutoMute = 0 }
+    }
+    Microphone = [ordered]@{
+        Title = 'Built-in microphones'
+        Params = @('MicInput', 'MicStartIo')
+        On = @{ MicInput = 1; MicStartIo = 1 }
+        Off = @{ MicInput = 0; MicStartIo = 0 }
+    }
+    ResumeAfterSleep = [ordered]@{
+        Title = 'Resume sound after sleep'
+        Params = @('ResumeAfterSleep')
+        On = @{ ResumeAfterSleep = 1 }
+        Off = @{ ResumeAfterSleep = 0 }
+    }
+    ExtraFormats = [ordered]@{
+        Title = '16/24-bit exclusive-mode formats'
+        Params = @('ExtraFormats')
+        On = @{ ExtraFormats = 1 }
+        Off = @{ ExtraFormats = 0 }
+    }
+    HeadphoneCrossfeed = [ordered]@{
+        Title = 'Headphone bs2b crossfeed'
+        Params = @('HeadphoneCrossfeed')
+        On = @{ HeadphoneCrossfeed = 1 }
+        Off = @{ HeadphoneCrossfeed = 0 }
+    }
+    DspLoudness = [ordered]@{
+        Title = 'Low-volume loudness compensation'
+        Params = @('DspLoudness')
+        On = @{ DspLoudness = 1 }
+        Off = @{ DspLoudness = 0 }
+    }
+    AntiRattle = [ordered]@{
+        Title = 'Extra woofer anti-rattle protection'
+        Params = @('AntiRattle')
+        On = @{ AntiRattle = 1 }
+        Off = @{ AntiRattle = 0 }
     }
 }
 
+# Restart the active PnP device without changing any registry settings.
+function Invoke-Restart {
+    Write-Section 'Restarting T2AudioPort'
+    $null = Restart-T2Device
+}
+
+# Effective defaults are important: an absent registry value is not always
+# equivalent to zero (HeadphoneOutput and SeparateHeadphoneEndpoint default 1).
+$FeatureDefaults = @{
+    HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 0; HeadphoneAutoMute = 0
+    MicInput = 0; MicStartIo = 0; ResumeAfterSleep = 0; ExtraFormats = 0
+    HeadphoneCrossfeed = 0; DspLoudness = 0; AntiRattle = 0
+}
+
+# Read one feature value, including the driver's effective default.
+function Get-FeatureParam($name) {
+    $v = Get-Param $name
+    if ($null -eq $v) { return [int]$FeatureDefaults[$name] }
+    return [int]$v
+}
+
+# Return ON, OFF, or PARTIAL when a feature group has mixed values.
+function Get-FeatureState($name) {
+    $def = $FeatureDefinitions[$name]
+    $values = @($def.Params | ForEach-Object { Get-FeatureParam $_ })
+    $onCount = @($values | Where-Object { $_ -ne 0 }).Count
+    if ($onCount -eq $values.Count) { return 'ON' }
+    if ($onCount -eq 0) { return 'OFF' }
+    return 'PARTIAL'
+}
+
+# Draw the feature switchboard and any changes waiting to be applied.
+function Show-Features([hashtable]$Pending = $null) {
+    $i = 1
+    foreach ($f in $FeatureDefinitions.Keys) {
+        $state = Get-FeatureState $f
+        $pendingText = ''
+        if ($Pending -and $Pending.Contains($f)) {
+            $pendingText = "  -> $(if ($Pending[$f] -eq 1) { 'ON' } else { 'OFF' })"
+        }
+        $color = switch ($state) { 'ON' { 'Green' } 'PARTIAL' { 'Yellow' } default { 'DarkGray' } }
+        Write-Host ("   {0,2}. {1,-46} {2,-7}{3}" -f $i, $FeatureDefinitions[$f].Title, $state, $pendingText) -ForegroundColor $color
+        $i++
+    }
+}
+
+# Collect the optional command-line switches in one predictable table.
+function Get-FeatureArgumentValues {
+    return [ordered]@{
+        Headphones = $Headphones; Microphone = $Microphone; ResumeAfterSleep = $ResumeAfterSleep
+        ExtraFormats = $ExtraFormats; HeadphoneCrossfeed = $HeadphoneCrossfeed
+        DspLoudness = $DspLoudness; AntiRattle = $AntiRattle
+    }
+}
+
+# Let the user toggle several features before restarting the device once.
+function Invoke-InteractiveFeaturePicker {
+    $pending = @{}
+    $names = @($FeatureDefinitions.Keys)
+    while ($true) {
+        Write-Section 'Feature switchboard'
+        Show-Features $pending
+        Write-Host ''
+        Write-Info 'Enter a number to toggle it, A = apply all, R = reset choices, Q = cancel.'
+        $choice = (Read-Host '  Choice').Trim()
+        if ($choice -match '^(q|quit)$') { return $null }
+        if ($choice -match '^(a|apply)$') { return $pending }
+        if ($choice -match '^(r|reset)$') { $pending = @{}; continue }
+        $n = 0
+        if ([int]::TryParse($choice, [ref]$n) -and $n -ge 1 -and $n -le $names.Count) {
+            $name = $names[$n - 1]
+            # Toggle the displayed/pending state, not only the registry state.
+            # Selecting the same item twice must return it to its original value.
+            $originalOn = (Get-FeatureState $name) -eq 'ON'
+            $currentOn = if ($pending.ContainsKey($name)) { $pending[$name] -eq 1 } else { $originalOn }
+            $next = if ($currentOn) { 0 } else { 1 }
+            if ($pending.ContainsKey($name) -and (($next -eq 1) -eq $originalOn)) {
+                $pending.Remove($name)
+            } else {
+                $pending[$name] = $next
+            }
+        } else {
+            Write-Warn 'Choose one of the listed numbers, A, R, or Q.'
+        }
+    }
+}
+
+# Apply feature groups, normalize dependencies, then restart the T2 device.
 function Invoke-Features([switch]$Interactive) {
     Write-Section 'Optional features'
     $changes = [ordered]@{}
     if ($Interactive) {
-        foreach ($f in $FeatureParams.Keys) {
-            $cur = ((Get-Param $FeatureParams[$f][0]) -eq 1)
-            $a = Read-Host ("  {0} (now {1}): 1 = on, 0 = off, Enter = unchanged" -f $FeatureTitles[$f], $(if ($cur) { 'on' } else { 'off' }))
-            if ($a -eq '0' -or $a -eq '1') { $changes[$f] = [int]$a }
-        }
+        $picked = Invoke-InteractiveFeaturePicker
+        if ($null -eq $picked) { Write-Info 'No changes applied.'; return }
+        foreach ($name in $picked.Keys) { $changes[$name] = [int]$picked[$name] }
     } else {
-        foreach ($f in $FeatureParams.Keys) {
-            $v = Get-Variable -Name $f -Scope Script -ValueOnly -ErrorAction SilentlyContinue
-            if ($null -ne $v) { $changes[$f] = [int]$v }
+        $requested = Get-FeatureArgumentValues
+        foreach ($name in $requested.Keys) {
+            if ($null -ne $requested[$name]) { $changes[$name] = [int]$requested[$name] }
         }
     }
     if ($changes.Count -eq 0) {
         Show-Features
-        Write-Info 'Nothing changed. Example: .\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1'
+        Write-Info 'Nothing changed. Use the menu or specify a feature switch.'
         return
     }
-    foreach ($f in $changes.Keys) {
-        foreach ($n in $FeatureParams[$f]) { Set-Param $n $changes[$f] }
-        Write-Ok ("{0}: {1}" -f $FeatureTitles[$f], $(if ($changes[$f] -eq 1) { 'on' } else { 'off' }))
+
+    # Turning the parent feature off also disables its dependent settings.
+    if ($changes.Contains('Headphones') -and $changes['Headphones'] -eq 0) {
+        if ((Get-FeatureParam 'HeadphoneCrossfeed') -ne 0 -or
+            ($changes.Contains('HeadphoneCrossfeed') -and $changes['HeadphoneCrossfeed'] -ne 0)) {
+            Write-Warn 'Headphone crossfeed needs the headphone output; it will be turned off too.'
+        }
+        $changes['HeadphoneCrossfeed'] = 0
+    } elseif ($changes.Contains('HeadphoneCrossfeed') -and $changes['HeadphoneCrossfeed'] -eq 1 -and
+              (Get-FeatureState 'Headphones') -eq 'OFF') {
+        Write-Warn 'Headphone crossfeed needs the headphone output; enabling headphones too.'
+        $changes['Headphones'] = 1
     }
-    Write-Warn 'If something goes wrong: .\T2Audio-Setup.ps1 -Action Features -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0'
+
+    foreach ($name in $changes.Keys) {
+        $def = $FeatureDefinitions[$name]
+        $values = if ($changes[$name] -eq 1) { $def.On } else { $def.Off }
+        foreach ($paramName in $values.Keys) { Set-Param $paramName $values[$paramName] }
+        Write-Ok ("{0}: {1}" -f $def.Title, $(if ($changes[$name] -eq 1) { 'ON' } else { 'OFF' }))
+    }
+    Write-Warn 'The audio device will restart once so every selected setting is applied safely.'
+    Write-Info 'If something goes wrong, run this menu again and turn the experimental features OFF.'
     $null = Restart-T2Device
 }
 
@@ -1220,6 +1354,7 @@ switch ($Action) {
     'Preset'     { Write-Banner; Invoke-Preset }
     'Tune'       { Write-Banner; Invoke-Tune }
     'Features'   { Write-Banner; Invoke-Features }
+    'Restart'    { Write-Banner; Invoke-Restart }
     'UpdateGuard' { Write-Banner; Invoke-UpdateGuard }
     'Balance'    { Write-Banner; Write-Section 'Balance'; $v = if ($Volume -ge 0) { $Volume } else { 0.3 }; Set-T2Volume $v }
     'Status'     { Write-Banner; Invoke-Status }

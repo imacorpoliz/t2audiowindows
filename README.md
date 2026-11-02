@@ -15,8 +15,8 @@ Replaces the quiet, flat, and buggy Boot Camp audio driver with full **macOS-gra
 
 - 🔊 **6 Physical Speakers:** Uses all 4 force-cancelling woofers and 2 tweeters simultaneously.
 - 🎵 **macOS Sound Quality:** Built-in hardware DSP with Apple-matched EQ curves and James Calligeros' virtual sub-bass generator.
-- 🔄 **Auto-Switching Headphones:** Plug in your 3.5 mm headphones and the sound moves to headphones instantly; unplug and it returns to speakers.
-- 🎙️ **Built-in Microphones:** Full 3-microphone studio array with beamforming noise reduction.
+- 🔄 **Auto-Switching Headphones:** Optional jack tracking moves sound between the separate headphone and speaker endpoints on plug/unplug.
+- 🎙️ **Built-in Microphones:** Optional 3-microphone studio array with beamforming noise reduction.
 - 🎬 **5.1 Virtual Surround:** Expands movies and games across the 6 physical speakers with acoustic crosstalk cancellation.
 - 🛡️ **Crash Guard:** Automatically protects against boot loops and recovers smoothly.
 - ⚡ **Zero Bloat:** Minimal package — just the signed driver and a setup script. No background telemetry or heavy software.
@@ -42,13 +42,16 @@ Open **PowerShell as Administrator** in the folder and run:
 .\tools\T2Audio-Setup.ps1 -Action Install -Preset macos
 ```
 
-**That's it!** Your speakers, headphones, and microphone are now active.
+**That's it!** Your T2 speakers and the separate headphone endpoint are active.
+Automatic jack switching and microphone capture can be enabled later from the
+installer menu.
 
 ---
 
 ## 🎛️ Sound Tuning & Presets
 
-You can change sound profiles anytime with one command:
+You can change sound profiles anytime with one command. The installer writes
+the setting and restarts the T2 audio device once so the driver picks it up:
 
 ```powershell
 # Interactive menu:
@@ -65,6 +68,47 @@ You can change sound profiles anytime with one command:
 # Custom equalizer (+/- 12 dB):
 .\tools\T2Audio-Setup.ps1 -Action Tune -BassDb 3 -TrebleDb 2
 ```
+
+## 🎚️ Feature switchboard
+
+Run the installer without arguments as Administrator:
+
+```powershell
+.\tools\T2Audio-Setup.ps1
+```
+
+Choose **6. Optional features**. The switchboard shows every feature as
+`ON`, `OFF`, or `PARTIAL`. Enter feature numbers to toggle several items,
+then choose **A** to apply them together, **R** to reset the pending choices,
+or **Q** to cancel. The device is restarted only once after applying changes.
+
+The switchboard controls:
+
+- **Headphones** — separate 3.5 mm endpoint, jack detection, automatic
+  speaker muting, and Windows endpoint switching;
+- **Built-in microphones** — microphone array capture;
+- **Resume sound after sleep** — restore active streams after power wake;
+- **16/24-bit formats** — extra exclusive-mode PCM formats;
+- **Headphone bs2b crossfeed** — optional binaural crossfeed (off by default);
+- **Low-volume loudness compensation** and **extra woofer anti-rattle
+  protection**.
+
+The same settings can be changed without the menu:
+
+```powershell
+# Enable headphones and microphone; one device restart applies both.
+.\tools\T2Audio-Setup.ps1 -Action Features -Headphones 1 -Microphone 1
+
+# Disable every experimental feature.
+.\tools\T2Audio-Setup.ps1 -Action Features `
+    -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0 `
+    -HeadphoneCrossfeed 0 -DspLoudness 0 -AntiRattle 0
+```
+
+Feature changes are deliberately applied with a device restart rather than
+claiming they are all live. This prevents stale state in the kernel driver and
+ensures dependent settings (for example, headphone auto-mute) are changed
+together. A short interruption of audio is expected.
 
 ---
 

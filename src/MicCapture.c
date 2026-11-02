@@ -51,6 +51,25 @@ T2AudioMicFindDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     return -1;
 }
 
+// The boot-time table was validated only through BufferStructDevices. Check
+// the next entry against the actual mapped BAR before AppleAudio-style append.
+// Caller holds HardwareLock.
+static BOOLEAN
+T2AudioMicCanAppendDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    SIZE_T baseOffset;
+    SIZE_T required;
+
+    if (Context->BufferStruct == NULL || Context->Bar1Mapped == NULL ||
+        Context->BufferStructDevices >= T2AUDIO_MAX_DEVICES) {
+        return FALSE;
+    }
+    baseOffset = (SIZE_T)((PUCHAR)Context->BufferStruct - (PUCHAR)Context->Bar1Mapped);
+    required = FIELD_OFFSET(T2AUDIO_BUFFER_STRUCT, Devices) +
+        ((SIZE_T)Context->BufferStructDevices + 1) * sizeof(T2AUDIO_DEVICE_METADATA);
+    return baseOffset <= Context->Bar1Size && required <= Context->Bar1Size - baseOffset;
+}
+
 // Find existing "Digital Mic" or append a new device entry to BufferStruct,
 // exactly matching AppleAudio.sys FUN_140004558 (which appends "Digital Mic"
 // and increments NumDevices if not present at boot).
@@ -64,10 +83,7 @@ T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (index >= 0) {
         return index;
     }
-    if (Context->BufferStruct != NULL && Context->BufferStructDevices < T2AUDIO_MAX_DEVICES &&
-        Context->Bar1Mapped != NULL &&
-        (SIZE_T)((PUCHAR)&Context->BufferStruct->Devices[Context->BufferStructDevices + 1] -
-                 (PUCHAR)Context->Bar1Mapped) <= Context->Bar1Size) {
+    if (T2AudioMicCanAppendDeviceLocked(Context)) {
         // (The new entry must lie inside the mapped BAR1: MapResources only
         // validated the table up to the devices present at boot.)
         ULONG newIdx = Context->BufferStructDevices;
@@ -89,16 +105,24 @@ T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 BOOLEAN
 T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
+    KIRQL oldIrql;
+    BOOLEAN present = FALSE;
+
     if (Context == NULL || !Context->HardwareReady || Context->BufferStruct == NULL) {
         return FALSE;
     }
+    KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
     // If "Digital Mic" is already present in BufferStruct, return TRUE.
     if (T2AudioMicFindDeviceLocked(Context) >= 0) {
-        return TRUE;
+        present = TRUE;
+    } else if (T2AudioMicCanAppendDeviceLocked(Context)) {
+        // AppleAudio dynamically appends "Digital Mic". Check the actual
+        // mapped BAR capacity as well as the logical device-count limit; a
+        // short table may have room for fewer entries than MAX_DEVICES.
+        present = TRUE;
     }
-    // AppleAudio.sys dynamically appends "Digital Mic" to BufferStruct (FUN_140004558)
-    // if not already present. As long as BufferStruct has space, mic is supported.
-    return (Context->BufferStructDevices < T2AUDIO_MAX_DEVICES) ? TRUE : FALSE;
+    KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
+    return present;
 }
 
 // Write (Address != 0) or clear (Address == 0) input_streams[0] of the mic

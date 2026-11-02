@@ -18,6 +18,22 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.20 (2026-11-02)
+- Fixed jack polling admission and teardown synchronization; the poll now starts
+  only when jack events and a valid headphone device are available.
+- Replaced fixed teardown timeouts for jack/resume work items with lock-protected
+  completion events, preventing device-context use-after-free during PnP stop.
+- Hardened Digital Mic table-capacity validation and the installer feature
+  switchboard; preset/feature changes apply with one safe device restart.
+- Host test executables pass; physical hardware validation of these new changes
+  remains pending in the current environment.
+- Release artifacts: `T2AudioMiniport.sys` SHA256
+  `632FD1D84AB411EF0093AAA2AD03F475803A6790EFA69A6CB0A635C5D0BDC45E`;
+  `t2audiominiport.cat` SHA256
+  `9A4685F00BF65E97FABA13C7F118BE73ABDB7DEA04849E6ED1AED91DAFCEFEE1`;
+  ZIP SHA256
+  `CEF13C9DCE6721884F6D5546934FEDB7CCCFAF9E5265634E3D3A7FB975641213`.
+
 ### v1.0.13.19 (2026-11-02)
 - Re-enabled separate native Windows audio endpoints (`SeparateHeadphoneEndpoint = 1`) by default.
 - Windows exposes independent `Speakers` and `Headphones` endpoints with individual volume controls.

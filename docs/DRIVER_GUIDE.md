@@ -29,6 +29,9 @@
 
 All subsystems have been verified on physical hardware on `MacBookPro16,1`:
 
+The v1.0.13.20 teardown and installer changes were host-tested and statically
+audited here; a physical hardware rerun was not available in this environment.
+
 | Subsystem / Feature | Status | Implementation Details |
 |---|:---:|---|
 | **Build & CI** | ✅ **Verified** | Windows Server 2022 / WDK, Release x64, automated GitHub Actions. |
@@ -42,8 +45,8 @@ All subsystems have been verified on physical hardware on `MacBookPro16,1`:
 | **Bidirectional Jack Switching** | ✅ **Verified** | Dynamic presence detection, `KSEVENT_PINCAPS_JACKINFOCHANGE`, `HeadphoneAutoMute`. |
 | **Headphone Output & Crossfeed** | ✅ **Verified** | Separate WaveRT endpoint, −12 dB safety cut, Bauer bs2b binaural crossfeed. |
 | **Built-in Microphones** | ✅ **Verified** | 3-mic studio array capture, host DMA buffer registration, array geometry. |
-| **Live Parameter Tuning** | ✅ **Verified** | Real-time 500 ms registry reload of EQ/presets without audio interruption. |
-| **Sleep / Wake (S3 / Standby)**| ✅ **Verified** | Clean D0/D3 power handling, audio streams resume automatically on wake. |
+| **Live Parameter Tuning** | ✅ **Verified** | Registry reload is available from the 500 ms jack work item when `JackEvents=1`; the installer restarts the device for reliable application. |
+| **Sleep / Wake (S3 / Standby)**| ✅ **Verified** | Clean D0/D3 power handling; optional stream resume with `ResumeAfterSleep=1`. |
 | **Crash Guard** | ✅ **Verified** | Automatic fallback to safe mode if two ungraceful shutdowns occur. |
 | **SMBIOS Model Auto-Detect** | ✅ **Verified** | Dynamic kernel reading of `SystemProductName` from BIOS registry. |
 
@@ -200,8 +203,10 @@ To prevent infinite boot loops if a bugcheck occurs, the driver maintains an arm
 - `CrashGuardStrikes`: Incremented if Windows boots while `CrashGuardArmed` was still `1`.
 - If `CrashGuardStrikes >= 2`, the driver enters Safe Mode and refuses to load until reset via `T2Audio-Setup.ps1 -Action ResetGuard`.
 
-### 9.2 Live Parameters (Reloaded every 500 ms)
-Parameters can be tuned live without stopping audio:
+### 9.2 Live Parameters
+The driver can reload these values from its 500 ms jack work item when
+`JackEvents=1`. For normal configuration, the installer restarts the audio
+device after changing them so the result does not depend on jack polling:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -210,11 +215,11 @@ Parameters can be tuned live without stopping audio:
 | `BassDb` | DWORD | `0` | 150 Hz low-shelf tone adjustment (−12..+12 dB) |
 | `TrebleDb` | DWORD | `0` | 6 kHz high-shelf tone adjustment (−12..+12 dB) |
 | `ClarityDb` | DWORD | `0` | 2.5 kHz presence boost (−12..+12 dB) |
-| `HeadphoneCrossfeed` | DWORD | `1` | Bauer bs2b binaural crossfeed for headphones |
-| `HeadphoneAutoMute` | DWORD | `1` | Automatically mutes speakers when headphones plugged in |
+| `HeadphoneCrossfeed` | DWORD | `0` | Bauer bs2b binaural crossfeed for headphones |
+| `HeadphoneAutoMute` | DWORD | `0` | Automatically mutes speakers when headphones plugged in |
 | `AntiRattle` | DWORD | `0` | Low-frequency cone excursion protection limiter |
 | `DspLoudness` | DWORD | `0` | Dynamic loudness compensation curve at low volumes |
-| `ResumeAfterSleep` | DWORD | `1` | Automatic stream restoration after Modern Standby / Sleep |
+| `ResumeAfterSleep` | DWORD | `0` | Automatic stream restoration after Modern Standby / Sleep |
 
 ---
 

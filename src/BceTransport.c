@@ -759,6 +759,29 @@ T2AudioRegisterJackListener(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 static IO_WORKITEM_ROUTINE T2AudioJackWorkRoutine;
 static VOID T2AudioJackProbeVariants(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ LONG Poll);
 
+// Finish one jack work item and wake PnP stop when the last admitted item is
+// gone. This is also used for allocation failure, so the wait cannot wedge.
+static VOID
+T2AudioJackWorkComplete(
+    _Inout_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_opt_ PIO_WORKITEM WorkItem)
+{
+    KIRQL oldIrql;
+
+    // Keep the running-count transition and event state under the same lock
+    // as admission. Otherwise a new item could clear the event just before
+    // this completion sets it, letting PnP teardown return too early.
+    KeAcquireSpinLock(&Context->JackWorkLock, &oldIrql);
+    InterlockedExchange(&Context->JackWorkPending, 0);
+    if (InterlockedDecrement(&Context->JackWorkRunning) == 0) {
+        KeSetEvent(&Context->JackWorkDone, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLock(&Context->JackWorkLock, oldIrql);
+    if (WorkItem != NULL) {
+        IoFreeWorkItem(WorkItem);
+    }
+}
+
 static VOID
 T2AudioJackWorkRoutine(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -774,12 +797,10 @@ T2AudioJackWorkRoutine(
     PAGED_CODE();
 
     if (context == NULL || context->JackPollStop != 0) {
-        if (workItem != NULL) {
-            IoFreeWorkItem(workItem);
-        }
         if (context != NULL) {
-            InterlockedDecrement(&context->JackWorkRunning);
-            InterlockedExchange(&context->JackWorkPending, 0);
+            T2AudioJackWorkComplete(context, workItem);
+        } else if (workItem != NULL) {
+            IoFreeWorkItem(workItem);
         }
         return;
     }
@@ -789,7 +810,12 @@ T2AudioJackWorkRoutine(
 
     // Clear first: a notification arriving during the read queues another
     // pass, so the last state always wins.
-    InterlockedExchange(&context->JackWorkPending, 0);
+    {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&context->JackWorkLock, &oldIrql);
+        InterlockedExchange(&context->JackWorkPending, 0);
+        KeReleaseSpinLock(&context->JackWorkLock, oldIrql);
+    }
     // Not while powered down (sleep, idle D3): no BCE traffic then.
     if (context->JackPollStop == 0 && !context->PoweredDown) {
         status = T2AudioGetU32Property(context->BceHeadphoneDeviceId,
@@ -808,7 +834,7 @@ T2AudioJackWorkRoutine(
         }
         if (NT_SUCCESS(status)) {
             previous = InterlockedExchange(&context->HeadphoneJackPlugged, plugged != 0 ? 1 : 0);
-            // The poll runs every second: log changes only (and the first
+            // The poll runs every 500 ms: log changes only (and the first
             // read, as proof the poll works).
             if ((previous != 0) != (plugged != 0) || polls == 1) {
                 // Tell Windows (headphone endpoint's jack description).
@@ -823,10 +849,7 @@ T2AudioJackWorkRoutine(
             KdPrint(("T2Audio: headphone jack re-read #%d failed: 0x%08X\n", polls, status));
         }
     }
-    if (workItem != NULL) {
-        IoFreeWorkItem(workItem);
-    }
-    InterlockedDecrement(&context->JackWorkRunning);
+    T2AudioJackWorkComplete(context, workItem);
 }
 
 // Parameters\JackProbeAll (experiment, read-only): on hardware the
@@ -884,21 +907,27 @@ static VOID
 T2AudioQueueJackRead(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
     PIO_WORKITEM workItem;
+    PDEVICE_OBJECT deviceObject;
+    KIRQL oldIrql;
 
+    // Admission and PnP stop must use the same lock. Otherwise stop can see
+    // JackWorkRunning == 0 between this function's check and its increment,
+    // then close BCE while this work item is being queued.
+    KeAcquireSpinLock(&Context->JackWorkLock, &oldIrql);
     if (Context->JackPollStop != 0 || Context->DeviceObject == NULL ||
         InterlockedCompareExchange(&Context->JackWorkPending, 1, 0) != 0) {
+        KeReleaseSpinLock(&Context->JackWorkLock, oldIrql);
         return;
     }
-    InterlockedIncrement(&Context->JackWorkRunning);
-    if (Context->JackPollStop != 0) {
-        InterlockedDecrement(&Context->JackWorkRunning);
-        InterlockedExchange(&Context->JackWorkPending, 0);
-        return;
+    if (InterlockedIncrement(&Context->JackWorkRunning) == 1) {
+        KeClearEvent(&Context->JackWorkDone);
     }
-    workItem = IoAllocateWorkItem(Context->DeviceObject);
+    deviceObject = Context->DeviceObject;
+    KeReleaseSpinLock(&Context->JackWorkLock, oldIrql);
+
+    workItem = IoAllocateWorkItem(deviceObject);
     if (workItem == NULL) {
-        InterlockedDecrement(&Context->JackWorkRunning);
-        InterlockedExchange(&Context->JackWorkPending, 0);
+        T2AudioJackWorkComplete(Context, NULL);
         return;
     }
     IoQueueWorkItem(workItem, T2AudioJackWorkRoutine, DelayedWorkQueue, workItem);
@@ -922,13 +951,14 @@ T2AudioJackPollDpc(
     }
 }
 
-// Start the 1 s jack poll (JackEvents=1 only), once per device start.
+// Start the 500 ms jack poll (JackEvents=1 only), once per device start.
 static VOID
 T2AudioStartJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
     LARGE_INTEGER due;
 
-    if (Context->JackPollStarted || Context->DeviceObject == NULL) {
+    if (!Context->JackEvents || Context->BceHeadphoneDeviceId == 0 ||
+        Context->JackPollStarted || Context->DeviceObject == NULL) {
         return;
     }
     InterlockedExchange(&Context->JackPollStop, 0);
@@ -945,24 +975,26 @@ T2AudioStartJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 VOID
 T2AudioStopJackPoll(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
-    LARGE_INTEGER wait;
-    ULONG i;
-
     PAGED_CODE();
 
-    InterlockedExchange(&Context->JackPollStop, 1);
+    // Block new work admission before cancelling the timer or waiting for
+    // existing work. A queued DPC can still call the queue helper, but it now
+    // observes JackPollStop while holding JackWorkLock and returns safely.
+    {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&Context->JackWorkLock, &oldIrql);
+        InterlockedExchange(&Context->JackPollStop, 1);
+        KeReleaseSpinLock(&Context->JackWorkLock, oldIrql);
+    }
     if (Context->JackPollStarted) {
         KeCancelTimer(&Context->JackPollTimer);
         KeFlushQueuedDpcs();
         Context->JackPollStarted = FALSE;
     }
-    wait.QuadPart = -100000ll; // 10 ms
-    for (i = 0; i < 300 && Context->JackWorkRunning != 0; i++) {
-        KeDelayExecutionThread(KernelMode, FALSE, &wait);
-    }
-    if (Context->JackWorkRunning != 0) {
-        KdPrint(("T2Audio: jack poll: re-read still running after 3 s\n"));
-    }
+    // No timeout: closing BCE or unmapping BARs while an admitted work item
+    // is still alive would be a use-after-free. The event is signalled even
+    // when IoAllocateWorkItem fails.
+    KeWaitForSingleObject(&Context->JackWorkDone, Executive, KernelMode, FALSE, NULL);
 }
 
 // Query what the device itself says about the speaker output, as kaiT2en's
