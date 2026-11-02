@@ -18,6 +18,12 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.17 (2026-11-02)
+- Fixed headphone BCE stream query condition (`HeadphoneOutput == 1` gate removed) ensuring physical audio format is valid.
+- Fixed `HeadphoneDeviceId` initialization in `Driver.c` in unified single-endpoint mode (bypassing separate filter registration check).
+- Synchronized `JackSeenPlugged` on successful BCE query response.
+- Hardened tools and test suites: dynamic PnP discovery in diagnostic scripts, full 8/8 pass in `PostInstall-Validate.ps1`, corrected DSP and pipeline unit test assertions.
+
 ### v1.0.13.16 (2026-11-02)
 - Unified single audio endpoint in Windows: automatic dynamic routing between Speakers and Headphones.
 - When headphones are unplugged -> sound plays only on Speakers.
