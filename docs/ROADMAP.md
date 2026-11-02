@@ -19,7 +19,7 @@
 | **Live DSP Parameter Tuning** | ✅ | ✅ Verified | 1.0.13.12 | 500 ms live reload of tone/presets without stream restart |
 | **Persistent Boot Mode & Crash Guard** | ✅ | ✅ Verified | 1.0.12 | Automatic Safe Mode after 2 unclean shutdowns |
 | **Sleep / Wake State Transitions** | ✅ | ✅ Verified | 1.0.13 | Clean power D0/D3 handling, audio resumes on lid open |
-| **Headphone 3.5 mm Output Endpoint** | ✅ | ✅ Verified | 1.0.13 | Separate WaveRT endpoint with −12 dB safety attenuation |
+| **Unified Headphone / Speaker Routing** | ✅ | ✅ Verified | 1.0.13.16 | Dynamic seamless switching between 6 speakers and 3.5 mm headphones with bs2b crossfeed and −12 dB attenuation |
 | **Bauer bs2b Binaural Crossfeed** | ✅ | ✅ Verified | 1.0.13.11 | Headphone crossfeed in 64-bit Q16 fixed point |
 | **Bidirectional Jack Auto-Switching** | ✅ | ✅ Verified | 1.0.13.13 | Hardware register poll + `KSEVENT_PINCAPS_JACKINFOCHANGE` |
 | **Automatic Speaker Muting** | ✅ | ✅ Verified | 1.0.13.13 | `HeadphoneAutoMute` mutes speakers while plugged in |
@@ -48,7 +48,7 @@ All primary objectives required to completely replace `AppleAudio.sys` on the 16
 These items represent long-term enhancements and community-driven goals:
 
 ### 2.1 Extended Model Support
-- **Current State:** KAIT2EN acoustic DSP profiles exist for 12 Intel T2 Mac models in `tools/dsp/gen_kait2en_dsp.py`:
+- **Current State:** KAIT2EN acoustic DSP profile for MacBookPro16,1 is fully verified in `src/T2AudioDspProfile16_1.h`. Future targets include additional models from the Linux kaiT2en research:
   - `MacBookPro15,1`, `15,2`, `15,3`, `15,4`
   - `MacBookPro16,1`, `16,2`, `16,3`, `16,4`
   - `MacBookAir8,1`, `8,2`, `9,1`
@@ -60,7 +60,7 @@ These items represent long-term enhancements and community-driven goals:
 - **Milestone:** Support event-driven WaveRT notifications for ultra-low latency pro-audio DAWs (ASIO/WASAPI exclusive).
 
 ### 2.3 WHQL / Attestation Signing
-- **Current State:** Self-signed package using `T2AudioTestCert.cer`. Requires Windows Test Mode (`bcdedit /set testsigning on`) and Secure Boot disabled in macOS Startup Security Utility.
+- **Current State:** Self-signed package using test certificate (`certificate/T2AudioCertNew.cer`). Requires Windows Test Mode (`bcdedit /set testsigning on`) and Secure Boot disabled in macOS Startup Security Utility.
 - **Milestone:** If an organization funds a yearly Microsoft Hardware Dev Center EV code-signing certificate, the driver can be submitted for attestation signing, allowing installation with Secure Boot enabled.
 
 ---

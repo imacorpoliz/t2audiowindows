@@ -287,7 +287,7 @@ static void test_parse_command_response(void)
 static void test_physical_format(void)
 {
     // Speaker stream 0x3A 'pft ' payload captured on MacBookPro16,1
-    // (docs/planning/NOTES.md, base64 AAAAAABw50Bt...).
+    // (hardware capture on MacBookPro16,1, base64 AAAAAABw50Bt...).
     static const unsigned char kSpeaker[40] = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0xE7, 0x40, 0x6D, 0x63,
         0x70, 0x6C, 0x04, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,

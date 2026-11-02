@@ -44,7 +44,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
       <PreprocessorDefinitions>DBG=1;_AMD64_;_WIN64;PC_NEW_NAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)Driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -57,7 +57,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
       <PreprocessorDefinitions>DBG=1;_AMD64_;_WIN64;PC_NEW_NAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)Driver;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>portcls.lib;ksguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -88,6 +88,9 @@
     <ClInclude Include="T2AudioDsp.h" />
     <ClInclude Include="T2AudioDspProfile16_1.h" />
     <ClInclude Include="T2AudioCrashGuard.h" />
+    <ClInclude Include="T2AudioMicLogic.h" />
+    <ClInclude Include="T2AudioHeadphoneDsp.h" />
+    <ClInclude Include="T2AudioDspUserEq.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

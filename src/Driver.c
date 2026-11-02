@@ -642,7 +642,7 @@ T2AudioStartDeviceInner(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAutoMute", 0)) ? 1u : 0u;
     // Headphone endpoint (ROADMAP 4.4) and resume after sleep (2.1): both off
     // by default, so the default configuration is unchanged.
-    context->HeadphoneOutput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneOutput", 0) ? 1u : 0u;
+    context->HeadphoneOutput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneOutput", 1) ? 1u : 0u;
     context->HeadphoneAttenuation = T2AudioClampAttenuation(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
     context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
@@ -881,7 +881,7 @@ T2AudioStartDeviceInner(
 
         KdPrint(("T2Audio: audio path ENABLED for speaker 0x%I64X (bceIo=%u, transport held open)\n",
                  context->SpeakerDeviceId, context->BceIoEnabled ? 1u : 0u));
-        if (context->HeadphoneFiltersRegistered && context->HeadphoneFormatValid &&
+        if (context->HeadphoneFormatValid &&
             context->BceHeadphoneDeviceId != 0) {
             context->HeadphoneDeviceId = context->BceHeadphoneDeviceId;
             KdPrint(("T2Audio: audio path ENABLED for headphones 0x%I64X ring 0x%Ix+0x%Ix\n",

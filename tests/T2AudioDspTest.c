@@ -933,6 +933,21 @@ static double chain_peak(int bass, int treble, int clarity, double hz, int ch)
     return pk;
 }
 
+static double chain_peak_notuning(double hz, int ch)
+{
+    static T2DSP_STATE st;
+    unsigned int src[2], dst[6];
+    double pk = 0;
+    int n;
+    T2DspReset(&st);
+    for (n = 0; n < 57600; n++) {
+        src[0] = src[1] = host_word(0.05 * sin(2.0 * 3.14159265358979323846 * hz * n / 48000.0));
+        T2DspRenderStereoToSpeakers(dst, src, 1, 8, 0, T2DSP_LEVEL_LINEAR, 0, 0, 0, 0, &st);
+        if (n >= 48000 && fabs(ring_value(dst[ch])) > pk) pk = fabs(ring_value(dst[ch]));
+    }
+    return pk;
+}
+
 static void test_tone_controls(void)
 {
     static const double freqs[] = { 50, 150, 500, 1000, 2500, 6000, 10000 };
@@ -973,7 +988,7 @@ static void test_tone_controls(void)
                20 * log10(w6 / w0), 20 * log10(t6 / t0), 20 * log10(c6 / c0), eb, et, ec);
         ok = fabs(eb) < 0.05 && fabs(et) < 0.05 && fabs(ec) < 0.05;
         check("each control changes the chain output by its own response (0.05 dB)", ok);
-        check("all controls at 0: bit-exact with no tuning call", chain_peak(0, 0, 0, 1000, 0) == chain_peak(0, 0, 0, 1000, 0));
+        check("all controls at 0: bit-exact with no tuning call", chain_peak(0, 0, 0, 1000, 0) == chain_peak_notuning(1000, 0));
     }
     {
         // Worst case: every control at +12 dB, every level, full-scale square

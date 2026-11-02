@@ -2,7 +2,7 @@
 #
 #   .\tools\Make-ReleasePackage.ps1 [-CertificatePath <public .cer>] [-OutDir dist]
 #
-# Run after the driver was built and signed (GEMINI.md section 2). The result,
+# Run after the driver was built and signed (docs/GUIDE.md). The result,
 # dist\T2AudioPort-<version>\ and dist\T2AudioPort-<version>.zip, has the
 # layout the installer expects (tools\ next to packaging\):
 #
@@ -30,7 +30,7 @@ $sys = Join-Path $pkg 'T2AudioMiniport.sys'
 $cat = Join-Path $pkg 't2audiominiport.cat'
 
 foreach ($f in @($inf, $sys, $cat)) {
-    if (-not (Test-Path -LiteralPath $f)) { throw "Missing $f - build and sign the package first (GEMINI.md section 2)." }
+    if (-not (Test-Path -LiteralPath $f)) { throw "Missing $f - build and sign the package first (docs/GUIDE.md)." }
 }
 foreach ($f in @($sys, $cat)) {
     $sig = Get-AuthenticodeSignature -LiteralPath $f

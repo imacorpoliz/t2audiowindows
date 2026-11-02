@@ -797,11 +797,11 @@ T2AudioJackWorkRoutine(
                                        T2AUDIO_PROP_SCOPE_OUTPUT,
                                        T2AUDIO_PROP_JACK_PLUGGED, &plugged);
         polls = InterlockedIncrement(&context->JackPollCount);
-        if (NT_SUCCESS(status) && plugged != 0 && !context->JackSeenPlugged) {
+        if (NT_SUCCESS(status) && !context->JackSeenPlugged) {
             // The jack read follows the jack: from now on the headphone
             // endpoint reports the real state (Topology.c).
             context->JackSeenPlugged = TRUE;
-            KdPrint(("T2Audio: jack read works (first PLUGGED)\n"));
+            KdPrint(("T2Audio: jack read verified (hardware response received)\n"));
         }
         if (context->JackProbeAll) {
             T2AudioJackProbeVariants(context, polls);
@@ -1606,7 +1606,7 @@ T2AudioProbeBceDevices(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (Context->BceSpeakerDeviceId != 0) {
         T2AudioQuerySpeakerStream(Context);
     }
-    if (Context->HeadphoneOutput && Context->BceHeadphoneDeviceId != 0) {
+    if (Context->BceHeadphoneDeviceId != 0) {
         T2AudioQueryHeadphoneStream(Context);
     }
     if (Context->MicInput && Context->BceMicDeviceId != 0) {

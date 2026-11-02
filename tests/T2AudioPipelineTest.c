@@ -300,8 +300,8 @@ int main(void)
 
     a = simulate(80000, 600, 1, HOST_GARBAGE);
     report("+80 ppm, unusable hostTime, 10 min", &a);
-    check("wrapped hostTime: at most 2 re-aims", a.ReAims <= 2);
-    check("wrapped hostTime: no out-of-bounds copy", a.OutOfBounds == 0);
+    check("unusable hostTime: at most 2 re-aims", a.ReAims <= 2);
+    check("unusable hostTime: no out-of-bounds copy", a.OutOfBounds == 0);
 
     // Reproduces the 2026-10-28 Stage E log: ~50 h uptime (wrapped hostTime)
     // and the first timestamp ~13 ms late -> re-aims -17xx then +6xx.
