@@ -34,6 +34,7 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$AntiRattle,
     [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression,
     [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,
+    [ValidateRange(0, 1)] [Nullable[int]]$MicCanceller,
 
     [ValidateSet('Speakers', 'Headphones', 'Toggle')]
     [string]$To = 'Toggle',
@@ -68,7 +69,10 @@ $effectivePreset = if ($PresetName) { $PresetName } else { $Preset }
 # Build forwarding hashtable for clean PowerShell parameter splatting
 $splat = [ordered]@{ Action = $resolvedAction }
 
-if ($resolvedAction -in @('Install', 'Preset')) {
+# Install forwards the preset only when one was given, so an update keeps
+# the current sound settings.
+if ($resolvedAction -eq 'Preset' -or
+    ($resolvedAction -eq 'Install' -and ($PSBoundParameters.ContainsKey('Preset') -or $PresetName))) {
     $splat['Preset'] = $effectivePreset
 }
 if ($resolvedAction -in @('Install', 'Balance')) {
@@ -87,6 +91,7 @@ if ($null -ne $DspLoudness)        { $splat['DspLoudness'] = $DspLoudness }
 if ($null -ne $AntiRattle)         { $splat['AntiRattle'] = $AntiRattle }
 if ($null -ne $MicNoiseSuppression) { $splat['MicNoiseSuppression'] = $MicNoiseSuppression }
 if ($null -ne $HeadsetMic)         { $splat['HeadsetMic'] = $HeadsetMic }
+if ($null -ne $MicCanceller)       { $splat['MicCanceller'] = $MicCanceller }
 if ($resolvedAction -eq 'Switch')  { $splat['To'] = $To }
 if ($File)                         { $splat['File'] = $File }
 if ($Force)                        { $splat['Force'] = $true }

@@ -282,4 +282,28 @@ T2AudioConvertSamples(volatile unsigned int *Dest,
     }
 }
 
+// Event-driven WaveRT (IMiniportWaveRTStreamNotification): the client buffer
+// of BufferSize bytes is split into NotificationCount packets, and the
+// client is signalled each time the stream position crosses a packet
+// boundary. Returns the running packet number of the stream position
+// Frame (not wrapped), so any change since the last call means "signal";
+// 0 when notifications are off or the buffer is not set up.
+static __inline unsigned long long
+T2AudioNotificationPacket(unsigned long long Frame,
+                          unsigned long BytesPerFrame,
+                          unsigned long BufferSize,
+                          unsigned long NotificationCount)
+{
+    unsigned long packetBytes;
+
+    if (NotificationCount == 0 || BytesPerFrame == 0 || BufferSize < NotificationCount) {
+        return 0;
+    }
+    packetBytes = BufferSize / NotificationCount;
+    if (packetBytes == 0) {
+        return 0;
+    }
+    return (Frame * BytesPerFrame) / packetBytes;
+}
+
 #endif

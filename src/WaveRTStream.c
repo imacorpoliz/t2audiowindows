@@ -109,6 +109,17 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     ULONG GetPositionCalls;
     ULONG GetPositionRegCalls;
     ULONG CopyTickCalls;
+    // Event-driven mode (IMiniportWaveRTStreamNotification, ROADMAP 2.2): the
+    // buffer is split into NotificationCount packets and every registered
+    // event is set when the play position crosses a packet boundary (checked
+    // on each copy tick, so within T2AUDIO_COPY_PERIOD_MS). Protected by
+    // StreamLock.
+#define T2AUDIO_MAX_NOTIFY_EVENTS 4
+    ULONG NotificationCount;
+    ULONG64 NotifyPacket;
+    PKEVENT NotifyEvents[T2AUDIO_MAX_NOTIFY_EVENTS];
+    ULONG NotifyEventCount;
+    ULONG NotifySignals;
 } T2AUDIO_WAVERT_STREAM;
 
 static VOID T2AudioStreamStopCopyTimer(_Inout_ PT2AUDIO_WAVERT_STREAM instance);
@@ -729,6 +740,21 @@ T2AudioStreamPlayPositionBytes(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
     }
     T2AudioStreamAdvanceLocked(instance);
     frame = instance->LastCopiedFrame;
+    // Event-driven clients: one signal per packet boundary crossed.
+    if (instance->State == KSSTATE_RUN && instance->NotifyEventCount != 0) {
+        ULONG64 packet = T2AudioNotificationPacket(frame, bytesPerFrame, bufferSize,
+                                                   instance->NotificationCount);
+
+        if (packet != instance->NotifyPacket) {
+            ULONG i;
+
+            instance->NotifyPacket = packet;
+            for (i = 0; i < instance->NotifyEventCount; i++) {
+                KeSetEvent(instance->NotifyEvents[i], 0, FALSE);
+            }
+            instance->NotifySignals++;
+        }
+    }
     KeReleaseSpinLock(&instance->StreamLock, oldIrql);
 
     return (ULONG)((frame * bytesPerFrame) % bufferSize);
@@ -804,8 +830,11 @@ T2AudioStreamQueryInterface(
         return STATUS_INVALID_PARAMETER;
     }
     *Interface = NULL;
+    // One vtable serves both interfaces: IMiniportWaveRTStreamNotification
+    // extends IMiniportWaveRTStream.
     if (IsEqualGUIDAligned(InterfaceId, &IID_IUnknown) ||
-        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStream)) {
+        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStream) ||
+        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStreamNotification)) {
         *Interface = &stream->Interface;
         InterlockedIncrement(&stream->ReferenceCount);
         return STATUS_SUCCESS;
@@ -1060,6 +1089,10 @@ T2AudioStreamSetStateLocked(
                 instance->RenderPasses = 0;
                 instance->JackMutedFrames = 0;
                 instance->ClockCorrections = 0;
+                // Event-driven: count packet boundaries from where the run resumes.
+                instance->NotifyPacket = T2AudioNotificationPacket(
+                    instance->LastCopiedFrame, instance->BytesPerFrame,
+                    instance->AudioBufferSize, instance->NotificationCount);
                 instance->RunStartNs = T2AudioQpcToNs((ULONG64)currentQpc,
                                                       (ULONG64)qpcFreq.QuadPart);
                 if (instance->LastCopiedFrame == 0) {
@@ -1473,7 +1506,112 @@ T2AudioStreamGetClockRegister(
     return STATUS_NOT_SUPPORTED;
 }
 
-static const IMiniportWaveRTStreamVtbl g_T2AudioStreamVtbl = {
+// ---------------------------------------------------------------------------
+// Event-driven mode (IMiniportWaveRTStreamNotification)
+// ---------------------------------------------------------------------------
+
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioStreamAllocateBufferWithNotification(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ ULONG NotificationCount,
+    _In_ ULONG RequestedSize,
+    _Out_ PMDL *AudioBufferMdl,
+    _Out_ ULONG *ActualSize,
+    _Out_ ULONG *OffsetFromFirstPage,
+    _Out_ MEMORY_CACHING_TYPE *CacheType)
+{
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    NTSTATUS status;
+    KIRQL oldIrql;
+
+    // WaveRT asks for one or two notifications per buffer.
+    if (NotificationCount < 1 || NotificationCount > 2) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = T2AudioStreamAllocateAudioBuffer(Stream, RequestedSize, AudioBufferMdl,
+                                              ActualSize, OffsetFromFirstPage, CacheType);
+    if (NT_SUCCESS(status)) {
+        KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+        instance->NotificationCount = NotificationCount;
+        instance->NotifyPacket = 0;
+        KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+        KdPrint(("T2Audio: event-driven buffer: %u notification(s) per %u bytes\n",
+                 NotificationCount, *ActualSize));
+    }
+    return status;
+}
+
+static VOID STDMETHODCALLTYPE
+T2AudioStreamFreeBufferWithNotification(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ PMDL AudioBufferMdl,
+    _In_ ULONG BufferSize)
+{
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    KIRQL oldIrql;
+
+    T2AudioStreamFreeAudioBuffer(Stream, AudioBufferMdl, BufferSize);
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+    instance->NotificationCount = 0;
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+}
+
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioStreamRegisterNotificationEvent(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ PKEVENT NotificationEvent)
+{
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
+    KIRQL oldIrql;
+    ULONG i;
+
+    if (NotificationEvent == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+    for (i = 0; i < instance->NotifyEventCount; i++) {
+        if (instance->NotifyEvents[i] == NotificationEvent) {
+            status = STATUS_SUCCESS;     // already registered
+            break;
+        }
+    }
+    if (i == instance->NotifyEventCount && i < T2AUDIO_MAX_NOTIFY_EVENTS) {
+        instance->NotifyEvents[instance->NotifyEventCount++] = NotificationEvent;
+        status = STATUS_SUCCESS;
+    }
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+    return status;
+}
+
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioStreamUnregisterNotificationEvent(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ PKEVENT NotificationEvent)
+{
+    PT2AUDIO_WAVERT_STREAM instance = CONTAINING_RECORD(
+        Stream, T2AUDIO_WAVERT_STREAM, Interface);
+    NTSTATUS status = STATUS_NOT_FOUND;
+    KIRQL oldIrql;
+    ULONG i;
+
+    KeAcquireSpinLock(&instance->StreamLock, &oldIrql);
+    for (i = 0; i < instance->NotifyEventCount; i++) {
+        if (instance->NotifyEvents[i] == NotificationEvent) {
+            instance->NotifyEvents[i] = instance->NotifyEvents[instance->NotifyEventCount - 1];
+            instance->NotifyEvents[--instance->NotifyEventCount] = NULL;
+            status = STATUS_SUCCESS;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&instance->StreamLock, oldIrql);
+    return status;
+}
+
+static const IMiniportWaveRTStreamNotificationVtbl g_T2AudioStreamVtbl = {
     (void *)T2AudioStreamQueryInterface,
     (void *)T2AudioStreamAddRef,
     (void *)T2AudioStreamRelease,
@@ -1484,7 +1622,11 @@ static const IMiniportWaveRTStreamVtbl g_T2AudioStreamVtbl = {
     (void *)T2AudioStreamFreeAudioBuffer,
     (void *)T2AudioStreamGetHWLatency,
     (void *)T2AudioStreamGetPositionRegister,
-    (void *)T2AudioStreamGetClockRegister
+    (void *)T2AudioStreamGetClockRegister,
+    (void *)T2AudioStreamAllocateBufferWithNotification,
+    (void *)T2AudioStreamFreeBufferWithNotification,
+    (void *)T2AudioStreamRegisterNotificationEvent,
+    (void *)T2AudioStreamUnregisterNotificationEvent
 };
 
 NTSTATUS
@@ -1519,7 +1661,7 @@ T2AudioCreateStream(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(instance, sizeof(*instance));
-    instance->Interface.lpVtbl = &g_T2AudioStreamVtbl;
+    instance->Interface.lpVtbl = (IMiniportWaveRTStreamVtbl *)&g_T2AudioStreamVtbl;
     instance->ReferenceCount = 1;
     instance->DeviceContext = DeviceContext;
     instance->Headphone = Headphone;

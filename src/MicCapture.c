@@ -456,6 +456,16 @@ typedef struct _T2AUDIO_MIC_STREAM {
     KTIMER CopyTimer;
     KDPC CopyDpc;
     BOOLEAN TimerActive;
+    // Client container: 32 bits, or 16 / 24 with Parameters\ExtraFormats.
+    ULONG BitsPerSample;
+    ULONG BytesPerFrame;
+    // Event-driven mode (IMiniportWaveRTStreamNotification), as on the render
+    // side: events set on every packet boundary. Protected by StreamLock.
+#define T2AUDIO_MIC_MAX_NOTIFY_EVENTS 4
+    ULONG NotificationCount;
+    ULONG64 NotifyPacket;
+    PKEVENT NotifyEvents[T2AUDIO_MIC_MAX_NOTIFY_EVENTS];
+    ULONG NotifyEventCount;
 } T2AUDIO_MIC_STREAM, *PT2AUDIO_MIC_STREAM;
 
 // Move every frame up to "now" into the client buffer. StreamLock held.
@@ -471,9 +481,10 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
     BOOLEAN haveWriter = FALSE;
     ULONG64 writeFrame = 0;
     PUCHAR ring = NULL;
-    PULONG client;
+    PUCHAR client;
 
-    if (s->State != KSSTATE_RUN || s->SystemBufferVa == NULL || s->AudioBufferSize < 4 ||
+    if (s->State != KSSTATE_RUN || s->SystemBufferVa == NULL || s->BytesPerFrame == 0 ||
+        s->AudioBufferSize < s->BytesPerFrame ||
         context == NULL || path == NULL) {
         return;
     }
@@ -487,7 +498,7 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
     if (target <= frame) {
         return;
     }
-    clientFrames = s->AudioBufferSize / 4u;
+    clientFrames = s->AudioBufferSize / s->BytesPerFrame;
     if (target - frame > clientFrames) {
         frame = target - clientFrames;   // the client fell behind: drop the oldest
     }
@@ -522,7 +533,7 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
         }
     }
 
-    client = (PULONG)s->SystemBufferVa;
+    client = (PUCHAR)s->SystemBufferVa;
     KeAcquireSpinLockAtDpcLevel(&context->HardwareLock);
     if (path->Registered && path->BufferVa != NULL && !context->PoweredDown) {
         ring = (PUCHAR)path->BufferVa;
@@ -544,14 +555,15 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
                 raw[0] = slot[0];
                 raw[1] = slot[1];
                 raw[2] = slot[2];
-                sample = T2AudioMicProcessFrame(&s->Dsp, raw, context->MicDsp);
+                sample = T2AudioMicProcessFrameEx(&s->Dsp, raw, context->MicDsp, context->MicVoiceMic);
             }
             out = (ULONG)T2AudioMicNoiseGate(&s->Gate, sample, context->MicNoiseSuppression);
             s->CapturedFrames++;
         } else {
             s->SilentFrames++;
         }
-        client[(ULONG)(frame % clientFrames)] = out;
+        (VOID)T2AudioMicStoreSample(client + (SIZE_T)(ULONG)(frame % clientFrames) * s->BytesPerFrame,
+                                    (int)out, s->BitsPerSample);
     }
     KeReleaseSpinLockFromDpcLevel(&context->HardwareLock);
     s->LastFrame = target;
@@ -575,17 +587,32 @@ T2AudioMicPositionBytes(_Inout_ PT2AUDIO_MIC_STREAM s)
     KIRQL oldIrql;
     ULONG64 frame;
     ULONG size;
+    ULONG bytesPerFrame;
 
     KeAcquireSpinLock(&s->StreamLock, &oldIrql);
     size = s->AudioBufferSize;
-    if (s->State == KSSTATE_STOP || size < 4) {
+    bytesPerFrame = s->BytesPerFrame;
+    if (s->State == KSSTATE_STOP || bytesPerFrame == 0 || size < bytesPerFrame) {
         KeReleaseSpinLock(&s->StreamLock, oldIrql);
         return 0;
     }
     T2AudioMicAdvanceLocked(s);
     frame = s->LastFrame;
+    // Event-driven clients: one signal per packet boundary crossed.
+    if (s->State == KSSTATE_RUN && s->NotifyEventCount != 0) {
+        ULONG64 packet = T2AudioNotificationPacket(frame, bytesPerFrame, size, s->NotificationCount);
+
+        if (packet != s->NotifyPacket) {
+            ULONG i;
+
+            s->NotifyPacket = packet;
+            for (i = 0; i < s->NotifyEventCount; i++) {
+                KeSetEvent(s->NotifyEvents[i], 0, FALSE);
+            }
+        }
+    }
     KeReleaseSpinLock(&s->StreamLock, oldIrql);
-    return (ULONG)((frame * 4u) % size);
+    return (ULONG)((frame * bytesPerFrame) % size);
 }
 
 static KDEFERRED_ROUTINE T2AudioMicCopyTick;
@@ -652,7 +679,8 @@ T2AudioMicStreamQueryInterface(
     }
     *Interface = NULL;
     if (IsEqualGUIDAligned(InterfaceId, &IID_IUnknown) ||
-        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStream)) {
+        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStream) ||
+        IsEqualGUIDAligned(InterfaceId, &IID_IMiniportWaveRTStreamNotification)) {
         *Interface = &s->Interface;
         InterlockedIncrement(&s->ReferenceCount);
         return STATUS_SUCCESS;
@@ -686,12 +714,20 @@ T2AudioMicStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
     return (ULONG)references;
 }
 
-// Mono, 48 kHz, 32-bit PCM (WAVEFORMATEX or EXTENSIBLE with a mono mask).
+// Mono, 48 kHz PCM (WAVEFORMATEX or EXTENSIBLE with a mono mask) in a 32-bit
+// container, or with AllowExtra (Parameters\ExtraFormats) also 16 and packed
+// 24 bits for exclusive-mode recorders. *Bits receives the container size.
 static NTSTATUS
-T2AudioMicValidateFormat(_In_opt_ PKSDATAFORMAT DataFormat)
+T2AudioMicValidateFormat(_In_opt_ PKSDATAFORMAT DataFormat, _In_ BOOLEAN AllowExtra,
+                         _Out_opt_ PULONG Bits)
 {
     PKSDATAFORMAT_WAVEFORMATEX wf;
+    ULONG bits;
+    ULONG block;
 
+    if (Bits != NULL) {
+        *Bits = 0;
+    }
     if (DataFormat == NULL || DataFormat->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEX) ||
         !IsEqualGUIDAligned(&DataFormat->MajorFormat, &KSDATAFORMAT_TYPE_AUDIO) ||
         !IsEqualGUIDAligned(&DataFormat->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM) ||
@@ -699,9 +735,14 @@ T2AudioMicValidateFormat(_In_opt_ PKSDATAFORMAT DataFormat)
         return STATUS_INVALID_PARAMETER;
     }
     wf = (PKSDATAFORMAT_WAVEFORMATEX)DataFormat;
+    bits = wf->WaveFormatEx.wBitsPerSample;
+    if (bits != 32 && !(AllowExtra && (bits == 16 || bits == 24))) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    block = bits / 8u;
     if (wf->WaveFormatEx.nChannels != 1 || wf->WaveFormatEx.nSamplesPerSec != 48000 ||
-        wf->WaveFormatEx.wBitsPerSample != 32 || wf->WaveFormatEx.nBlockAlign != 4 ||
-        wf->WaveFormatEx.nAvgBytesPerSec != 48000u * 4u) {
+        wf->WaveFormatEx.nBlockAlign != block ||
+        wf->WaveFormatEx.nAvgBytesPerSec != 48000u * block) {
         return STATUS_INVALID_PARAMETER;
     }
     if (wf->WaveFormatEx.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
@@ -709,6 +750,7 @@ T2AudioMicValidateFormat(_In_opt_ PKSDATAFORMAT DataFormat)
 
         if (DataFormat->FormatSize < sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE) ||
             !IsEqualGUIDAligned(&ext->WaveFormatExt.SubFormat, &KSDATAFORMAT_SUBTYPE_PCM) ||
+            ext->WaveFormatExt.Samples.wValidBitsPerSample > bits ||
             (ext->WaveFormatExt.dwChannelMask != KSAUDIO_SPEAKER_MONO &&
              ext->WaveFormatExt.dwChannelMask != 0)) {
             return STATUS_INVALID_PARAMETER;
@@ -716,14 +758,38 @@ T2AudioMicValidateFormat(_In_opt_ PKSDATAFORMAT DataFormat)
     } else if (wf->WaveFormatEx.wFormatTag != WAVE_FORMAT_PCM) {
         return STATUS_INVALID_PARAMETER;
     }
+    if (Bits != NULL) {
+        *Bits = bits;
+    }
     return STATUS_SUCCESS;
+}
+
+static BOOLEAN
+T2AudioMicExtraFormats(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    return (Context != NULL && Context->ExtraFormats) ? TRUE : FALSE;
 }
 
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioMicStreamSetFormat(_In_ PMINIPORTWAVERTSTREAM Stream, _In_ PKSDATAFORMAT DataFormat)
 {
-    UNREFERENCED_PARAMETER(Stream);
-    return T2AudioMicValidateFormat(DataFormat);
+    PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
+    ULONG bits = 0;
+    NTSTATUS status = T2AudioMicValidateFormat(DataFormat, T2AudioMicExtraFormats(s->DeviceContext), &bits);
+
+    // The client buffer was sized for the current frame size.
+    if (NT_SUCCESS(status) && s->AudioBufferMdl != NULL && bits != s->BitsPerSample) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    if (NT_SUCCESS(status)) {
+        KIRQL oldIrql;
+
+        KeAcquireSpinLock(&s->StreamLock, &oldIrql);
+        s->BitsPerSample = bits;
+        s->BytesPerFrame = bits / 8u;
+        KeReleaseSpinLock(&s->StreamLock, oldIrql);
+    }
+    return status;
 }
 
 // StreamMutex held (T2AudioMicStreamSetState or the resume work item).
@@ -766,6 +832,8 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
         s->SilentFrames = 0;
         s->CapturedFrames = 0;
         s->MaxCopyUs = 0;
+        s->NotifyPacket = T2AudioNotificationPacket(s->LastFrame, s->BytesPerFrame,
+                                                    s->AudioBufferSize, s->NotificationCount);
         if (s->LastFrame == 0) {
             T2AudioMicReset(&s->Dsp);
             T2AudioMicGateReset(&s->Gate);
@@ -885,8 +953,8 @@ T2AudioMicStreamAllocateAudioBuffer(
     *ActualSize = 0;
     *OffsetFromFirstPage = 0;
     *CacheType = MmCached;
-    if (RequestedSize < 4 || s->AudioBufferMdl != NULL || s->PortStream == NULL ||
-        !T2AudioAlignSizeUpToFrame(RequestedSize, 4, &size)) {
+    if (s->BytesPerFrame == 0 || RequestedSize < s->BytesPerFrame || s->AudioBufferMdl != NULL || s->PortStream == NULL ||
+        !T2AudioAlignSizeUpToFrame(RequestedSize, s->BytesPerFrame, &size)) {
         return STATUS_INVALID_PARAMETER;
     }
     high.QuadPart = (LONGLONG)-1;
@@ -934,7 +1002,7 @@ T2AudioMicStreamGetHWLatency(_In_ PMINIPORTWAVERTSTREAM Stream, _Out_ KSRTAUDIO_
         ULONG frames = (s->Path != NULL) ? s->Path->LatencyFrames : 0;
 
         RtlZeroMemory(Latency, sizeof(*Latency));
-        Latency->FifoSize = T2AUDIO_MIC_CAPTURE_LAG * 4u;
+        Latency->FifoSize = T2AUDIO_MIC_CAPTURE_LAG * s->BytesPerFrame;
         Latency->CodecDelay = (ULONG)(((ULONG64)frames * 10000000ull) / 48000u);
     }
 }
@@ -949,7 +1017,96 @@ T2AudioMicStreamGetRegister(_In_ PMINIPORTWAVERTSTREAM Stream, _Out_ KSRTAUDIO_H
     return STATUS_NOT_SUPPORTED;
 }
 
-static const IMiniportWaveRTStreamVtbl g_T2AudioMicStreamVtbl = {
+// Event-driven mode (IMiniportWaveRTStreamNotification), as for rendering.
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioMicStreamAllocateBufferWithNotification(
+    _In_ PMINIPORTWAVERTSTREAM Stream,
+    _In_ ULONG NotificationCount,
+    _In_ ULONG RequestedSize,
+    _Out_ PMDL *AudioBufferMdl,
+    _Out_ ULONG *ActualSize,
+    _Out_ ULONG *OffsetFromFirstPage,
+    _Out_ MEMORY_CACHING_TYPE *CacheType)
+{
+    PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
+    NTSTATUS status;
+    KIRQL oldIrql;
+
+    if (NotificationCount < 1 || NotificationCount > 2) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    status = T2AudioMicStreamAllocateAudioBuffer(Stream, RequestedSize, AudioBufferMdl, ActualSize,
+                                                 OffsetFromFirstPage, CacheType);
+    if (NT_SUCCESS(status)) {
+        KeAcquireSpinLock(&s->StreamLock, &oldIrql);
+        s->NotificationCount = NotificationCount;
+        s->NotifyPacket = 0;
+        KeReleaseSpinLock(&s->StreamLock, oldIrql);
+    }
+    return status;
+}
+
+static VOID STDMETHODCALLTYPE
+T2AudioMicStreamFreeBufferWithNotification(_In_ PMINIPORTWAVERTSTREAM Stream, _In_ PMDL AudioBufferMdl,
+                                           _In_ ULONG BufferSize)
+{
+    PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
+    KIRQL oldIrql;
+
+    T2AudioMicStreamFreeAudioBuffer(Stream, AudioBufferMdl, BufferSize);
+    KeAcquireSpinLock(&s->StreamLock, &oldIrql);
+    s->NotificationCount = 0;
+    KeReleaseSpinLock(&s->StreamLock, oldIrql);
+}
+
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioMicStreamRegisterNotificationEvent(_In_ PMINIPORTWAVERTSTREAM Stream, _In_ PKEVENT NotificationEvent)
+{
+    PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
+    NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
+    KIRQL oldIrql;
+    ULONG i;
+
+    if (NotificationEvent == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    KeAcquireSpinLock(&s->StreamLock, &oldIrql);
+    for (i = 0; i < s->NotifyEventCount; i++) {
+        if (s->NotifyEvents[i] == NotificationEvent) {
+            status = STATUS_SUCCESS;
+            break;
+        }
+    }
+    if (i == s->NotifyEventCount && i < T2AUDIO_MIC_MAX_NOTIFY_EVENTS) {
+        s->NotifyEvents[s->NotifyEventCount++] = NotificationEvent;
+        status = STATUS_SUCCESS;
+    }
+    KeReleaseSpinLock(&s->StreamLock, oldIrql);
+    return status;
+}
+
+static NTSTATUS STDMETHODCALLTYPE
+T2AudioMicStreamUnregisterNotificationEvent(_In_ PMINIPORTWAVERTSTREAM Stream, _In_ PKEVENT NotificationEvent)
+{
+    PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
+    NTSTATUS status = STATUS_NOT_FOUND;
+    KIRQL oldIrql;
+    ULONG i;
+
+    KeAcquireSpinLock(&s->StreamLock, &oldIrql);
+    for (i = 0; i < s->NotifyEventCount; i++) {
+        if (s->NotifyEvents[i] == NotificationEvent) {
+            s->NotifyEvents[i] = s->NotifyEvents[s->NotifyEventCount - 1];
+            s->NotifyEvents[--s->NotifyEventCount] = NULL;
+            status = STATUS_SUCCESS;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&s->StreamLock, oldIrql);
+    return status;
+}
+
+static const IMiniportWaveRTStreamNotificationVtbl g_T2AudioMicStreamVtbl = {
     (void *)T2AudioMicStreamQueryInterface,
     (void *)T2AudioMicStreamAddRef,
     (void *)T2AudioMicStreamRelease,
@@ -960,7 +1117,11 @@ static const IMiniportWaveRTStreamVtbl g_T2AudioMicStreamVtbl = {
     (void *)T2AudioMicStreamFreeAudioBuffer,
     (void *)T2AudioMicStreamGetHWLatency,
     (void *)T2AudioMicStreamGetRegister,
-    (void *)T2AudioMicStreamGetRegister
+    (void *)T2AudioMicStreamGetRegister,
+    (void *)T2AudioMicStreamAllocateBufferWithNotification,
+    (void *)T2AudioMicStreamFreeBufferWithNotification,
+    (void *)T2AudioMicStreamRegisterNotificationEvent,
+    (void *)T2AudioMicStreamUnregisterNotificationEvent
 };
 
 // ---------------------------------------------------------------------------
@@ -1089,8 +1250,8 @@ T2AudioMicMiniportDataRangeIntersection(
     _Out_ PULONG ResultantFormatLength)
 {
     PKSDATAFORMAT_WAVEFORMATEXTENSIBLE result;
+    PT2AUDIO_MIC_MINIPORT m = CONTAINING_RECORD((PMINIPORTWAVERT)Miniport, T2AUDIO_MIC_MINIPORT, Interface);
 
-    UNREFERENCED_PARAMETER(Miniport);
     UNREFERENCED_PARAMETER(MatchingDataRange);
     if (ResultantFormatLength == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -1104,9 +1265,21 @@ T2AudioMicMiniportDataRangeIntersection(
     }
     if (DataRange->FormatSize != sizeof(KSDATARANGE_AUDIO) &&
         DataRange->FormatSize >= sizeof(KSDATAFORMAT_WAVEFORMATEX) &&
-        IsEqualGUIDAligned(&DataRange->Specifier, &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) &&
-        !NT_SUCCESS(T2AudioMicValidateFormat(DataRange))) {
-        return STATUS_NO_MATCH;
+        IsEqualGUIDAligned(&DataRange->Specifier, &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) {
+        // A complete format: accept it as it is (16/24 bits with ExtraFormats).
+        if (!NT_SUCCESS(T2AudioMicValidateFormat(DataRange, T2AudioMicExtraFormats(m->DeviceContext), NULL))) {
+            return STATUS_NO_MATCH;
+        }
+        if (OutputBufferLength == 0) {
+            *ResultantFormatLength = DataRange->FormatSize;
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        if (OutputBufferLength < DataRange->FormatSize || ResultantFormat == NULL) {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        RtlCopyMemory(ResultantFormat, DataRange, DataRange->FormatSize);
+        *ResultantFormatLength = DataRange->FormatSize;
+        return STATUS_SUCCESS;
     }
     if (DataRange->FormatSize == sizeof(KSDATARANGE_AUDIO)) {
         PKSDATARANGE_AUDIO r = (PKSDATARANGE_AUDIO)DataRange;
@@ -1166,13 +1339,14 @@ T2AudioMicMiniportNewStream(
 {
     PT2AUDIO_MIC_MINIPORT m = CONTAINING_RECORD(Miniport, T2AUDIO_MIC_MINIPORT, Interface);
     PT2AUDIO_MIC_STREAM s;
+    ULONG bits = 0;
 
     if (Stream == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     *Stream = NULL;
     if (m->Path == NULL || !Capture || Pin != T2AUDIO_MIC_WAVE_PIN_CAPTURE ||
-        !NT_SUCCESS(T2AudioMicValidateFormat(DataFormat))) {
+        !NT_SUCCESS(T2AudioMicValidateFormat(DataFormat, T2AudioMicExtraFormats(m->DeviceContext), &bits))) {
         return STATUS_INVALID_PARAMETER;
     }
     s = (PT2AUDIO_MIC_STREAM)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*s), T2AUDIO_MIC_POOL_TAG);
@@ -1180,9 +1354,11 @@ T2AudioMicMiniportNewStream(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(s, sizeof(*s));
-    s->Interface.lpVtbl = &g_T2AudioMicStreamVtbl;
+    s->Interface.lpVtbl = (IMiniportWaveRTStreamVtbl *)&g_T2AudioMicStreamVtbl;
     s->ReferenceCount = 1;
     s->DeviceContext = m->DeviceContext;
+    s->BitsPerSample = bits;
+    s->BytesPerFrame = bits / 8u;
     s->Path = m->Path;
     s->PortStream = PortStream;
     s->State = KSSTATE_STOP;
@@ -1805,6 +1981,9 @@ T2AudioRegisterMicFilters(
     if (Path == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
+    // Parameters\ExtraFormats: the capture pins also offer 16 and 24 bits
+    // (shared mode keeps the 32-bit format the intersection proposes).
+    g_T2AudioMicRange.MinimumBitsPerSample = (Context != NULL && Context->ExtraFormats) ? 16u : 32u;
     topoName = Path->Headset ? L"TopologyMicIn" : L"TopologyMic";
     waveName = Path->Headset ? L"WaveMicIn" : L"WaveMic";
     topo = (PT2AUDIO_MIC_TOPOLOGY)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*topo), T2AUDIO_MIC_POOL_TAG);

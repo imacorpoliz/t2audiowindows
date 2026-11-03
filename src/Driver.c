@@ -676,9 +676,17 @@ T2AudioStartDeviceInner(
     context->HeadphoneAttenuation = T2AudioClampAttenuation(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
     context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
-    // Built-in microphones (ROADMAP 5): off by default; MicDsp 1 = kaiT2en chain.
+    // Built-in microphones (ROADMAP 5): off by default. MicDsp 0 = mic 0 raw,
+    // 1 = kaiT2en chain (default, hardware-verified), 2 = three-microphone
+    // noise canceller around MicVoiceMic (0..2, default 1), then the same chain.
     context->Mic.Enabled = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
-    context->MicDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1) ? 1u : 0u;
+    {
+        ULONG dsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1);
+        ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
+
+        context->MicDsp = (dsp > 2u) ? 2u : dsp;
+        context->MicVoiceMic = (voice > 2u) ? 1u : voice;
+    }
     // MicNoiseSuppression (default 0): a smooth per-stream noise gate on the
     // mono output of both microphone endpoints, independent of MicDsp and the
     // START_IO gates. Off is a bit-exact bypass (T2AudioMicLogic.h).
@@ -696,9 +704,9 @@ T2AudioStartDeviceInner(
     context->HeadsetMic.StartIo = (context->HeadsetMic.Enabled &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadsetMicStartIo", 0)) ? 1u : 0u;
     context->ExtraFormats = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtraFormats", 0) ? 1u : 0u;
-    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicStartIo=%u MicDsp=%u MicNoiseSuppression=%u HeadsetMicInput=%u HeadsetMicStartIo=%u ExtraFormats=%u ResumeAfterSleep=%u JackProbeAll=%u\n",
+    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicStartIo=%u MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u HeadsetMicInput=%u HeadsetMicStartIo=%u ExtraFormats=%u ResumeAfterSleep=%u JackProbeAll=%u\n",
              context->HeadphoneOutput, context->HeadphoneAttenuation,
-             context->HeadphoneAttenuation * 6u, context->Mic.Enabled, context->Mic.StartIo, context->MicDsp,
+             context->HeadphoneAttenuation * 6u, context->Mic.Enabled, context->Mic.StartIo, context->MicDsp, context->MicVoiceMic,
              context->MicNoiseSuppression, context->HeadsetMic.Enabled, context->HeadsetMic.StartIo,
              context->ExtraFormats, context->ResumeAfterSleep, context->JackProbeAll));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",

@@ -56,15 +56,200 @@ static const int g_T2AudioMicHp48k[5] = {
 // Internal precision: samples are processed as 24-bit values << 6.
 #define T2AUDIO_MIC_SHIFT             6
 
+static __inline long long
+T2AudioMicSar(long long v, unsigned int s)
+{
+    // Arithmetic shift right that does not depend on the compiler's
+    // behaviour for negative numbers.
+    return v >= 0 ? (v >> s) : -((-v - 1) >> s) - 1;
+}
+
+// ---------------------------------------------------------------------------
+// Three-microphone noise canceller (Parameters\MicDsp=2): one microphone
+// carries the voice, the other two are noise references for what the
+// speakers (and other off-axis sources) put into it. A generalized sidelobe
+// canceller in integer arithmetic:
+//
+//   v      = voice microphone (MicVoiceMic, default 1 = the middle one)
+//   b_a/b  = other microphone - v   (blocking references: a talker in front
+//            reaches all three nearly together, so the differences hold
+//            little voice; sound from the speakers below / beside the
+//            keyboard arrives with a delay between the microphones and stays)
+//   out    = v(n - D) - sum_k W_a[k] b_a(n - k) - sum_k W_b[k] b_b(n - k)
+//
+// The two FIR filters (TAPS taps each, the voice path delayed by D = TAPS/2
+// so they can model either arrival order) adapt by normalized LMS. While the
+// talker is active the references are small against the voice and adaption
+// pauses (no voice is learnt away); a filter that makes the output louder
+// than the voice for HOLD samples is reset. All state is per stream,
+// O(TAPS) per sample, with one 64-bit division - fine at DISPATCH_LEVEL.
+// ---------------------------------------------------------------------------
+#define T2AUDIO_MIC_ANC_TAPS          32
+#define T2AUDIO_MIC_ANC_DELAY         (T2AUDIO_MIC_ANC_TAPS / 2)
+#define T2AUDIO_MIC_ANC_WEIGHT_ONE    (1ll << 24)          // W in Q24
+#define T2AUDIO_MIC_ANC_WEIGHT_MAX    (4ll << 24)
+#define T2AUDIO_MIC_ANC_MU_Q16        1311                 // step 0.02
+#define T2AUDIO_MIC_ANC_GAIN_SHIFT    13                   // extra fraction bits of the step
+#define T2AUDIO_MIC_ANC_EPS           (1ll << 28)          // norm floor (about -84 dBFS a tap)
+#define T2AUDIO_MIC_ANC_POWER_SHIFT   10                   // power smoothing, ~21 ms
+#define T2AUDIO_MIC_ANC_ADAPT_RATIO   64                   // adapt while refs > voice - 18 dB
+#define T2AUDIO_MIC_ANC_FLOOR         (1ll << 12)          // smoothed power floor (~-102 dBFS)
+#define T2AUDIO_MIC_ANC_DIVERGE_HOLD  4800                 // 100 ms louder than the voice -> reset
+
+typedef struct _T2AUDIO_MIC_ANC_STATE {
+    int Ref[2][T2AUDIO_MIC_ANC_TAPS];      // blocking references, ring
+    int Voice[T2AUDIO_MIC_ANC_DELAY];      // voice delay line, ring
+    long long W[2][T2AUDIO_MIC_ANC_TAPS];  // filter weights, Q24
+    long long Norm;                        // sum of Ref^2 over both rings
+    long long PowVoice, PowRef, PowOut;    // smoothed powers (x^2 >> 16)
+    unsigned int Pos;                      // ring position of the newest reference
+    unsigned int VoicePos;
+    unsigned int Diverging;                // samples the output was louder than the voice
+    unsigned int Resets;                   // diagnostics
+} T2AUDIO_MIC_ANC_STATE;
+
 typedef struct _T2AUDIO_MIC_STATE {
     long long X1, X2, Y1, Y2;
     long long Err;     // error feedback of the >> 28 (keeps the 20 Hz pole clean)
+    T2AUDIO_MIC_ANC_STATE Anc;
 } T2AUDIO_MIC_STATE;
+
+static __inline void
+T2AudioMicAncReset(T2AUDIO_MIC_ANC_STATE *A)
+{
+    unsigned int k;
+
+    for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+        A->Ref[0][k] = A->Ref[1][k] = 0;
+        A->W[0][k] = A->W[1][k] = 0;
+    }
+    for (k = 0; k < T2AUDIO_MIC_ANC_DELAY; k++) {
+        A->Voice[k] = 0;
+    }
+    A->Norm = 0;
+    A->PowVoice = A->PowRef = A->PowOut = 0;
+    A->Pos = A->VoicePos = 0;
+    A->Diverging = 0;
+    A->Resets = 0;
+}
 
 static __inline void
 T2AudioMicReset(T2AUDIO_MIC_STATE *S)
 {
     S->X1 = S->X2 = S->Y1 = S->Y2 = S->Err = 0;
+    T2AudioMicAncReset(&S->Anc);
+}
+
+static __inline int
+T2AudioMicAncClamp(long long v, long long limit)
+{
+    if (v > limit - 1) {
+        return (int)(limit - 1);
+    }
+    if (v < -limit) {
+        return (int)-limit;
+    }
+    return (int)v;
+}
+
+// One frame of the canceller. Mic[] are the three 24-bit samples; Voice is
+// the index of the voice microphone (0..2). Returns a 24-bit sample: the
+// voice delayed by T2AUDIO_MIC_ANC_DELAY frames, minus the estimated noise.
+static __inline int
+T2AudioMicAncProcess(T2AUDIO_MIC_ANC_STATE *A, const int *Mic, unsigned int Voice)
+{
+    int v, refs[2];
+    int delayed;
+    long long y = 0;
+    long long e;
+    unsigned int r, k, idx;
+
+    if (Voice > 2) {
+        Voice = 1;
+    }
+    v = Mic[Voice];
+    refs[0] = T2AudioMicAncClamp((long long)Mic[(Voice + 1) % 3] - v, 1ll << 24);
+    refs[1] = T2AudioMicAncClamp((long long)Mic[(Voice + 2) % 3] - v, 1ll << 24);
+
+    // Push the references (keeping the running norm) and the voice.
+    A->Pos = (A->Pos + 1) % T2AUDIO_MIC_ANC_TAPS;
+    for (r = 0; r < 2; r++) {
+        long long old = A->Ref[r][A->Pos];
+
+        A->Norm += (long long)refs[r] * refs[r] - old * old;
+        A->Ref[r][A->Pos] = refs[r];
+    }
+    if (A->Norm < 0) {
+        A->Norm = 0;
+    }
+    delayed = A->Voice[A->VoicePos];
+    A->Voice[A->VoicePos] = v;
+    A->VoicePos = (A->VoicePos + 1) % T2AUDIO_MIC_ANC_DELAY;
+
+    // Noise estimate: |W| < 2^26, |Ref| <= 2^24, 64 terms: |y| < 2^56.
+    for (r = 0; r < 2; r++) {
+        idx = A->Pos;
+        for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+            y += A->W[r][k] * A->Ref[r][idx];
+            idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
+        }
+    }
+    y = T2AudioMicSar(y, 24);
+    e = (long long)delayed - y;
+
+    // Smoothed powers of voice, references and output.
+    {
+        long long pv = ((long long)delayed * delayed) >> 16;
+        long long pr = (((long long)refs[0] * refs[0]) + ((long long)refs[1] * refs[1])) >> 16;
+        long long ec = (e > (1ll << 26)) ? (1ll << 26) : ((e < -(1ll << 26)) ? -(1ll << 26) : e);
+        long long po = (ec * ec) >> 16;
+
+        A->PowVoice += (pv - A->PowVoice) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->PowRef += (pr - A->PowRef) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->PowOut += (po - A->PowOut) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
+    }
+
+    // Adapt only while the references carry a noticeable share (no talker
+    // in front, or a pause), never on silence.
+    if (A->PowVoice > T2AUDIO_MIC_ANC_FLOOR &&
+        A->PowRef * T2AUDIO_MIC_ANC_ADAPT_RATIO > A->PowVoice) {
+        long long ec = (e > (1ll << 25)) ? (1ll << 25) : ((e < -(1ll << 25)) ? -(1ll << 25) : e);
+        // g = mu * e / (eps + norm), with GAIN_SHIFT extra bits: |e*mu| < 2^36,
+        // << (8 + 13) < 2^57.
+        long long g = (ec * T2AUDIO_MIC_ANC_MU_Q16 * (1ll << (8 + T2AUDIO_MIC_ANC_GAIN_SHIFT))) /
+                      (A->Norm + T2AUDIO_MIC_ANC_EPS);
+
+        for (r = 0; r < 2; r++) {
+            idx = A->Pos;
+            for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+                long long w = A->W[r][k] + T2AudioMicSar(g * A->Ref[r][idx], T2AUDIO_MIC_ANC_GAIN_SHIFT);
+
+                if (w > T2AUDIO_MIC_ANC_WEIGHT_MAX) {
+                    w = T2AUDIO_MIC_ANC_WEIGHT_MAX;
+                } else if (w < -T2AUDIO_MIC_ANC_WEIGHT_MAX) {
+                    w = -T2AUDIO_MIC_ANC_WEIGHT_MAX;
+                }
+                A->W[r][k] = w;
+                idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
+            }
+        }
+    }
+
+    // Divergence guard: the canceller must never add noise. If the output
+    // stays more than 3 dB above the plain voice, start over.
+    if (A->PowVoice > T2AUDIO_MIC_ANC_FLOOR && A->PowOut > 2 * A->PowVoice) {
+        if (++A->Diverging >= T2AUDIO_MIC_ANC_DIVERGE_HOLD) {
+            for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+                A->W[0][k] = A->W[1][k] = 0;
+            }
+            A->Diverging = 0;
+            A->Resets++;
+            return delayed;
+        }
+    } else {
+        A->Diverging = 0;
+    }
+    return T2AudioMicAncClamp(e, 1ll << 23);
 }
 
 // One 24-bit sample from its 32-bit slot (low-aligned, sign in bit 23).
@@ -76,28 +261,33 @@ T2AudioMicSample24(unsigned int Raw)
     return (v & 0x00800000u) ? (int)v - 0x01000000 : (int)v;
 }
 
-static __inline long long
-T2AudioMicSar(long long v, unsigned int s)
-{
-    // Arithmetic shift right that does not depend on the compiler's
-    // behaviour for negative numbers.
-    return v >= 0 ? (v >> s) : -((-v - 1) >> s) - 1;
-}
-
 // One frame of the microphone DSP. Frame points at 3 raw slots. Dsp = 0
-// passes mic 0 through unprocessed (diagnostics). Returns a 32-bit
-// MSB-aligned PCM sample (what Windows expects for 32-bit PCM).
+// passes mic 0 through unprocessed (diagnostics); 1 is kaiT2en's 16_1 chain
+// (beam of mic 0 + mic 1); 2 replaces the beam with the three-microphone
+// noise canceller around VoiceMic (T2AudioMicAncProcess), then the same
+// high-pass and gain. Returns a 32-bit MSB-aligned PCM sample (what Windows
+// expects for 32-bit PCM).
 static __inline int
-T2AudioMicProcessFrame(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsigned int Dsp)
+T2AudioMicProcessFrameEx(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsigned int Dsp,
+                         unsigned int VoiceMic)
 {
     long long x, acc, y, out;
 
     if (!Dsp) {
         return (int)((unsigned int)T2AudioMicSample24(Frame[0]) << 8);
     }
-    // Beam: average of mic 0 and mic 1 (24-bit range), then extra precision.
-    x = ((long long)T2AudioMicSample24(Frame[0]) + (long long)T2AudioMicSample24(Frame[1]));
-    x = x * (1ll << (T2AUDIO_MIC_SHIFT - 1));
+    if (Dsp >= 2) {
+        int mic[3];
+
+        mic[0] = T2AudioMicSample24(Frame[0]);
+        mic[1] = T2AudioMicSample24(Frame[1]);
+        mic[2] = T2AudioMicSample24(Frame[2]);
+        x = (long long)T2AudioMicAncProcess(&S->Anc, mic, VoiceMic) * (1ll << T2AUDIO_MIC_SHIFT);
+    } else {
+        // Beam: average of mic 0 and mic 1 (24-bit range), then extra precision.
+        x = ((long long)T2AudioMicSample24(Frame[0]) + (long long)T2AudioMicSample24(Frame[1]));
+        x = x * (1ll << (T2AUDIO_MIC_SHIFT - 1));
+    }
     acc = (long long)g_T2AudioMicHp48k[0] * x +
           (long long)g_T2AudioMicHp48k[1] * S->X1 +
           (long long)g_T2AudioMicHp48k[2] * S->X2 -
@@ -118,6 +308,46 @@ T2AudioMicProcessFrame(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsigned
         out = -0x800000;
     }
     return (int)((unsigned int)(int)out << 8);
+}
+
+static __inline int
+T2AudioMicProcessFrame(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsigned int Dsp)
+{
+    return T2AudioMicProcessFrameEx(S, Frame, Dsp, 1);
+}
+
+// Store one MSB-aligned 32-bit capture sample into the client buffer in its
+// container (Parameters\ExtraFormats: 16 or 24 bits, packed little-endian;
+// otherwise 32). 16 and 24 bits round to nearest and saturate. Dest is the
+// frame's first byte; returns the bytes written (0 for an unknown size).
+static __inline unsigned int
+T2AudioMicStoreSample(unsigned char *Dest, int Sample, unsigned int Bits)
+{
+    long long v;
+
+    if (Bits == 32) {
+        unsigned int u = (unsigned int)Sample;
+
+        Dest[0] = (unsigned char)u;
+        Dest[1] = (unsigned char)(u >> 8);
+        Dest[2] = (unsigned char)(u >> 16);
+        Dest[3] = (unsigned char)(u >> 24);
+        return 4;
+    }
+    if (Bits != 24 && Bits != 16) {
+        return 0;
+    }
+    v = T2AudioMicSar((long long)Sample + (1ll << (31 - Bits)), 32 - Bits);
+    if (v > (1ll << (Bits - 1)) - 1) {
+        v = (1ll << (Bits - 1)) - 1;
+    }
+    Dest[0] = (unsigned char)(v & 0xFF);
+    Dest[1] = (unsigned char)((v >> 8) & 0xFF);
+    if (Bits == 24) {
+        Dest[2] = (unsigned char)((v >> 16) & 0xFF);
+        return 3;
+    }
+    return 2;
 }
 
 // One headset microphone frame: the slot already holds signed 32-bit PCM

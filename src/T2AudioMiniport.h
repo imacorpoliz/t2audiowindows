@@ -230,7 +230,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // hardware run (2026-10-29). Without them an endpoint records silence.
     T2AUDIO_CAPTURE_PATH Mic;
     T2AUDIO_CAPTURE_PATH HeadsetMic;
+    // MicDsp 2 (Parameters\MicDsp=2): the three-microphone noise canceller -
+    // MicVoiceMic (0..2, default 1) carries the voice, the other two are the
+    // references for the speakers' sound (T2AudioMicAncProcess).
     ULONG MicDsp;
+    ULONG MicVoiceMic;
     // MicNoiseSuppression (Parameters\MicNoiseSuppression=1, default 0): a
     // smooth, per-stream integer noise gate on the mono output of both
     // microphone endpoints (T2AudioMicLogic.h). Independent of MicDsp and

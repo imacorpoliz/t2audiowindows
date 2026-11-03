@@ -152,6 +152,157 @@ static void test_capture_aim(void)
     CHECK(T2AudioMicRingSlot(T2AUDIO_MIC_RING_FRAMES + 5, T2AUDIO_MIC_RING_FRAMES) == 5, "wrap");
 }
 
+// ---------------------------------------------------------------------------
+// Three-microphone noise canceller (MicDsp=2)
+// ---------------------------------------------------------------------------
+static unsigned int g_lcg = 12345u;
+
+static int noise24(int amp)   // uniform-ish white noise, |x| <= amp
+{
+    g_lcg = g_lcg * 1103515245u + 12345u;
+    return (int)(((long long)((g_lcg >> 8) & 0xFFFF) - 32768) * amp / 32768);
+}
+
+static int speech24(long n, double amp)   // two tones as a stand-in for a talker
+{
+    return (int)lrint(amp * 8388607.0 *
+                      (0.6 * sin(2 * M_PI * 310.0 * n / 48000.0) + 0.4 * sin(2 * M_PI * 1270.0 * n / 48000.0)));
+}
+
+#define ANC_HIST 64
+
+// Runs the canceller on a scene: a talker in front (same at all three
+// mics) and a noise source whose sound reaches mic 0 / 1 / 2 with the given
+// delays. Returns the output power, the power of (output - delayed speech)
+// and the speech gain, over the last second.
+static void run_anc(double speechAmp, int noiseAmp, int d0, int d1, int d2, int independent,
+                    double *outPow, double *residualPow, double *speechGain, double *voiceNoisePow,
+                    unsigned int *resets)
+{
+    T2AUDIO_MIC_ANC_STATE a;
+    int hist[ANC_HIST] = { 0 };
+    long n, total = 48000 * 4;
+    double po = 0, pr = 0, ps = 0, cross = 0, pn = 0;
+
+    T2AudioMicAncReset(&a);
+    g_lcg = 777u;
+    for (n = 0; n < total; n++) {
+        int s = (speechAmp > 0) ? speech24(n, speechAmp) : 0;
+        int mic[3], out;
+        long t = n % ANC_HIST;
+
+        hist[t] = noise24(noiseAmp);
+        if (independent) {
+            mic[0] = s + noise24(noiseAmp);
+            mic[1] = s + hist[t];
+            mic[2] = s + noise24(noiseAmp);
+        } else {
+            mic[0] = s + hist[(t - d0 + ANC_HIST) % ANC_HIST];
+            mic[1] = s + hist[(t - d1 + ANC_HIST) % ANC_HIST];
+            mic[2] = s + hist[(t - d2 + ANC_HIST) % ANC_HIST];
+        }
+        out = T2AudioMicAncProcess(&a, mic, 1);
+        CHECK(out >= -(1 << 23) && out < (1 << 23), "out of 24-bit range: %d", out);
+        if (n >= total - 48000) {
+            double sd = (speechAmp > 0) ? (double)speech24(n - T2AUDIO_MIC_ANC_DELAY, speechAmp) : 0.0;
+            double vn = (double)(independent ? hist[t] : hist[(t - d1 + ANC_HIST) % ANC_HIST]);
+
+            po += (double)out * out;
+            pr += ((double)out - sd) * ((double)out - sd);
+            ps += sd * sd;
+            cross += (double)out * sd;
+            pn += vn * vn;
+        }
+    }
+    *outPow = po / 48000.0;
+    *residualPow = pr / 48000.0;
+    *speechGain = (ps > 0) ? cross / ps : 0.0;
+    *voiceNoisePow = pn / 48000.0;
+    *resets = a.Resets;
+}
+
+static void test_anc(void)
+{
+    double po, pr, gain, pn;
+    unsigned int resets;
+
+    // A talker alone: the references are empty, nothing adapts, the voice
+    // comes through exactly (delayed).
+    run_anc(0.05, 0, 0, 0, 0, 0, &po, &pr, &gain, &pn, &resets);
+    CHECK(pr == 0.0, "voice alone changed: residual %g", pr);
+    CHECK(fabs(gain - 1.0) < 1e-9, "voice alone gain %g", gain);
+
+    // Speaker noise alone, arriving off-axis (mic 0 first, mic 2 last).
+    run_anc(0, 400000, 0, 2, 4, 0, &po, &pr, &gain, &pn, &resets);
+    printf("  anc: off-axis noise alone: %.1f dB\n", 10 * log10(po / pn));
+    CHECK(10 * log10(po / pn) < -6.0, "off-axis noise reduced only %.1f dB", 10 * log10(po / pn));
+    CHECK(resets == 0, "canceller reset %u times on plain noise", resets);
+
+    // Talker + off-axis noise: the voice keeps its level, the noise drops.
+    run_anc(0.05, 400000, 0, 2, 4, 0, &po, &pr, &gain, &pn, &resets);
+    printf("  anc: talker + noise: speech gain %.2f dB, noise %.1f dB\n",
+           20 * log10(gain), 10 * log10(pr / pn));
+    CHECK(fabs(20 * log10(gain)) < 1.0, "speech gain %.2f dB", 20 * log10(gain));
+    CHECK(10 * log10(pr / pn) < -3.0, "noise under speech reduced only %.1f dB", 10 * log10(pr / pn));
+
+    // Uncorrelated noise at each mic (nothing to cancel): never louder than
+    // the plain voice by more than the guard's 3 dB.
+    run_anc(0, 400000, 0, 0, 0, 1, &po, &pr, &gain, &pn, &resets);
+    printf("  anc: diffuse noise: %.1f dB, resets %u\n", 10 * log10(po / pn), resets);
+    CHECK(10 * log10(po / pn) < 3.5, "diffuse noise boosted %.1f dB", 10 * log10(po / pn));
+
+    // Full scale, out of phase: saturates, no overflow.
+    {
+        T2AUDIO_MIC_ANC_STATE a;
+        long n;
+        int mic[3], out = 0;
+
+        T2AudioMicAncReset(&a);
+        for (n = 0; n < 48000; n++) {
+            mic[0] = (n & 1) ? 0x7FFFFF : -0x800000;
+            mic[1] = (n & 1) ? -0x800000 : 0x7FFFFF;
+            mic[2] = (n & 2) ? 0x7FFFFF : -0x800000;
+            out = T2AudioMicAncProcess(&a, mic, 1);
+            CHECK(out >= -(1 << 23) && out < (1 << 23), "full scale out of range: %d", out);
+        }
+        (void)out;
+    }
+
+    // Through the full chain: with the talker alone MicDsp=2 is MicDsp=1
+    // delayed by T2AUDIO_MIC_ANC_DELAY frames.
+    {
+        T2AUDIO_MIC_STATE s1, s2;
+        int out1[48000];
+        long n;
+        int same = 1;
+
+        T2AudioMicReset(&s1);
+        T2AudioMicReset(&s2);
+        for (n = 0; n < 48000; n++) {
+            unsigned int f[3];
+            int v = speech24(n, 0.01);
+            int o2;
+
+            f[0] = f[1] = f[2] = raw24(v);
+            out1[n] = T2AudioMicProcessFrameEx(&s1, f, 1, 1);
+            o2 = T2AudioMicProcessFrameEx(&s2, f, 2, 1);
+            if (n >= T2AUDIO_MIC_ANC_DELAY && o2 != out1[n - T2AUDIO_MIC_ANC_DELAY]) {
+                same = 0;
+            }
+        }
+        CHECK(same, "MicDsp=2 differs from delayed MicDsp=1 on a frontal talker");
+    }
+    // The voice microphone index wraps safely.
+    {
+        T2AUDIO_MIC_ANC_STATE a;
+        int mic[3] = { 100, 200, 300 };
+
+        T2AudioMicAncReset(&a);
+        (void)T2AudioMicAncProcess(&a, mic, 7);
+        CHECK(a.Ref[0][a.Pos] == 100 && a.Ref[1][a.Pos] == -100, "bad voice index not treated as 1");
+    }
+}
+
 // Headset microphone ("Codec Input"): signed 32-bit mono passes unchanged,
 // one 32-bit slot per frame, and the ring wraps like the array's.
 static void test_headset_mic(void)
@@ -186,6 +337,28 @@ static void test_headset_mic(void)
     CHECK((T2AudioMicRingSlot(0x7FFFFFFFFFFFll, T2AUDIO_HEADSET_MIC_RING_FRAMES) + 1) *
               T2AUDIO_HEADSET_MIC_BYTES_PER_FRAME <= T2AUDIO_HEADSET_MIC_RING_BYTES,
           "last byte in ring");
+}
+
+// Client containers for capture (ExtraFormats): 16 / 24 / 32 bits.
+static void test_store_sample(void)
+{
+    unsigned char b[4];
+
+    CHECK(T2AudioMicStoreSample(b, 0x12345678, 32) == 4 &&
+          b[0] == 0x78 && b[1] == 0x56 && b[2] == 0x34 && b[3] == 0x12, "32-bit LE");
+    CHECK(T2AudioMicStoreSample(b, 0x12345678, 24) == 3 &&
+          b[0] == 0x56 && b[1] == 0x34 && b[2] == 0x12, "24-bit packed");
+    CHECK(T2AudioMicStoreSample(b, 0x12345678, 16) == 2 && b[0] == 0x34 && b[1] == 0x12, "16-bit");
+    // Rounding: 0x00008000 rounds up to 1 LSB in 16 bits.
+    CHECK(T2AudioMicStoreSample(b, 0x00008000, 16) == 2 && b[0] == 1 && b[1] == 0, "16-bit rounds");
+    // Negative: -1 LSB of 16 bits.
+    CHECK(T2AudioMicStoreSample(b, -65536, 16) == 2 && b[0] == 0xFF && b[1] == 0xFF, "16-bit negative");
+    // Full scale saturates instead of wrapping when rounding up.
+    CHECK(T2AudioMicStoreSample(b, INT_MAX, 16) == 2 && b[0] == 0xFF && b[1] == 0x7F, "16-bit saturates");
+    CHECK(T2AudioMicStoreSample(b, INT_MAX, 24) == 3 && b[0] == 0xFF && b[1] == 0xFF && b[2] == 0x7F,
+          "24-bit saturates");
+    CHECK(T2AudioMicStoreSample(b, INT_MIN, 16) == 2 && b[0] == 0x00 && b[1] == 0x80, "16-bit min");
+    CHECK(T2AudioMicStoreSample(b, 5, 8) == 0, "unknown size rejected");
 }
 
 // Jack reporting: "connected" until a read succeeded once, then the jack.
@@ -378,6 +551,8 @@ int main(void)
     test_sample24();
     test_dsp();
     test_capture_aim();
+    test_anc();
+    test_store_sample();
     test_headset_mic();
     test_jack_report();
     test_noise_gate();

@@ -346,6 +346,35 @@ static void test_routed_chunk(void)
     check("zero source frame size", !T2AudioCalculateRoutedChunk(0, 0, 1, 0, 11520, 8, 7976, &src, &hp, &bytes));
 }
 
+static void test_notification_packet(void)
+{
+    // 10 ms of stereo 32-bit at 48 kHz = 480 frames = 3840 bytes, 2 packets.
+    const unsigned long size = 3840, bpf = 8;
+    unsigned long long last = 0, p;
+    unsigned long long f;
+    int signals = 0;
+
+    printf("T2AudioNotificationPacket\n");
+    check("off -> 0", T2AudioNotificationPacket(1000, bpf, size, 0) == 0);
+    check("no frame size -> 0", T2AudioNotificationPacket(1000, 0, size, 2) == 0);
+    check("frame 0 -> packet 0", T2AudioNotificationPacket(0, bpf, size, 2) == 0);
+    check("frame 239 -> packet 0", T2AudioNotificationPacket(239, bpf, size, 2) == 0);
+    check("frame 240 -> packet 1", T2AudioNotificationPacket(240, bpf, size, 2) == 1);
+    check("frame 480 -> packet 2 (not wrapped)", T2AudioNotificationPacket(480, bpf, size, 2) == 2);
+    check("one packet per buffer", T2AudioNotificationPacket(480, bpf, size, 1) == 1);
+    // Advancing in 2 ms steps (96 frames) for 1 s: 200 boundaries, each seen once.
+    for (f = 0; f <= 48000; f += 96) {
+        p = T2AudioNotificationPacket(f, bpf, size, 2);
+        if (p != last) {
+            signals++;
+            last = p;
+        }
+    }
+    check("200 signals in 1 s at 2 packets / 10 ms", signals == 200);
+    check("huge position does not overflow",
+          T2AudioNotificationPacket(0xFFFFFFFFull * 4, bpf, size, 2) == (0xFFFFFFFFull * 4 * bpf) / 1920);
+}
+
 int main(void)
 {
     test_align();
@@ -358,6 +387,7 @@ int main(void)
     test_ticks_to_frames();
     test_convert_samples();
     test_widen_pcm();
+    test_notification_packet();
 
     printf("\n%s (%d failure%s)\n",
            g_failures ? "FAILED" : "ALL PASSED",

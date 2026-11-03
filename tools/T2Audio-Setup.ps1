@@ -59,6 +59,7 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$AntiRattle,      # extra woofer protection
     [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression, # microphone noise gate
     [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,      # 3.5 mm headset microphone (experimental)
+    [ValidateRange(0, 1)] [Nullable[int]]$MicCanceller,    # 3-mic canceller of the speakers' sound (MicDsp=2)
 
     # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
     # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
@@ -80,6 +81,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+# -Preset given on the command line (or picked in the menu): only then does
+# an update overwrite the current sound settings.
+$script:PresetGiven = $PSBoundParameters.ContainsKey('Preset')
+$script:PresetChosen = $false
 
 $HardwareId   = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
 $ServiceName  = 'T2AudioMiniport'
@@ -169,7 +174,9 @@ function Write-Section($t) { Write-Host ''; Write-Host "  ── $t " -Foregroun
 function Write-Ok($m)   { Write-Host "   ✓ $m" -ForegroundColor Green }
 function Write-Info($m) { Write-Host "     $m" -ForegroundColor Gray }
 function Write-Warn($m) { Write-Host "   ! $m" -ForegroundColor Yellow }
-function Write-Fail($m) { Write-Host "   ✗ $m" -ForegroundColor Red }
+# Any failure makes the script exit with 1 (so wrappers and scripts see it).
+$script:Failed = $false
+function Write-Fail($m) { Write-Host "   ✗ $m" -ForegroundColor Red; $script:Failed = $true }
 
 function Confirm-Action($prompt) {
     if ($Force) { return $true }
@@ -527,11 +534,13 @@ function Show-Presets {
     }
 }
 
-function Select-PresetInteractive {
+# Pick a preset by number. With -AllowKeep, Enter keeps the current sound
+# settings ($null), as an update should.
+function Select-PresetInteractive([switch]$AllowKeep) {
     Show-Presets
     $keys = @($Presets.Keys)
-    $a = Read-Host "  Preset number (Enter = 1)"
-    if (-not $a) { return $keys[0] }
+    $a = Read-Host $(if ($AllowKeep) { "  Preset number (Enter = keep the current settings)" } else { "  Preset number (Enter = 1)" })
+    if (-not $a) { if ($AllowKeep) { return $null } else { return $keys[0] } }
     $n = 0
     if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $keys.Count) { return $keys[$n - 1] }
     Write-Warn 'No such number; using "Like macOS".'
@@ -649,18 +658,30 @@ function Invoke-Install {
         Write-Info  'Run .\T2Audio-Setup.ps1 -Action Prepare (turns test mode on), reboot, then install.'
         return
     }
-    foreach ($f in @($InfPath, $SysPath, $CatPath)) {
-        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Package file missing: $f (build and sign the driver package first)"; return }
-    }
+    if (-not (Test-DriverPackage)) { return }
     $sig = Get-AuthenticodeSignature -LiteralPath $SysPath
-    if (-not $sig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys is not signed.'; return }
     if (-not (Install-PackageCertificate $sig.SignerCertificate)) { return }
     $hash = (Get-FileHash -LiteralPath $SysPath -Algorithm SHA256).Hash
-    $infVer = (Select-String -LiteralPath $InfPath -Pattern '^DriverVer\s*=\s*(.+)$').Matches | Select-Object -First 1
-    Write-Ok "Package: $(if ($infVer) { $infVer.Groups[1].Value } else { '?' }), SHA256 $($hash.Substring(0, 16))…"
+    $pkgVer = Get-PackageVersion
+    Write-Ok "Package: $(if ($pkgVer) { $pkgVer } else { '?' }), SHA256 $($hash.Substring(0, 16))…"
 
     $d = Get-T2Device
     if (-not $d) { Write-Fail 'Apple T2 audio device not found.'; return }
+    $prevService = Get-DeviceService $d
+    $prevVer = Get-DeviceDriverVersion $d
+    $update = ($prevService -eq $ServiceName)
+    if ($update -and $pkgVer -and $prevVer) {
+        try {
+            if ([version]$pkgVer -lt [version]$prevVer) {
+                Write-Warn "The package ($pkgVer) is OLDER than the installed driver ($prevVer)."
+                if (-not (Confirm-Action 'Downgrade anyway?')) { return }
+            } elseif ([version]$pkgVer -eq [version]$prevVer) {
+                Write-Info "Version $pkgVer is already installed; it is reinstalled."
+            } else {
+                Write-Info "Update: $prevVer -> $pkgVer"
+            }
+        } catch { }
+    }
 
     Write-Host ''
     Write-Warn 'This driver is experimental. Once installed it starts on every boot.'
@@ -674,14 +695,23 @@ function Invoke-Install {
     if (Test-Path $TestSession) { Remove-Item -Path $TestSession -Recurse -Force; Write-Info 'Test-agent session removed.' }
     Unregister-ScheduledTask -TaskName 'T2Audio-AutoCapture-AfterBoot' -Confirm:$false -ErrorAction SilentlyContinue
 
-    # Settings before binding: the driver reads them at start.
-    Write-PresetValues $Preset
+    # Settings before binding: the driver reads them at start. An update keeps
+    # the user's sound settings and features; the preset is only written on a
+    # first install or when one was chosen explicitly.
+    $prevProduction = Get-Param 'EnableProduction'
+    if (-not $update -or $script:PresetChosen -or $script:PresetGiven -or
+        $null -eq (Get-Param 'SpeakerDsp')) {
+        Write-PresetValues $Preset
+    } else {
+        Write-Ok "Sound settings kept ($(if ($cur = Get-CurrentPresetName) { $Presets[$cur].Title } else { 'custom' }))."
+    }
     Set-Param 'EnableProduction' 1
-    Set-Param 'HeadphoneOutput' 1
-    Set-Param 'SeparateHeadphoneEndpoint' 1
-    Set-Param 'JackEvents' 1
-    Set-Param 'HeadphoneAutoMute' 1
-    Set-Param 'HeadphoneCrossfeed' 0
+    # Feature defaults only where nothing was chosen yet (an update must not
+    # turn the headphones back on after the user switched them off).
+    foreach ($kv in @(@('HeadphoneOutput', 1), @('SeparateHeadphoneEndpoint', 1), @('JackEvents', 1),
+                      @('HeadphoneAutoMute', 1), @('HeadphoneCrossfeed', 0))) {
+        if ($null -eq (Get-Param $kv[0])) { Set-Param $kv[0] $kv[1] }
+    }
     Set-Param 'CrashGuardArmed' 0
     Set-Param 'CrashGuardStrikes' 0
     Write-Ok 'Persistent mode on, crash guard reset.'
@@ -694,11 +724,17 @@ function Invoke-Install {
     if ($r.Code -ne 0 -and $r.Code -ne 3010) {
         Write-Fail "pnputil /add-driver returned $($r.Code)."
         Write-Info ($r.Out.Trim())
+        if (-not $update) {
+            # Nothing of ours runs: do not leave persistent mode switched on.
+            if ($null -eq $prevProduction) { Remove-ItemProperty -Path $ParamsPath -Name 'EnableProduction' -ErrorAction SilentlyContinue }
+            else { Set-Param 'EnableProduction' $prevProduction }
+        }
         return
     }
-    $d = Wait-DeviceService $ServiceName 15 30
+    $d = Wait-DeviceService $ServiceName 30
     if ($d -and $d.Status -eq 'OK' -and (Get-DeviceService $d) -eq $ServiceName) {
-        Write-Ok 'T2AudioPort is installed and running.'
+        Write-Ok "T2AudioPort $(Get-DeviceDriverVersion $d) is installed and running."
+        Remove-StaleT2Packages $d
         Set-T2Volume $Volume
         Write-Host ''
         Write-Info 'Pick the Apple T2 "Speakers" as the output in Sound settings if Windows did not do it by itself.'
@@ -708,6 +744,63 @@ function Invoke-Install {
     } else {
         Write-Fail "The device did not start: $($d.Status), driver $(Get-DeviceService $d)."
         Write-Info 'Check testsigning and the signature; to roll back use "Restore AppleAudio".'
+    }
+}
+
+function Get-PackageVersion {
+    $m = Select-String -LiteralPath $InfPath -Pattern '^DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' -ErrorAction SilentlyContinue |
+         Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return $null
+}
+
+# The package must be complete and consistent before Windows sees it: a
+# rebuilt .sys or an edited .inf without a new catalog fails deep inside
+# pnputil with an unhelpful code. Checks: the files exist, the .sys and the
+# .cat carry valid signatures by the same certificate, and the catalog holds
+# the INF's hash (driver catalogs list the SHA1 of each member file).
+function Test-DriverPackage {
+    foreach ($f in @($InfPath, $SysPath, $CatPath)) {
+        if (-not (Test-Path -LiteralPath $f)) { Write-Fail "Package file missing: $f (build and sign the driver package first)"; return $false }
+    }
+    $sysSig = Get-AuthenticodeSignature -LiteralPath $SysPath
+    $catSig = Get-AuthenticodeSignature -LiteralPath $CatPath
+    if (-not $sysSig.SignerCertificate) { Write-Fail 'T2AudioMiniport.sys is not signed.'; return $false }
+    if (-not $catSig.SignerCertificate) { Write-Fail 'The catalog (t2audiominiport.cat) is not signed.'; return $false }
+    if ($sysSig.Status -eq 'HashMismatch' -or $catSig.Status -eq 'HashMismatch') {
+        Write-Fail 'A package file was changed after signing (hash mismatch): rebuild and re-sign the package.'; return $false
+    }
+    if ($sysSig.SignerCertificate.Thumbprint -ne $catSig.SignerCertificate.Thumbprint) {
+        Write-Fail 'The .sys and the .cat are signed with different certificates.'; return $false
+    }
+    $catBytes = [IO.File]::ReadAllBytes($CatPath)
+    $catHex = [BitConverter]::ToString($catBytes) -replace '-', ''
+    $catTags = ([Text.Encoding]::Unicode.GetString($catBytes)).ToUpperInvariant()
+    $infBytes = [IO.File]::ReadAllBytes($InfPath)
+    $listed = $false
+    foreach ($alg in @([Security.Cryptography.SHA1]::Create(), [Security.Cryptography.SHA256]::Create())) {
+        $h = [BitConverter]::ToString($alg.ComputeHash($infBytes)) -replace '-', ''
+        if ($catHex.Contains($h) -or $catTags.Contains($h)) { $listed = $true }
+    }
+    if (-not $listed) {
+        Write-Fail 'T2AudioMiniport.inf does not match the catalog (edited after signing): run inf2cat and sign the catalog again.'
+        return $false
+    }
+    Write-Ok "Package consistent and signed by $($sysSig.SignerCertificate.Subject)"
+    return $true
+}
+
+# After a successful install: remove older T2AudioPort packages from the
+# driver store (they pile up with every update, and Windows could pick one
+# of them again). The package the device now uses is kept.
+function Remove-StaleT2Packages($dev) {
+    $active = $null
+    try { $active = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction Stop).Data } catch { }
+    if (-not $active) { return }
+    foreach ($inf in @(Get-OemInfsForT2)) {
+        if ($inf -ieq $active) { continue }
+        $r = Invoke-Pnp @('/delete-driver', $inf)
+        if ($r.Code -eq 0) { Write-Info "Removed old package $inf from the driver store." }
     }
 }
 
@@ -885,6 +978,12 @@ $FeatureDefinitions = [ordered]@{
         On = @{ HeadsetMicInput = 1; HeadsetMicStartIo = 1 }
         Off = @{ HeadsetMicInput = 0; HeadsetMicStartIo = 0 }
     }
+    MicCanceller = [ordered]@{
+        Title = 'Mic: cancel speaker sound (3 mics, beta)'
+        Params = @('MicDsp')
+        On = @{ MicDsp = 2 }
+        Off = @{ MicDsp = 1 }
+    }
     MicNoiseSuppression = [ordered]@{
         Title = 'Microphone noise suppression'
         Params = @('MicNoiseSuppression')
@@ -935,7 +1034,7 @@ $FeatureDefaults = @{
     HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 1; HeadphoneAutoMute = 1
     MicInput = 0; MicStartIo = 0; ResumeAfterSleep = 0; ExtraFormats = 0
     HeadphoneCrossfeed = 0; DspLoudness = 0; AntiRattle = 0; MicNoiseSuppression = 0
-    HeadsetMicInput = 0; HeadsetMicStartIo = 0
+    HeadsetMicInput = 0; HeadsetMicStartIo = 0; MicDsp = 1
 }
 
 # Read one feature value, including the driver's effective default.
@@ -945,12 +1044,16 @@ function Get-FeatureParam($name) {
     return [int]$v
 }
 
-# Return ON, OFF, or PARTIAL when a feature group has mixed values.
+# Return ON, OFF, or PARTIAL when a feature group has mixed values. A group
+# is ON when every value equals its ON value (not merely non-zero: MicDsp is
+# 1 when the canceller is off and 2 when it is on).
 function Get-FeatureState($name) {
     $def = $FeatureDefinitions[$name]
-    $values = @($def.Params | ForEach-Object { Get-FeatureParam $_ })
-    $onCount = @($values | Where-Object { $_ -ne 0 }).Count
-    if ($onCount -eq $values.Count) { return 'ON' }
+    $onCount = 0
+    foreach ($p in $def.Params) {
+        if ((Get-FeatureParam $p) -eq [int]$def.On[$p]) { $onCount++ }
+    }
+    if ($onCount -eq $def.Params.Count) { return 'ON' }
     if ($onCount -eq 0) { return 'OFF' }
     return 'PARTIAL'
 }
@@ -976,7 +1079,7 @@ function Get-FeatureArgumentValues {
         Headphones = $Headphones; Microphone = $Microphone; ResumeAfterSleep = $ResumeAfterSleep
         ExtraFormats = $ExtraFormats; HeadphoneCrossfeed = $HeadphoneCrossfeed
         DspLoudness = $DspLoudness; AntiRattle = $AntiRattle; MicNoiseSuppression = $MicNoiseSuppression
-        HeadsetMic = $HeadsetMic
+        HeadsetMic = $HeadsetMic; MicCanceller = $MicCanceller
     }
 }
 
@@ -1059,6 +1162,11 @@ function Invoke-Features([switch]$Interactive) {
     } elseif ($changes.Contains('MicNoiseSuppression') -and $changes['MicNoiseSuppression'] -eq 1 -and
               -not $micAfter -and -not $headsetAfter) {
         Write-Warn 'Microphone noise suppression needs a microphone input; enabling microphones too.'
+        $changes['Microphone'] = 1
+    }
+    # The speaker-sound canceller runs on the built-in microphones.
+    if ($changes.Contains('MicCanceller') -and $changes['MicCanceller'] -eq 1 -and -not $micAfter) {
+        Write-Warn 'The speaker-sound canceller needs the built-in microphones; enabling them too.'
         $changes['Microphone'] = 1
     }
     if ($changes.Contains('HeadsetMic') -and $changes['HeadsetMic'] -eq 1) {
@@ -1174,8 +1282,15 @@ function Invoke-SoundTest {
 function Invoke-MicTest {
     Add-T2Code
     Write-Section 'Microphone test'
-    $mic = Get-T2Endpoints | Where-Object { $_.Flow -eq 'Capture' -and $_.State -eq 'Active' } | Select-Object -First 1
-    if (-not $mic) { Write-Fail 'No active T2 microphone: -Action Features -Microphone 1 first.'; return }
+    $mics = @(Get-T2Endpoints | Where-Object { $_.Flow -eq 'Capture' -and $_.State -eq 'Active' })
+    if ($mics.Count -eq 0) { Write-Fail 'No active T2 microphone: -Action Features -Microphone 1 first.'; return }
+    $mic = $mics[0]
+    if ($mics.Count -gt 1 -and -not $Force) {
+        for ($i = 0; $i -lt $mics.Count; $i++) { Write-Host ("   {0}. {1} ({2})" -f ($i + 1), $mics[$i].Kind, $mics[$i].Name) -ForegroundColor White }
+        $a = Read-Host '  Which microphone (Enter = 1)'
+        $n = 0
+        if ([int]::TryParse("$a", [ref]$n) -and $n -ge 1 -and $n -le $mics.Count) { $mic = $mics[$n - 1] }
+    }
     if ([T2Setup.Endpoints]::DefaultId(1, 1) -ne $mic.Id) {
         if (-not (Confirm-Action "Make '$($mic.Name)' the default microphone for the test?")) { return }
         $null = [T2Setup.Endpoints]::SetDefault($mic.Id)
@@ -1399,13 +1514,23 @@ function Show-Menu {
         Write-Section 'Maintenance'
         Write-Host '   D. Doctor      R. Bug report      B. Backup settings      L. Load settings' -ForegroundColor White
         Write-Host '   K. Switch shortcut (Ctrl+Alt+H)      G. Windows Update guard      C. Reset crash guard' -ForegroundColor White
+        Write-Host '   X. Restart the audio device (applies registry changes, fixes a stuck sound)' -ForegroundColor White
         Write-Host '   0. Exit' -ForegroundColor White
         $c = Read-Host "`n  Choice"
+        $script:Failed = $false
         switch ($c) {
             '1' { Invoke-Prepare }
-            '2' { $script:Preset = Select-PresetInteractive; Invoke-Install }
+            '2' {
+                # An update keeps the current sound unless a preset is picked.
+                $installed = ((Get-DeviceService (Get-T2Device)) -eq $ServiceName)
+                $p = Select-PresetInteractive -AllowKeep:$installed
+                $script:PresetChosen = ($null -ne $p)
+                if ($p) { $script:Preset = $p }
+                Invoke-Install
+            }
             '3' { Invoke-Uninstall }
             '4' { $script:Preset = Select-PresetInteractive; Invoke-Preset }
+            'x' { Invoke-Restart }
             '5' { Invoke-Tune -Interactive }
             '6' { Invoke-Features -Interactive }
             '7' { $script:To = 'Toggle'; Invoke-Switch }
@@ -1458,3 +1583,6 @@ switch ($Action) {
     'ResetGuard' { Write-Banner; Invoke-ResetGuard }
     'Uninstall'  { Write-Banner; Invoke-Uninstall }
 }
+# Exit code for wrappers and scripts: 1 if anything reported a failure.
+if ($Action -ne 'Menu' -and $script:Failed) { exit 1 }
+exit 0
