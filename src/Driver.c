@@ -53,9 +53,11 @@ T2AudioPnpHandler(
             T2AudioStopResumeWork(context);
             T2AudioStopJackPoll(context);
             T2AudioReleaseHeadphoneEvents(context);
-            // The T2 must stop writing the mic ring before it is freed; this
-            // needs the BCE transport, which UnmapResources closes.
-            T2AudioMicUnregister(context);
+            T2AudioReleaseHeadsetMicEvents(context);
+            // The T2 must stop writing the mic rings before they are freed;
+            // this needs the BCE transport, which UnmapResources closes.
+            T2AudioMicUnregister(context, &context->Mic);
+            T2AudioMicUnregister(context, &context->HeadsetMic);
             T2AudioUnmapResources(context);
             // Persistent mode: clean end of the session.
             T2AudioCrashGuardSetArmed(context, FALSE);
@@ -547,6 +549,7 @@ T2AudioStartDeviceInner(
     KeInitializeEvent(&context->JackWorkDone, NotificationEvent, TRUE);
     KeInitializeSpinLock(&context->ResumeWorkLock);
     KeInitializeEvent(&context->ResumeWorkDone, NotificationEvent, TRUE);
+    T2AudioMicInitPaths(context);
     T2AudioDetectHardwareModel(context);
 
     // Never start in Safe Mode. This driver programs device memory, and a fault
@@ -674,16 +677,29 @@ T2AudioStartDeviceInner(
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadphoneAttenuation", 2));
     context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
     // Built-in microphones (ROADMAP 5): off by default; MicDsp 1 = kaiT2en chain.
-    context->MicInput = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
+    context->Mic.Enabled = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
     context->MicDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1) ? 1u : 0u;
+    // MicNoiseSuppression (default 0): a smooth per-stream noise gate on the
+    // mono output of both microphone endpoints, independent of MicDsp and the
+    // START_IO gates. Off is a bit-exact bypass (T2AudioMicLogic.h).
+    context->MicNoiseSuppression =
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0) ? 1u : 0u;
     // START_IO on the microphone only with this second, explicit gate: the
     // first try powered the Mac off (EXCERPT_20261029_part2_mics.md).
-    context->MicStartIo = (context->MicInput &&
+    context->Mic.StartIo = (context->Mic.Enabled &&
         T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicStartIo", 0)) ? 1u : 0u;
+    // Headset microphone on the 3.5 mm jack ("Codec Input"): off by default,
+    // with its own START_IO gate, like the built-in microphones. Not
+    // hardware-tested yet.
+    context->HeadsetMic.Enabled =
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadsetMicInput", 0) ? 1u : 0u;
+    context->HeadsetMic.StartIo = (context->HeadsetMic.Enabled &&
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"HeadsetMicStartIo", 0)) ? 1u : 0u;
     context->ExtraFormats = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ExtraFormats", 0) ? 1u : 0u;
-    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicStartIo=%u MicDsp=%u ExtraFormats=%u ResumeAfterSleep=%u JackProbeAll=%u\n",
+    KdPrint(("T2Audio: headphone/mic/power parameters: HeadphoneOutput=%u HeadphoneAttenuation=%u (-%u dB) MicInput=%u MicStartIo=%u MicDsp=%u MicNoiseSuppression=%u HeadsetMicInput=%u HeadsetMicStartIo=%u ExtraFormats=%u ResumeAfterSleep=%u JackProbeAll=%u\n",
              context->HeadphoneOutput, context->HeadphoneAttenuation,
-             context->HeadphoneAttenuation * 6u, context->MicInput, context->MicStartIo, context->MicDsp,
+             context->HeadphoneAttenuation * 6u, context->Mic.Enabled, context->Mic.StartIo, context->MicDsp,
+             context->MicNoiseSuppression, context->HeadsetMic.Enabled, context->HeadsetMic.StartIo,
              context->ExtraFormats, context->ResumeAfterSleep, context->JackProbeAll));
     KdPrint(("T2Audio: mode parameters: ForceSystemBuffer=%u MdlVariant=%u TweeterMode=%u OutputAttenuation=%u (-%u dB) ClockRateTracking=%u SpeakerDsp=%u DspGainDb=%u TweeterTrimDb=%u WooferLimitDb=%u DspAutoGain=%u BassDb=%d TrebleDb=%d ClarityDb=%d CompStyle=%u ExtendedProbe=%u JackEvents=%u HeadphoneAutoMute=%u\n",
              context->ForceSystemBuffer ? 1u : 0u,
@@ -859,11 +875,24 @@ T2AudioStartDeviceInner(
 
     // Microphone filter pair (Parameters\MicInput=1 and "Digital Mic" in
     // BufferStruct). A failure only leaves the microphone out.
-    if (context->MicInput && context->HardwareReady && T2AudioMicPresentInBufferStruct(context)) {
-        NTSTATUS micStatus = T2AudioRegisterMicFilters(DeviceObject, Irp, ResourceList, context);
+    if (context->Mic.Enabled && context->HardwareReady &&
+        T2AudioMicPresentInBufferStruct(context, &context->Mic)) {
+        NTSTATUS micStatus = T2AudioRegisterMicFilters(DeviceObject, Irp, ResourceList, context,
+                                                       &context->Mic);
 
-        context->MicFiltersRegistered = NT_SUCCESS(micStatus) ? TRUE : FALSE;
+        context->Mic.FiltersRegistered = NT_SUCCESS(micStatus) ? TRUE : FALSE;
         KdPrint(("T2Audio: microphone endpoint %s (0x%08X)\n",
+                 NT_SUCCESS(micStatus) ? "registered" : "NOT registered", micStatus));
+    }
+    // Headset microphone pair (Parameters\HeadsetMicInput=1; "Codec Input" is
+    // appended to BufferStruct at registration). A failure only leaves it out.
+    if (context->HeadsetMic.Enabled && context->HardwareReady &&
+        T2AudioMicPresentInBufferStruct(context, &context->HeadsetMic)) {
+        NTSTATUS micStatus = T2AudioRegisterMicFilters(DeviceObject, Irp, ResourceList, context,
+                                                       &context->HeadsetMic);
+
+        context->HeadsetMic.FiltersRegistered = NT_SUCCESS(micStatus) ? TRUE : FALSE;
+        KdPrint(("T2Audio: headset microphone endpoint %s (0x%08X)\n",
                  NT_SUCCESS(micStatus) ? "registered" : "NOT registered", micStatus));
     }
 
@@ -916,16 +945,28 @@ T2AudioStartDeviceInner(
         }
         // Microphones: register the host ring with the T2 (writes BufferStruct
         // and sends msg 18), only in the BCE I/O configuration.
-        if (context->MicFiltersRegistered && context->MicFormatValid &&
-            context->BceMicDeviceId != 0 && context->BceIoEnabled) {
-            NTSTATUS micStatus = T2AudioMicRegister(context);
+        if (context->Mic.FiltersRegistered && context->Mic.FormatValid &&
+            context->Mic.BceDeviceId != 0 && context->BceIoEnabled) {
+            NTSTATUS micStatus = T2AudioMicRegister(context, &context->Mic);
 
             if (NT_SUCCESS(micStatus)) {
-                context->MicDeviceId = context->BceMicDeviceId;
+                context->Mic.DeviceId = context->Mic.BceDeviceId;
             }
             KdPrint(("T2Audio: audio path %s for microphones 0x%I64X (0x%08X)\n",
                      NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
-                     context->BceMicDeviceId, micStatus));
+                     context->Mic.BceDeviceId, micStatus));
+        }
+        // Headset microphone: the same, with its own ring and BufferStruct entry.
+        if (context->HeadsetMic.FiltersRegistered && context->HeadsetMic.FormatValid &&
+            context->HeadsetMic.BceDeviceId != 0 && context->BceIoEnabled) {
+            NTSTATUS micStatus = T2AudioMicRegister(context, &context->HeadsetMic);
+
+            if (NT_SUCCESS(micStatus)) {
+                context->HeadsetMic.DeviceId = context->HeadsetMic.BceDeviceId;
+            }
+            KdPrint(("T2Audio: audio path %s for headset microphone 0x%I64X (0x%08X)\n",
+                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
+                     context->HeadsetMic.BceDeviceId, micStatus));
         }
     } else {
         T2AudioCloseBceTransport();

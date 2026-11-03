@@ -17,6 +17,8 @@ Replaces the quiet, flat, and buggy Boot Camp audio driver with full **macOS-gra
 - 🎵 **macOS Sound Quality:** Built-in hardware DSP with Apple-matched EQ curves and James Calligeros' virtual sub-bass generator.
 - 🔄 **Auto-Switching Headphones:** Optional jack tracking moves sound between the separate headphone and speaker endpoints on plug/unplug.
 - 🎙️ **Built-in Microphones:** Optional 3-microphone studio array with beamforming noise reduction.
+- 🎧 **Headset Microphone (experimental):** Optional separate "Headset Microphone" capture endpoint for the 3.5 mm combo jack (`-HeadsetMic 1`, off by default), with plug detection; not yet tested on hardware.
+- 🔇 **Microphone Noise Suppression:** Optional smooth noise gate for the built-in and headset microphones (`-MicNoiseSuppression 1`, off by default): it silences background hiss between phrases and passes speech untouched.
 - 🎬 **5.1 Virtual Surround:** Expands movies and games across the 6 physical speakers with acoustic crosstalk cancellation.
 - 🛡️ **Crash Guard:** Automatically protects against boot loops and recovers smoothly.
 - ⚡ **Zero Bloat:** Minimal package — just the signed driver and a setup script. No background telemetry or heavy software.
@@ -100,7 +102,7 @@ The same settings can be changed without the menu:
 # Disable every experimental feature.
 .\tools\T2Audio-Setup.ps1 -Action Features `
     -Headphones 0 -Microphone 0 -ResumeAfterSleep 0 -ExtraFormats 0 `
-    -HeadphoneCrossfeed 0 -DspLoudness 0 -AntiRattle 0
+    -HeadphoneCrossfeed 0 -DspLoudness 0 -AntiRattle 0 -MicNoiseSuppression 0
 ```
 
 Feature changes are deliberately applied with a device restart rather than

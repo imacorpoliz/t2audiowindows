@@ -57,6 +57,8 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$HeadphoneCrossfeed, # bs2b headphone crossfeed
     [ValidateRange(0, 1)] [Nullable[int]]$DspLoudness,     # low-volume loudness curve
     [ValidateRange(0, 1)] [Nullable[int]]$AntiRattle,      # extra woofer protection
+    [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression, # microphone noise gate
+    [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,      # 3.5 mm headset microphone (experimental)
 
     # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
     # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
@@ -873,6 +875,18 @@ $FeatureDefinitions = [ordered]@{
         On = @{ MicInput = 1; MicStartIo = 1 }
         Off = @{ MicInput = 0; MicStartIo = 0 }
     }
+    HeadsetMic = [ordered]@{
+        Title = 'Headset microphone (3.5 mm, experimental)'
+        Params = @('HeadsetMicInput', 'HeadsetMicStartIo')
+        On = @{ HeadsetMicInput = 1; HeadsetMicStartIo = 1 }
+        Off = @{ HeadsetMicInput = 0; HeadsetMicStartIo = 0 }
+    }
+    MicNoiseSuppression = [ordered]@{
+        Title = 'Microphone noise suppression'
+        Params = @('MicNoiseSuppression')
+        On = @{ MicNoiseSuppression = 1 }
+        Off = @{ MicNoiseSuppression = 0 }
+    }
     ResumeAfterSleep = [ordered]@{
         Title = 'Resume sound after sleep'
         Params = @('ResumeAfterSleep')
@@ -916,7 +930,8 @@ function Invoke-Restart {
 $FeatureDefaults = @{
     HeadphoneOutput = 1; SeparateHeadphoneEndpoint = 1; JackEvents = 1; HeadphoneAutoMute = 1
     MicInput = 0; MicStartIo = 0; ResumeAfterSleep = 0; ExtraFormats = 0
-    HeadphoneCrossfeed = 0; DspLoudness = 0; AntiRattle = 0
+    HeadphoneCrossfeed = 0; DspLoudness = 0; AntiRattle = 0; MicNoiseSuppression = 0
+    HeadsetMicInput = 0; HeadsetMicStartIo = 0
 }
 
 # Read one feature value, including the driver's effective default.
@@ -956,7 +971,8 @@ function Get-FeatureArgumentValues {
     return [ordered]@{
         Headphones = $Headphones; Microphone = $Microphone; ResumeAfterSleep = $ResumeAfterSleep
         ExtraFormats = $ExtraFormats; HeadphoneCrossfeed = $HeadphoneCrossfeed
-        DspLoudness = $DspLoudness; AntiRattle = $AntiRattle
+        DspLoudness = $DspLoudness; AntiRattle = $AntiRattle; MicNoiseSuppression = $MicNoiseSuppression
+        HeadsetMic = $HeadsetMic
     }
 }
 
@@ -1023,6 +1039,26 @@ function Invoke-Features([switch]$Interactive) {
               (Get-FeatureState 'Headphones') -eq 'OFF') {
         Write-Warn 'Headphone crossfeed needs the headphone output; enabling headphones too.'
         $changes['Headphones'] = 1
+    }
+
+    # The microphone noise gate works on both microphone inputs and needs at
+    # least one of them; turning the last one off also turns the gate off,
+    # and turning the gate on with no input enables the built-in microphones.
+    $micAfter = if ($changes.Contains('Microphone')) { $changes['Microphone'] -ne 0 } else { (Get-FeatureState 'Microphone') -ne 'OFF' }
+    $headsetAfter = if ($changes.Contains('HeadsetMic')) { $changes['HeadsetMic'] -ne 0 } else { (Get-FeatureState 'HeadsetMic') -ne 'OFF' }
+    if (($changes.Contains('Microphone') -or $changes.Contains('HeadsetMic')) -and -not $micAfter -and -not $headsetAfter) {
+        if ((Get-FeatureParam 'MicNoiseSuppression') -ne 0 -or
+            ($changes.Contains('MicNoiseSuppression') -and $changes['MicNoiseSuppression'] -ne 0)) {
+            Write-Warn 'Microphone noise suppression needs a microphone input; it will be turned off too.'
+        }
+        $changes['MicNoiseSuppression'] = 0
+    } elseif ($changes.Contains('MicNoiseSuppression') -and $changes['MicNoiseSuppression'] -eq 1 -and
+              -not $micAfter -and -not $headsetAfter) {
+        Write-Warn 'Microphone noise suppression needs a microphone input; enabling microphones too.'
+        $changes['Microphone'] = 1
+    }
+    if ($changes.Contains('HeadsetMic') -and $changes['HeadsetMic'] -eq 1) {
+        Write-Warn 'Headset microphone is EXPERIMENTAL: not yet tested on hardware. If the Mac misbehaves, turn it off again (-HeadsetMic 0).'
     }
 
     foreach ($name in $changes.Keys) {

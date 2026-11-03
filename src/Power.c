@@ -60,9 +60,14 @@ T2AudioPowerQuiesce(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_z_ PCSTR Why)
     NTSTATUS status;
 
     // Microphones (Parameters\MicInput): stop the T2 writing the host ring.
-    if (InterlockedExchange(&Context->MicIoActive, 0) != 0) {
-        status = T2AudioStopIoDevice(Context, Context->MicDeviceId);
+    if (InterlockedExchange(&Context->Mic.IoActive, 0) != 0) {
+        status = T2AudioStopIoDevice(Context, Context->Mic.DeviceId);
         KdPrint(("T2Audio: power %s: mic STOP_IO status=0x%08X\n", Why, status));
+    }
+    // Headset microphone (Parameters\HeadsetMicInput): the same for its ring.
+    if (InterlockedExchange(&Context->HeadsetMic.IoActive, 0) != 0) {
+        status = T2AudioStopIoDevice(Context, Context->HeadsetMic.DeviceId);
+        KdPrint(("T2Audio: power %s: headset mic STOP_IO status=0x%08X\n", Why, status));
     }
     // Headphones (Parameters\HeadphoneOutput): the same for their device.
     if (InterlockedExchange(&Context->HeadphoneIoActive, 0) != 0) {
@@ -146,14 +151,23 @@ T2AudioResumeWorkRoutine(
         }
         // Microphones: announce the host ring again after every wake, as
         // AppleAudio does (once, before any stream restarts).
-        if (attempt == 0 && !context->PoweredDown && context->MicRegistered && context->MicIoActive == 0) {
-            NTSTATUS micStatus = T2AudioMicReRegister(context);
+        if (attempt == 0 && !context->PoweredDown && context->Mic.Registered && context->Mic.IoActive == 0) {
+            NTSTATUS micStatus = T2AudioMicReRegister(context, &context->Mic);
 
             KdPrint(("T2Audio: D0: mic ranges re-sent: 0x%08X\n", micStatus));
         }
+        if (attempt == 0 && !context->PoweredDown && context->HeadsetMic.Registered &&
+            context->HeadsetMic.IoActive == 0) {
+            NTSTATUS micStatus = T2AudioMicReRegister(context, &context->HeadsetMic);
+
+            KdPrint(("T2Audio: D0: headset mic ranges re-sent: 0x%08X\n", micStatus));
+        }
         if (!context->PoweredDown && context->ResumeAfterSleep) {
-            if (context->MicRunningStream != NULL) {
-                T2AudioMicStreamResumeAfterPower(context->MicRunningStream);
+            if (context->Mic.RunningStream != NULL) {
+                T2AudioMicStreamResumeAfterPower(context->Mic.RunningStream);
+            }
+            if (context->HeadsetMic.RunningStream != NULL) {
+                T2AudioMicStreamResumeAfterPower(context->HeadsetMic.RunningStream);
             }
         }
         if (!context->PoweredDown && context->ResumeAfterSleep) {
@@ -164,7 +178,10 @@ T2AudioResumeWorkRoutine(
             }
             pending = (context->RunningStream[0] != NULL && context->HardwareIoActive == 0) ||
                       (context->RunningStream[1] != NULL && context->HeadphoneIoActive == 0) ||
-                      (context->MicRunningStream != NULL && context->MicIoActive == 0);
+                      (context->Mic.RunningStream != NULL && context->Mic.StartIo &&
+                       context->Mic.IoActive == 0) ||
+                      (context->HeadsetMic.RunningStream != NULL && context->HeadsetMic.StartIo &&
+                       context->HeadsetMic.IoActive == 0);
         }
         KeReleaseMutex(&context->StreamMutex, FALSE);
         if (!pending) {
@@ -226,10 +243,10 @@ T2AudioPowerChangeState(
 
             KeAcquireSpinLock(&context->ResumeWorkLock, &oldIrql);
             if (wasPoweredDown && context->DeviceObject != NULL && context->ResumeStop == 0 &&
-                (context->MicRegistered ||
+                (context->Mic.Registered || context->HeadsetMic.Registered ||
                  (context->ResumeAfterSleep &&
                   (context->RunningStream[0] != NULL || context->RunningStream[1] != NULL ||
-                   context->MicRunningStream != NULL))) &&
+                   context->Mic.RunningStream != NULL || context->HeadsetMic.RunningStream != NULL))) &&
                 InterlockedCompareExchange(&context->ResumeWorkPending, 1, 0) == 0) {
                 if (InterlockedIncrement(&context->ResumeWorkRunning) == 1) {
                     KeClearEvent(&context->ResumeWorkDone);

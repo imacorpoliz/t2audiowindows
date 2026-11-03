@@ -65,6 +65,51 @@ C_ASSERT(sizeof(T2AUDIO_STREAM_METADATA) == 0x12E4);
 C_ASSERT(sizeof(T2AUDIO_DEVICE_METADATA) == T2AUDIO_DEVICE_STRIDE);
 C_ASSERT(FIELD_OFFSET(T2AUDIO_BUFFER_STRUCT, Devices) == 0x10);
 
+// One capture path (MicCapture.c): the built-in microphones ("Digital Mic",
+// Parameters\MicInput) or the 3.5 mm headset microphone ("Codec Input",
+// Parameters\HeadsetMicInput). The driver allocates a contiguous host ring
+// (RingBytes), writes its device-logical address into the BufferStruct entry
+// Name (input_streams[0], appended if absent, as AppleAudio does) and sends
+// SET_INPUT_STREAM_ADDRESS_RANGES (msg 18); a capture WaveRT + topology pair
+// exposes a mono endpoint. StartIo is the second, explicit gate for START_IO.
+// The ring is freed only after STOP_IO and after the BufferStruct entry was
+// cleared (T2AudioMicUnregister in the PnP stop path).
+typedef struct _T2AUDIO_CAPTURE_PATH {
+    // Fixed at StartDevice.
+    PCSTR Name;
+    BOOLEAN Headset;
+    ULONG BytesPerFrame;
+    ULONG RingFrames;
+    ULONG RingBytes;
+    ULONG Enabled;
+    ULONG StartIo;
+    // From the BCE probe ('pft ' and latencies of the input stream).
+    BOOLEAN FiltersRegistered;
+    BOOLEAN FormatValid;
+    ULONG64 BceDeviceId;
+    ULONG64 StreamId;
+    ULONG LatencyFrames;
+    // DeviceId is set once the ring is registered (stage 4+, BCE I/O).
+    ULONG64 DeviceId;
+    volatile BOOLEAN Registered;
+    // The ring is a common buffer of a DMA adapter of the PCI device, so
+    // BufferPa is the device-logical address the T2 must write to.
+    PVOID DmaAdapter;
+    PVOID BufferVa;
+    PHYSICAL_ADDRESS BufferPa;
+    ULONG BufferSize;
+    // 1 while START_IO is in effect (same protocol as HardwareIoActive).
+    volatile LONG IoActive;
+    // T2 write-position anchor from UPDATE_TIMESTAMP (under ClockLock).
+    ULONG ClockGeneration;
+    ULONG64 ClockAnchorFrames;
+    ULONG64 ClockAnchorQpc;
+    ULONG64 ClockAnchorNs;
+    PVOID RunningStream;
+    // Headset only: IPortEvents of its topology port (jack changes).
+    PVOID PortEvents;
+} T2AUDIO_CAPTURE_PATH, *PT2AUDIO_CAPTURE_PATH;
+
 typedef struct _T2AUDIO_DEVICE_CONTEXT {
     PDEVICE_OBJECT PhysicalDeviceObject;
     PDEVICE_OBJECT FunctionalDeviceObject;
@@ -138,10 +183,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG JackProbeAll;
 #define T2AUDIO_JACK_PROBE_VARIANTS 8
     LONG JackProbeLast[T2AUDIO_JACK_PROBE_VARIANTS];
-    ULONG64 BceHeadsetMicDeviceId;
-    ULONG64 HeadsetMicStreamId;
-    BOOLEAN HeadsetMicFormatValid;
-    ULONG HeadsetMicLatencyFrames;
+    // Headset microphone jack ('inpt'/'jack' of "Codec Input", polled with
+    // the headphone jack when HeadsetMicInput and JackEvents are on).
+    // HeadsetMicJackSeen: a read succeeded, so the state is reported.
+    volatile LONG HeadsetMicJackPlugged;
+    volatile BOOLEAN HeadsetMicJackSeen;
     // Headphone output (Parameters\HeadphoneOutput=1, default 1; ROADMAP 4.4).
     // A second WaveRT + topology filter pair renders to the "Codec Output"
     // device: its ring is located in BufferStruct at MapResources, its
@@ -168,45 +214,25 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 HpClockAnchorQpc;
     ULONG64 HpClockAnchorNs;
     PVOID HeadphonePortEvents;
-    // Built-in microphones (Parameters\MicInput=1, default 0; ROADMAP 5.2-5.4,
-    // MicCapture.c). The driver allocates a contiguous host ring
-    // (T2AUDIO_MIC_RING_BYTES), writes its physical address into BufferStruct
-    // input_streams[0] of "Digital Mic" and sends SET_INPUT_STREAM_ADDRESS_
-    // RANGES (msg 18), as kaiT2en and AppleAudio do; a capture WaveRT +
-    // topology pair exposes a mono microphone array. MicDsp (default 1) runs
-    // kaiT2en's 16_1 mic chain (T2AudioMicLogic.h); 0 passes mic 0 raw.
-    // The ring is freed only after STOP_IO and after the BufferStruct entry
-    // was cleared (MicUnregister in the PnP stop path).
-    ULONG MicInput;
+    // Built-in microphones (Parameters\MicInput=1, default 0; ROADMAP 5.2-5.4)
+    // and the headset microphone (Parameters\HeadsetMicInput=1, default 0):
+    // see T2AUDIO_CAPTURE_PATH. MicDsp (default 1) runs kaiT2en's 16_1 mic
+    // chain on the built-in array (T2AudioMicLogic.h); 0 passes mic 0 raw.
+    // MicStartIo / HeadsetMicStartIo (default 0) are the START_IO gates:
+    // START_IO following a bare msg 18 powered the Mac off on the first
+    // hardware run (2026-10-29). Without them an endpoint records silence.
+    T2AUDIO_CAPTURE_PATH Mic;
+    T2AUDIO_CAPTURE_PATH HeadsetMic;
     ULONG MicDsp;
+    // MicNoiseSuppression (Parameters\MicNoiseSuppression=1, default 0): a
+    // smooth, per-stream integer noise gate on the mono output of both
+    // microphone endpoints (T2AudioMicLogic.h). Independent of MicDsp and
+    // the START_IO gates; off is a bit-exact bypass.
+    ULONG MicNoiseSuppression;
     // Parameters\ExtraFormats=1 (default 0; ROADMAP 2.8): the render pins
     // also accept 16- and 24-bit PCM (exclusive-mode apps). Shared mode keeps
     // using 32-bit, the format the intersection proposes.
     ULONG ExtraFormats;
-    BOOLEAN MicFiltersRegistered;
-    volatile BOOLEAN MicRegistered;
-    BOOLEAN MicFormatValid;
-    ULONG64 BceMicDeviceId;
-    ULONG64 MicDeviceId;
-    ULONG64 MicStreamId;
-    ULONG MicLatencyFrames;
-    // MicStartIo (Parameters\MicStartIo=1, default 0): only then does a
-    // capture RUN send START_IO to the microphone device. Added after the
-    // first hardware run (2026-10-29): START_IO following a bare msg 18
-    // powered the Mac off. Without it the endpoint records silence.
-    ULONG MicStartIo;
-    // The ring is a common buffer of a DMA adapter of the PCI device, so
-    // MicBufferPa is the device-logical address the T2 must write to.
-    PVOID MicDmaAdapter;
-    PVOID MicBufferVa;
-    PHYSICAL_ADDRESS MicBufferPa;
-    ULONG MicBufferSize;
-    volatile LONG MicIoActive;
-    ULONG MicClockGeneration;
-    ULONG64 MicClockAnchorFrames;
-    ULONG64 MicClockAnchorQpc;
-    ULONG64 MicClockAnchorNs;
-    PVOID MicRunningStream;
     // Resume after sleep (Parameters\ResumeAfterSleep=1, default 0; ROADMAP
     // 2.1): streams register here while in RUN; on D0 a PASSIVE work item
     // restarts the I/O of a stream the power-down had stopped. StreamMutex
@@ -458,16 +484,24 @@ VOID T2AudioStreamResumeAfterPower(_In_ PVOID Stream);
 #define T2AUDIO_MIC_WAVE_PIN_BRIDGE   1u
 #define T2AUDIO_MIC_TOPO_PIN_MIC      0u
 #define T2AUDIO_MIC_TOPO_PIN_BRIDGE   1u
-BOOLEAN T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
-NTSTATUS T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
-NTSTATUS T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
-VOID T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+// Each takes the capture path: &Context->Mic or &Context->HeadsetMic.
+VOID T2AudioMicInitPaths(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
+BOOLEAN T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context,
+                                        _In_ PT2AUDIO_CAPTURE_PATH Path);
+NTSTATUS T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path);
+NTSTATUS T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path);
+VOID T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path);
 NTSTATUS T2AudioRegisterMicFilters(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
-    _In_ PT2AUDIO_DEVICE_CONTEXT Context);
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_ PT2AUDIO_CAPTURE_PATH Path);
 VOID T2AudioMicStreamResumeAfterPower(_In_ PVOID Stream);
+// Headset microphone jack (MicCapture.c): signal a change to Windows, and
+// drop the IPortEvents reference in the PnP stop path.
+VOID T2AudioNotifyHeadsetMicJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
+VOID T2AudioReleaseHeadsetMicEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 NTSTATUS T2AudioRegisterPowerManagement(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PT2AUDIO_DEVICE_CONTEXT Context);

@@ -32,6 +32,8 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$HeadphoneCrossfeed,
     [ValidateRange(0, 1)] [Nullable[int]]$DspLoudness,
     [ValidateRange(0, 1)] [Nullable[int]]$AntiRattle,
+    [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression,
+    [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,
 
     [ValidateSet('Speakers', 'Headphones', 'Toggle')]
     [string]$To = 'Toggle',
@@ -69,6 +71,9 @@ $splat = [ordered]@{ Action = $resolvedAction }
 if ($resolvedAction -in @('Install', 'Preset')) {
     $splat['Preset'] = $effectivePreset
 }
+if ($resolvedAction -in @('Install', 'Balance')) {
+    $splat['Volume'] = $Volume
+}
 if ($null -ne $BassDb)             { $splat['BassDb'] = $BassDb }
 if ($null -ne $TrebleDb)           { $splat['TrebleDb'] = $TrebleDb }
 if ($null -ne $ClarityDb)          { $splat['ClarityDb'] = $ClarityDb }
@@ -80,6 +85,8 @@ if ($null -ne $ExtraFormats)       { $splat['ExtraFormats'] = $ExtraFormats }
 if ($null -ne $HeadphoneCrossfeed) { $splat['HeadphoneCrossfeed'] = $HeadphoneCrossfeed }
 if ($null -ne $DspLoudness)        { $splat['DspLoudness'] = $DspLoudness }
 if ($null -ne $AntiRattle)         { $splat['AntiRattle'] = $AntiRattle }
+if ($null -ne $MicNoiseSuppression) { $splat['MicNoiseSuppression'] = $MicNoiseSuppression }
+if ($null -ne $HeadsetMic)         { $splat['HeadsetMic'] = $HeadsetMic }
 if ($resolvedAction -eq 'Switch')  { $splat['To'] = $To }
 if ($File)                         { $splat['File'] = $File }
 if ($Force)                        { $splat['Force'] = $true }

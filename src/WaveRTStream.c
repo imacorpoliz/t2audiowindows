@@ -591,17 +591,21 @@ T2AudioStreamAdvanceLocked(_Inout_ PT2AUDIO_WAVERT_STREAM instance)
                 ULONG hpRingBytes = (ULONG)context->HeadphoneBufferSize;
                 ULONG hpChunkSrcOffset = 0, hpChunkDstOffset = 0, hpChunkLen = 0;
 
-                (VOID)T2AudioCalculateCopyChunk(
+                chunkFrames = T2AudioCalculateRoutedChunk(
                     frame,
                     frame + instance->DestOffset,
                     chunkFrames,
                     instance->BytesPerFrame,
-                    hpFrameBytes,
                     instance->SourceSize,
+                    hpFrameBytes,
                     hpRingBytes,
                     &hpChunkSrcOffset,
                     &hpChunkDstOffset,
                     &hpChunkLen);
+                if (chunkFrames == 0) {
+                    break;
+                }
+                srcOffset = hpChunkSrcOffset;
 
                 if (instance->BitsPerSample == 32) {
                     T2AudioStreamRenderHeadphoneFrames(instance, context,
@@ -1148,9 +1152,8 @@ T2AudioStreamSetStateLocked(
         }
         if (!instance->Headphone && instance->DeviceContext != NULL &&
             !instance->DeviceContext->HeadphoneFiltersRegistered &&
-            instance->DeviceContext->HeadphoneIoActive != 0) {
+            InterlockedExchange(&instance->DeviceContext->HeadphoneIoActive, 0) != 0) {
             T2AudioStopIoDevice(instance->DeviceContext, instance->DeviceContext->HeadphoneDeviceId);
-            InterlockedExchange(&instance->DeviceContext->HeadphoneIoActive, 0);
         }
     }
     return STATUS_SUCCESS;

@@ -347,6 +347,59 @@ static void test_physical_format(void)
           !T2AudioBceParsePhysicalFormat(bad, sizeof(bad), &f));
 }
 
+static void test_headset_mic_format(void)
+{
+    // 'pft ' of "Codec Input" stream 0x45 as logged on hardware
+    // (docs/logs/boot_log.csv: rate=48000 flags=0xC bpp=4 fpp=1 bpf=4 ch=1 bits=32).
+    static const unsigned char kHeadsetMic[40] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0xE7, 0x40, 0x6D, 0x63,
+        0x70, 0x6C, 0x0C, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    T2AUDIO_BCE_PHYS_FORMAT f;
+
+    printf("T2AudioBceIsMonoS32Input\n");
+
+    check("headset descriptor parses",
+          T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f));
+    check("flags SIGNED|PACKED", f.FormatFlags == 0xCu);
+    check("hardware headset format accepted", T2AudioBceIsMonoS32Input(&f, 48000));
+    check("generic path rejects it (PACKED)", T2AudioBceDeviceSampleShift(&f, 1, 48000) == -1);
+
+    f.FormatFlags = T2AUDIO_BCE_FORMAT_FLAG_SIGNED;
+    check("signed, not packed -> accepted", T2AudioBceIsMonoS32Input(&f, 48000));
+    f.FormatFlags = T2AUDIO_BCE_FORMAT_FLAG_PACKED;
+    check("unsigned -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    f.FormatFlags = 0xCu | T2AUDIO_BCE_FORMAT_FLAG_FLOAT;
+    check("float -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    f.FormatFlags = 0xCu | T2AUDIO_BCE_FORMAT_FLAG_BIG_ENDIAN;
+    check("big endian -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    f.FormatFlags = 0xCu | T2AUDIO_BCE_FORMAT_FLAG_NON_INTERLEAVED;
+    check("non-interleaved -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    f.FormatFlags = 0xCu;
+    check("wrong rate -> rejected", !T2AudioBceIsMonoS32Input(&f, 44100));
+
+    T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f);
+    f.ChannelsPerFrame = 2;
+    f.BytesPerFrame = f.BytesPerPacket = 8;
+    check("stereo -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f);
+    f.BitsPerChannel = 24;
+    check("24 bits -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f);
+    f.BitsPerChannel = 16;
+    f.BytesPerFrame = f.BytesPerPacket = 2;
+    check("16 bits -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f);
+    f.FramesPerPacket = 2;
+    check("2 frames per packet -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    T2AudioBceParsePhysicalFormat(kHeadsetMic, sizeof(kHeadsetMic), &f);
+    f.FormatId = 0x61616320u;  // 'aac '
+    check("not lpcm -> rejected", !T2AudioBceIsMonoS32Input(&f, 48000));
+    check("NULL -> rejected", !T2AudioBceIsMonoS32Input(0, 48000));
+}
+
 static void test_incoming(void)
 {
     unsigned char m[45];
@@ -560,6 +613,7 @@ int main(void)
     test_parse_property_response();
     test_parse_command_response();
     test_physical_format();
+    test_headset_mic_format();
     test_incoming();
     test_tags();
     test_property_events();

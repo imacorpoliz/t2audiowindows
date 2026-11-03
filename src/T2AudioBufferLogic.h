@@ -238,6 +238,25 @@ T2AudioCalculateCopyChunk(unsigned long long SourceFrame,
     return framesCopied;
 }
 
+// Bound a routed chunk by both the speaker and headphone ring boundaries.
+static __inline unsigned long
+T2AudioCalculateRoutedChunk(unsigned long long SourceFrame,
+                            unsigned long long DestFrame,
+                            unsigned long SpeakerChunkFrames,
+                            unsigned long SourceBytesPerFrame,
+                            unsigned long SourceBufferSize,
+                            unsigned long HeadphoneBytesPerFrame,
+                            unsigned long HeadphoneBufferSize,
+                            unsigned long *OutSourceOffset,
+                            unsigned long *OutHeadphoneOffset,
+                            unsigned long *OutByteLength)
+{
+    return T2AudioCalculateCopyChunk(SourceFrame, DestFrame, SpeakerChunkFrames,
+                                     SourceBytesPerFrame, HeadphoneBytesPerFrame,
+                                     SourceBufferSize, HeadphoneBufferSize,
+                                     OutSourceOffset, OutHeadphoneOffset, OutByteLength);
+}
+
 // Copy SampleCount 32-bit little-endian signed samples from Source to Dest,
 // arithmetic-shifting each right by Shift (0..31). Used to turn Windows'
 // MSB-aligned 32-bit PCM into the T2's S24_LE ring layout (24 bits in the low

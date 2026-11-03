@@ -39,6 +39,12 @@ AddInterface=%KSCATEGORY_CAPTURE%,%KSNAME_WaveMic%,T2Audio.WaveMic
 AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_WaveMic%,T2Audio.WaveMic
 AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_TopologyMic%,T2Audio.TopologyMic
 AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_TopologyMic%,T2Audio.TopologyMic
+; Headset microphone on the 3.5 mm jack (Parameters\HeadsetMicInput=1).
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_WaveMicIn%,T2Audio.WaveMicIn
+AddInterface=%KSCATEGORY_CAPTURE%,%KSNAME_WaveMicIn%,T2Audio.WaveMicIn
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_WaveMicIn%,T2Audio.WaveMicIn
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_TopologyMicIn%,T2Audio.TopologyMicIn
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_TopologyMicIn%,T2Audio.TopologyMicIn
 
 [T2Audio.Wave]
 AddReg=T2Audio.Wave.AddReg
@@ -82,6 +88,20 @@ AddReg=T2Audio.TopologyMic.AddReg
 HKR,,CLSID,,%Proxy.CLSID%
 HKR,,FriendlyName,,%T2Audio.TopologyMic.FriendlyName%
 
+[T2Audio.WaveMicIn]
+AddReg=T2Audio.WaveMicIn.AddReg
+
+[T2Audio.WaveMicIn.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%T2Audio.WaveMicIn.FriendlyName%
+
+[T2Audio.TopologyMicIn]
+AddReg=T2Audio.TopologyMicIn.AddReg
+
+[T2Audio.TopologyMicIn.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%T2Audio.TopologyMicIn.FriendlyName%
+
 [T2Audio_Install.NT.Services]
 Include=wdmaudio.inf
 Needs=WDMAUDIO.Registration.NT.Services
@@ -117,6 +137,8 @@ T2Audio.WaveHeadphone.FriendlyName="T2 Audio Headphones"
 T2Audio.TopologyHeadphone.FriendlyName="T2 Audio Headphone Topology"
 T2Audio.WaveMic.FriendlyName="T2 Audio Microphone"
 T2Audio.TopologyMic.FriendlyName="T2 Audio Microphone Topology"
+T2Audio.WaveMicIn.FriendlyName="T2 Audio Headset Microphone"
+T2Audio.TopologyMicIn.FriendlyName="T2 Audio Headset Microphone Topology"
 KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
 KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
 KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
@@ -128,4 +150,6 @@ KSNAME_WaveHeadphone="WaveHeadphone"
 KSNAME_TopologyHeadphone="TopologyHeadphone"
 KSNAME_WaveMic="WaveMic"
 KSNAME_TopologyMic="TopologyMic"
+KSNAME_WaveMicIn="WaveMicIn"
+KSNAME_TopologyMicIn="TopologyMicIn"
 Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"

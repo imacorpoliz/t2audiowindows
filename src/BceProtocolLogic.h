@@ -480,6 +480,31 @@ T2AudioBceDeviceSampleShift(const T2AUDIO_BCE_PHYS_FORMAT *Format,
     return -1;
 }
 
+// The headset microphone input ("Codec Input", hardware 2026-10-28: stream
+// 0x45, flags 0xC): mono, interleaved little-endian signed 32-bit integer in
+// a 4-byte frame. PACKED is allowed (32 bits fill the slot either way). Such
+// a sample is already the 32-bit PCM Windows expects. Returns 1 if usable.
+static __inline int
+T2AudioBceIsMonoS32Input(const T2AUDIO_BCE_PHYS_FORMAT *Format, unsigned long ExpectedRate)
+{
+    if (Format == 0 || Format->FormatId != T2AUDIO_BCE_FORMAT_LPCM ||
+        Format->SampleRate != ExpectedRate ||
+        Format->ChannelsPerFrame != 1 ||
+        Format->FramesPerPacket != 1 ||
+        Format->BytesPerFrame != 4 ||
+        Format->BytesPerPacket != 4 ||
+        Format->BitsPerChannel != 32) {
+        return 0;
+    }
+    if ((Format->FormatFlags & (T2AUDIO_BCE_FORMAT_FLAG_FLOAT |
+                                T2AUDIO_BCE_FORMAT_FLAG_BIG_ENDIAN |
+                                T2AUDIO_BCE_FORMAT_FLAG_NON_INTERLEAVED)) != 0 ||
+        (Format->FormatFlags & T2AUDIO_BCE_FORMAT_FLAG_SIGNED) == 0) {
+        return 0;
+    }
+    return 1;
+}
+
 // Messages bridgeOS sends to the host on its own (UPDATE_TIMESTAMP after
 // START_IO, PROPERTY_CHANGED for jacks, ...). On Windows AppleUSBVHCI
 // delivers each one as IOCTL 0x222020 to the first KSCATEGORY_AUDIO interface

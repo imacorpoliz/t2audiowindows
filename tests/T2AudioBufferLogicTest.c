@@ -314,6 +314,38 @@ static void test_widen_pcm(void)
     check("unsupported size -> silence", d[0] == 0);
 }
 
+static void test_routed_chunk(void)
+{
+    unsigned long sizes[] = {4, 6, 8};
+    unsigned long i;
+    unsigned long src, speaker, hp, bytes, hpBytes, count, routed;
+
+    printf("T2AudioCalculateRoutedChunk\n");
+    for (i = 0; i < 3; i++) {
+        count = T2AudioCalculateCopyChunk(270, 990, 96, sizes[i], 24,
+                                         1440 * sizes[i], 16640 * 24,
+                                         &src, &speaker, &bytes);
+        routed = T2AudioCalculateRoutedChunk(270, 990, count, sizes[i],
+                                             1440 * sizes[i], 8, 997 * 8,
+                                             &src, &hp, &hpBytes);
+        check("headphone boundary limits speaker chunk", count == 96 && routed == 7 &&
+              hp == 990 * 8 && hp + routed * 8 == 997 * 8 &&
+              src == 270 * sizes[i] && hpBytes == routed * sizes[i]);
+        routed = T2AudioCalculateRoutedChunk(277, 997, 89, sizes[i],
+                                             1440 * sizes[i], 8, 997 * 8,
+                                             &src, &hp, &hpBytes);
+        check("next chunk wraps without losing frames", routed == 89 && hp == 0 &&
+              src == 277 * sizes[i]);
+        routed = T2AudioCalculateRoutedChunk(270, 990, 7, sizes[i],
+                                             1440 * sizes[i], 8, 997 * 8,
+                                             &src, &hp, &hpBytes);
+        check("coincident boundaries", routed == 7);
+    }
+    check("zero remaining", !T2AudioCalculateRoutedChunk(0, 0, 0, 8, 11520, 8, 7976, &src, &hp, &bytes));
+    check("invalid headphone size", !T2AudioCalculateRoutedChunk(0, 0, 1, 8, 11520, 8, 7, &src, &hp, &bytes));
+    check("zero source frame size", !T2AudioCalculateRoutedChunk(0, 0, 1, 0, 11520, 8, 7976, &src, &hp, &bytes));
+}
+
 int main(void)
 {
     test_align();
@@ -322,6 +354,7 @@ int main(void)
     test_hardware_io_decision();
     test_device_table_fits();
     test_calculate_copy_chunk();
+    test_routed_chunk();
     test_ticks_to_frames();
     test_convert_samples();
     test_widen_pcm();

@@ -5,46 +5,69 @@
 #include "T2AudioMicLogic.h"
 #include <intrin.h>
 
-// Built-in microphones (Parameters\MicInput=1; ROADMAP section 5).
+// Capture paths (ROADMAP section 5): the built-in microphones
+// (Parameters\MicInput=1, "Digital Mic") and the 3.5 mm headset microphone
+// (Parameters\HeadsetMicInput=1, "Codec Input"). Both use the same code,
+// driven by a T2AUDIO_CAPTURE_PATH (Context->Mic / Context->HeadsetMic).
 //
 //  1. Registration (T2AudioMicRegister, at probe time, stage 4+ with BCE I/O):
-//     a contiguous host ring of T2AUDIO_MIC_RING_FRAMES frames (3 x 32-bit)
-//     is allocated, its physical address written into the BufferStruct entry
-//     of "Digital Mic" (input_streams[0], one buffer) and announced with
+//     a contiguous host ring of Path->RingFrames frames is allocated, its
+//     physical address written into the BufferStruct entry Path->Name
+//     (input_streams[0], one buffer; appended if absent) and announced with
 //     SET_INPUT_STREAM_ADDRESS_RANGES (msg 18) - kaiT2en's
 //     t2audio_init_bs_stream_host + t2audio_cmd_set_input_stream_address_
 //     ranges, and AppleAudio's 0x46F8 + 0x44E4. After a wake AppleAudio
 //     announces the ranges again (T2AudioMicReRegister).
-//  2. Capture (a WaveRT filter "WaveMic" + topology "TopologyMic"): START_IO
-//     on the microphone device; a 2 ms DPC moves the frames the T2 has
+//  2. Capture (WaveRT "WaveMic" + topology "TopologyMic"; for the headset
+//     AppleAudio's "WaveMicIn" + "TopologyMicIn"): START_IO on the device
+//     (only with Path->StartIo); a 2 ms DPC moves the frames the T2 has
 //     written (position from its UPDATE_TIMESTAMP, as kaiT2en's capture
-//     pointer) through the 16_1 mic DSP into the client buffer, mono 48 kHz
-//     32-bit. The reader trails the writer by T2AUDIO_MIC_CAPTURE_LAG frames.
+//     pointer) into the client buffer, mono 48 kHz 32-bit - through the
+//     16_1 mic DSP for the array, unchanged for the headset. The reader
+//     trails the writer by T2AUDIO_MIC_CAPTURE_LAG frames.
 //  3. Teardown (T2AudioMicUnregister, PnP stop): STOP_IO if running, clear
 //     the BufferStruct entry, then free the ring - never the other way round.
 
 #define T2AUDIO_MIC_COPY_PERIOD_MS 2
 #define T2AUDIO_MIC_POOL_TAG       '2TMC'
 
+// The fixed part of both paths; called right after the context is zeroed.
+VOID
+T2AudioMicInitPaths(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    Context->Mic.Name = "Digital Mic";
+    Context->Mic.Headset = FALSE;
+    Context->Mic.BytesPerFrame = T2AUDIO_MIC_BYTES_PER_FRAME;
+    Context->Mic.RingFrames = T2AUDIO_MIC_RING_FRAMES;
+    Context->Mic.RingBytes = T2AUDIO_MIC_RING_BYTES;
+
+    Context->HeadsetMic.Name = "Codec Input";
+    Context->HeadsetMic.Headset = TRUE;
+    Context->HeadsetMic.BytesPerFrame = T2AUDIO_HEADSET_MIC_BYTES_PER_FRAME;
+    Context->HeadsetMic.RingFrames = T2AUDIO_HEADSET_MIC_RING_FRAMES;
+    Context->HeadsetMic.RingBytes = T2AUDIO_HEADSET_MIC_RING_BYTES;
+}
+
 // ---------------------------------------------------------------------------
 // BufferStruct and registration
 // ---------------------------------------------------------------------------
 
-// Index of the BufferStruct device "Digital Mic", or -1. Caller holds
+// Index of the BufferStruct device Path->Name, or -1. Caller holds
 // HardwareLock with HardwareReady set (BufferStruct is device memory).
 static LONG
-T2AudioMicFindDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicFindDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PT2AUDIO_CAPTURE_PATH Path)
 {
-    static const CHAR name[] = "Digital Mic";
+    SIZE_T nameSize;
     ULONG index;
 
-    if (Context->BufferStruct == NULL) {
+    if (Context->BufferStruct == NULL || Path->Name == NULL) {
         return -1;
     }
+    nameSize = strlen(Path->Name) + 1;
     for (index = 0; index < Context->BufferStructDevices && index < T2AUDIO_MAX_DEVICES; index++) {
         const T2AUDIO_DEVICE_METADATA *device = &Context->BufferStruct->Devices[index];
 
-        if (RtlCompareMemory(device->Name, name, sizeof(name)) == sizeof(name)) {
+        if (RtlCompareMemory(device->Name, Path->Name, nameSize) == nameSize) {
             return (LONG)index;
         }
     }
@@ -70,20 +93,23 @@ T2AudioMicCanAppendDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     return baseOffset <= Context->Bar1Size && required <= Context->Bar1Size - baseOffset;
 }
 
-// Find existing "Digital Mic" or append a new device entry to BufferStruct,
+// Find the existing entry or append a new device entry to BufferStruct,
 // exactly matching AppleAudio.sys FUN_140004558 (which appends "Digital Mic"
-// and increments NumDevices if not present at boot).
+// and increments NumDevices if not present at boot; the boot table has no
+// "Codec Input" either, docs/logs/boot_log.csv).
 // Caller holds HardwareLock with HardwareReady set.
 static LONG
-T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PT2AUDIO_CAPTURE_PATH Path)
 {
-    static const CHAR name[] = "Digital Mic";
-    LONG index = T2AudioMicFindDeviceLocked(Context);
+    LONG index = T2AudioMicFindDeviceLocked(Context, Path);
+    SIZE_T nameSize;
 
-    if (index >= 0) {
+    if (index >= 0 || Path->Name == NULL) {
         return index;
     }
-    if (T2AudioMicCanAppendDeviceLocked(Context)) {
+    nameSize = strlen(Path->Name) + 1;
+    if (nameSize <= sizeof(Context->BufferStruct->Devices[0].Name) &&
+        T2AudioMicCanAppendDeviceLocked(Context)) {
         // (The new entry must lie inside the mapped BAR1: MapResources only
         // validated the table up to the devices present at boot.)
         ULONG newIdx = Context->BufferStructDevices;
@@ -91,44 +117,45 @@ T2AudioMicFindOrAddDeviceLocked(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
             (volatile T2AUDIO_DEVICE_METADATA *)&Context->BufferStruct->Devices[newIdx];
 
         RtlZeroMemory((PVOID)device, sizeof(*device));
-        RtlCopyMemory((PVOID)device->Name, name, sizeof(name));
+        RtlCopyMemory((PVOID)device->Name, Path->Name, nameSize);
         Context->BufferStructDevices++;
-        Context->BufferStruct->NumDevices = Context->BufferStructDevices;
+        Context->BufferStruct->NumDevices = (UCHAR)Context->BufferStructDevices;
         _mm_sfence();
-        KdPrint(("T2Audio: BufferStruct added device[%u] 'Digital Mic' (NumDevices=%u)\n",
-                 newIdx, Context->BufferStructDevices));
+        KdPrint(("T2Audio: BufferStruct added device[%u] '%s' (NumDevices=%u)\n",
+                 newIdx, Path->Name, Context->BufferStructDevices));
         return (LONG)newIdx;
     }
     return -1;
 }
 
 BOOLEAN
-T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicPresentInBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PT2AUDIO_CAPTURE_PATH Path)
 {
     KIRQL oldIrql;
     BOOLEAN present = FALSE;
 
-    if (Context == NULL || !Context->HardwareReady || Context->BufferStruct == NULL) {
+    if (Context == NULL || Path == NULL || !Context->HardwareReady || Context->BufferStruct == NULL) {
         return FALSE;
     }
     KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
-    // If "Digital Mic" is already present in BufferStruct, return TRUE.
-    if (T2AudioMicFindDeviceLocked(Context) >= 0) {
+    // If the entry is already present in BufferStruct, return TRUE.
+    if (T2AudioMicFindDeviceLocked(Context, Path) >= 0) {
         present = TRUE;
     } else if (T2AudioMicCanAppendDeviceLocked(Context)) {
-        // AppleAudio dynamically appends "Digital Mic". Check the actual
-        // mapped BAR capacity as well as the logical device-count limit; a
-        // short table may have room for fewer entries than MAX_DEVICES.
+        // AppleAudio dynamically appends the entry. Check the actual mapped
+        // BAR capacity as well as the logical device-count limit; a short
+        // table may have room for fewer entries than MAX_DEVICES.
         present = TRUE;
     }
     KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
     return present;
 }
 
-// Write (Address != 0) or clear (Address == 0) input_streams[0] of the mic
-// entry. Returns FALSE when the entry is not there or BAR1 is gone.
+// Write (Address != 0) or clear (Address == 0) input_streams[0] of the
+// path's entry. Returns FALSE when the entry is not there or BAR1 is gone.
 static BOOLEAN
-T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 Address, _In_ ULONG Size)
+T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PT2AUDIO_CAPTURE_PATH Path,
+                            _In_ ULONG64 Address, _In_ ULONG Size)
 {
     KIRQL oldIrql;
     LONG index;
@@ -136,7 +163,8 @@ T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 A
 
     KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
     if (Context->HardwareReady) {
-        index = (Address != 0) ? T2AudioMicFindOrAddDeviceLocked(Context) : T2AudioMicFindDeviceLocked(Context);
+        index = (Address != 0) ? T2AudioMicFindOrAddDeviceLocked(Context, Path)
+                               : T2AudioMicFindDeviceLocked(Context, Path);
         if (index >= 0) {
             volatile T2AUDIO_DEVICE_METADATA *device =
                 (volatile T2AUDIO_DEVICE_METADATA *)&Context->BufferStruct->Devices[index];
@@ -169,7 +197,7 @@ T2AudioMicWriteBufferStruct(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 A
 // hardware run sent kaiT2en's bare header, which was acknowledged but did
 // not prepare the stream (EXCERPT_20261029_part2_mics.md).
 static NTSTATUS
-T2AudioMicSendAddressRanges(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicSendAddressRanges(_In_ PT2AUDIO_CAPTURE_PATH Path)
 {
     UCHAR message[T2AUDIO_BCE_SET_INPUT_RANGES_SIZE];
     UCHAR reply[256];
@@ -180,7 +208,7 @@ T2AudioMicSendAddressRanges(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     PAGED_CODE();
 
     length = T2AudioBceBuildSetInputRanges(message, sizeof(message),
-                                           Context->BceMicDeviceId, Context->MicStreamId);
+                                           Path->BceDeviceId, Path->StreamId);
     if (length == 0) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -190,15 +218,15 @@ T2AudioMicSendAddressRanges(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
                                         T2AUDIO_MSG_SET_INPUT_STREAM_ADDRESS_RANGES_RESPONSE)) {
         status = STATUS_DEVICE_PROTOCOL_ERROR;
     }
-    KdPrint(("T2Audio: mic SET_INPUT_STREAM_ADDRESS_RANGES dev=0x%I64X stream=0x%I64X (%u bytes): 0x%08X (reply %u bytes)\n",
-             Context->BceMicDeviceId, Context->MicStreamId, length, status, replySize));
+    KdPrint(("T2Audio: %s SET_INPUT_STREAM_ADDRESS_RANGES dev=0x%I64X stream=0x%I64X (%u bytes): 0x%08X (reply %u bytes)\n",
+             Path->Name, Path->BceDeviceId, Path->StreamId, length, status, replySize));
     return status;
 }
 
 // Send SET_PROPERTY 'nsrt' (msg 9, 66 bytes) with (double)48000.0, matching
 // AppleAudio.sys 0x14000445c. Sent right after SET_INPUT_STREAM_ADDRESS_RANGES.
 static NTSTATUS
-T2AudioMicSetSampleRate(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG SampleRateHz)
+T2AudioMicSetSampleRate(_In_ PT2AUDIO_CAPTURE_PATH Path, _In_ ULONG SampleRateHz)
 {
     unsigned char message[T2AUDIO_BCE_SET_PROPERTY_NSRT_SIZE];
     unsigned char reply[64];
@@ -209,7 +237,7 @@ T2AudioMicSetSampleRate(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG Samp
     PAGED_CODE();
 
     length = T2AudioBceBuildSetPropertyNominalSampleRate(message, sizeof(message),
-                                                        Context->BceMicDeviceId, SampleRateHz);
+                                                        Path->BceDeviceId, SampleRateHz);
     if (length == 0) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -219,16 +247,17 @@ T2AudioMicSetSampleRate(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG Samp
                                         T2AUDIO_MSG_SET_PROPERTY_RESPONSE)) {
         status = STATUS_DEVICE_PROTOCOL_ERROR;
     }
-    KdPrint(("T2Audio: mic SET_PROPERTY 'nsrt' dev=0x%I64X (rate %u): 0x%08X (reply %u bytes)\n",
-             Context->BceMicDeviceId, SampleRateHz, status, replySize));
+    KdPrint(("T2Audio: %s SET_PROPERTY 'nsrt' dev=0x%I64X (rate %u): 0x%08X (reply %u bytes)\n",
+             Path->Name, Path->BceDeviceId, SampleRateHz, status, replySize));
     return status;
 }
 
 // The ring as a common buffer of a bus-master DMA adapter of our PCI device:
 // the address handed to the T2 is then the device-logical one even with DMA
-// remapping (Kernel DMA Protection) on.
+// remapping (Kernel DMA Protection) on. Each path has its own adapter.
 static PVOID
-T2AudioMicAllocateRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Out_ PHYSICAL_ADDRESS *Logical)
+T2AudioMicAllocateRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path,
+                       _Out_ PHYSICAL_ADDRESS *Logical)
 {
     DEVICE_DESCRIPTION desc;
     PDEVICE_OBJECT pdo = NULL;
@@ -249,38 +278,38 @@ T2AudioMicAllocateRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Out_ PHYSICAL_A
     desc.Dma32BitAddresses = TRUE;
     desc.Dma64BitAddresses = TRUE;
     desc.InterfaceType = PCIBus;
-    desc.MaximumLength = T2AUDIO_MIC_RING_BYTES;
+    desc.MaximumLength = Path->RingBytes;
     adapter = IoGetDmaAdapter(pdo, &desc, &mapRegisters);
     if (adapter == NULL) {
-        KdPrint(("T2Audio: mic: IoGetDmaAdapter failed\n"));
+        KdPrint(("T2Audio: %s: IoGetDmaAdapter failed\n", Path->Name));
         return NULL;
     }
-    va = adapter->DmaOperations->AllocateCommonBuffer(adapter, T2AUDIO_MIC_RING_BYTES, Logical, TRUE);
+    va = adapter->DmaOperations->AllocateCommonBuffer(adapter, Path->RingBytes, Logical, TRUE);
     if (va == NULL) {
         adapter->DmaOperations->PutDmaAdapter(adapter);
         return NULL;
     }
-    Context->MicDmaAdapter = adapter;
+    Path->DmaAdapter = adapter;
     return va;
 }
 
 static VOID
-T2AudioMicFreeRing(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ PVOID Va)
+T2AudioMicFreeRing(_Inout_ PT2AUDIO_CAPTURE_PATH Path, _In_ PVOID Va)
 {
-    PDMA_ADAPTER adapter = (PDMA_ADAPTER)Context->MicDmaAdapter;
+    PDMA_ADAPTER adapter = (PDMA_ADAPTER)Path->DmaAdapter;
 
     PAGED_CODE();
 
     if (adapter != NULL) {
-        adapter->DmaOperations->FreeCommonBuffer(adapter, T2AUDIO_MIC_RING_BYTES,
-                                                 Context->MicBufferPa, Va, TRUE);
+        adapter->DmaOperations->FreeCommonBuffer(adapter, Path->RingBytes,
+                                                 Path->BufferPa, Va, TRUE);
         adapter->DmaOperations->PutDmaAdapter(adapter);
-        Context->MicDmaAdapter = NULL;
+        Path->DmaAdapter = NULL;
     }
 }
 
 NTSTATUS
-T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path)
 {
     PHYSICAL_ADDRESS logical;
     PVOID va;
@@ -288,98 +317,106 @@ T2AudioMicRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 
     PAGED_CODE();
 
-    if (Context == NULL || !Context->MicInput || !Context->MicFormatValid ||
-        Context->BceMicDeviceId == 0 || Context->MicStreamId == 0 || Context->MicRegistered) {
+    if (Context == NULL || Path == NULL || !Path->Enabled || !Path->FormatValid ||
+        Path->BceDeviceId == 0 || Path->StreamId == 0 || Path->Registered ||
+        Path->RingBytes == 0) {
         return STATUS_INVALID_DEVICE_STATE;
     }
-    va = T2AudioMicAllocateRing(Context, &logical);
+    va = T2AudioMicAllocateRing(Context, Path, &logical);
     if (va == NULL) {
-        KdPrint(("T2Audio: mic ring allocation (%u bytes) failed\n", T2AUDIO_MIC_RING_BYTES));
+        KdPrint(("T2Audio: %s ring allocation (%u bytes) failed\n", Path->Name, Path->RingBytes));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(va, T2AUDIO_MIC_RING_BYTES);
-    Context->MicBufferVa = va;
-    Context->MicBufferPa = logical;
-    Context->MicBufferSize = T2AUDIO_MIC_RING_BYTES;
-    KdPrint(("T2Audio: mic ring: common buffer va=%p logical=0x%I64X physical=0x%I64X\n",
-             va, (ULONG64)logical.QuadPart, (ULONG64)MmGetPhysicalAddress(va).QuadPart));
+    RtlZeroMemory(va, Path->RingBytes);
+    Path->BufferVa = va;
+    Path->BufferPa = logical;
+    Path->BufferSize = Path->RingBytes;
+    KdPrint(("T2Audio: %s ring: common buffer va=%p logical=0x%I64X physical=0x%I64X\n",
+             Path->Name, va, (ULONG64)logical.QuadPart, (ULONG64)MmGetPhysicalAddress(va).QuadPart));
 
-    if (!T2AudioMicWriteBufferStruct(Context, (ULONG64)Context->MicBufferPa.QuadPart,
-                                     Context->MicBufferSize)) {
-        KdPrint(("T2Audio: mic: no \"Digital Mic\" entry in BufferStruct\n"));
+    if (!T2AudioMicWriteBufferStruct(Context, Path, (ULONG64)Path->BufferPa.QuadPart,
+                                     Path->BufferSize)) {
+        KdPrint(("T2Audio: %s: no BufferStruct entry and no room to add one\n", Path->Name));
         status = STATUS_OBJECT_NAME_NOT_FOUND;
     } else {
-        status = T2AudioMicSendAddressRanges(Context);
+        status = T2AudioMicSendAddressRanges(Path);
         if (NT_SUCCESS(status)) {
-            status = T2AudioMicSetSampleRate(Context, 48000);
+            status = T2AudioMicSetSampleRate(Path, 48000);
         }
     }
     if (!NT_SUCCESS(status)) {
-        (VOID)T2AudioMicWriteBufferStruct(Context, 0, 0);
-        T2AudioMicFreeRing(Context, va);
-        Context->MicBufferVa = NULL;
-        Context->MicBufferSize = 0;
+        (VOID)T2AudioMicWriteBufferStruct(Context, Path, 0, 0);
+        T2AudioMicFreeRing(Path, va);
+        Path->BufferVa = NULL;
+        Path->BufferSize = 0;
         return status;
     }
-    Context->MicRegistered = TRUE;
-    KdPrint(("T2Audio: mic ring registered: pa=0x%I64X size=0x%X (%u frames)\n",
-             (ULONG64)Context->MicBufferPa.QuadPart, Context->MicBufferSize, T2AUDIO_MIC_RING_FRAMES));
+    Path->Registered = TRUE;
+    KdPrint(("T2Audio: %s ring registered: pa=0x%I64X size=0x%X (%u frames)\n",
+             Path->Name, (ULONG64)Path->BufferPa.QuadPart, Path->BufferSize, Path->RingFrames));
     return STATUS_SUCCESS;
 }
 
 // After a wake (D0): write the entry again and repeat msg 18, as AppleAudio
 // does for every input stream (RE_appleaudio_protocol.md section 7).
 NTSTATUS
-T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicReRegister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path)
 {
     NTSTATUS status;
 
     PAGED_CODE();
 
-    if (Context == NULL || !Context->MicRegistered || Context->MicBufferVa == NULL || Context->MicIoActive != 0) {
+    if (Context == NULL || Path == NULL || !Path->Registered || Path->BufferVa == NULL ||
+        Path->IoActive != 0) {
         return STATUS_INVALID_DEVICE_STATE;
     }
-    if (!T2AudioMicWriteBufferStruct(Context, (ULONG64)Context->MicBufferPa.QuadPart,
-                                     Context->MicBufferSize)) {
+    if (!T2AudioMicWriteBufferStruct(Context, Path, (ULONG64)Path->BufferPa.QuadPart,
+                                     Path->BufferSize)) {
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    status = T2AudioMicSendAddressRanges(Context);
+    status = T2AudioMicSendAddressRanges(Path);
     if (NT_SUCCESS(status)) {
-        status = T2AudioMicSetSampleRate(Context, 48000);
+        status = T2AudioMicSetSampleRate(Path, 48000);
     }
     return status;
 }
 
 VOID
-T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+T2AudioMicUnregister(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context, _Inout_ PT2AUDIO_CAPTURE_PATH Path)
 {
     PVOID va;
     KIRQL oldIrql;
 
     PAGED_CODE();
 
-    if (Context == NULL || Context->MicBufferVa == NULL) {
+    if (Context == NULL || Path == NULL || Path->BufferVa == NULL) {
         return;
     }
+    // StreamMutex orders this with a capture SetState(RUN): either START_IO
+    // went out first (IoActive is 1 and is stopped here), or the stream sees
+    // Registered == FALSE and sends none. Without it a START_IO racing the
+    // teardown would let the T2 write into the freed ring.
+    KeWaitForSingleObject(&Context->StreamMutex, Executive, KernelMode, FALSE, NULL);
     // The T2 must have stopped writing before the ring goes away.
-    if (InterlockedExchange(&Context->MicIoActive, 0) != 0) {
-        NTSTATUS status = T2AudioStopIoDevice(Context, Context->MicDeviceId);
+    if (InterlockedExchange(&Path->IoActive, 0) != 0) {
+        NTSTATUS status = T2AudioStopIoDevice(Context, Path->DeviceId);
 
-        KdPrint(("T2Audio: mic teardown STOP_IO: 0x%08X\n", status));
+        KdPrint(("T2Audio: %s teardown STOP_IO: 0x%08X\n", Path->Name, status));
     }
-    (VOID)T2AudioMicWriteBufferStruct(Context, 0, 0);
+    Path->Registered = FALSE;
+    KeReleaseMutex(&Context->StreamMutex, FALSE);
+    (VOID)T2AudioMicWriteBufferStruct(Context, Path, 0, 0);
 
     // Detach under the hardware lock so the capture DPC stops reading it.
     KeAcquireSpinLock(&Context->HardwareLock, &oldIrql);
-    va = Context->MicBufferVa;
-    Context->MicBufferVa = NULL;
-    Context->MicRegistered = FALSE;
+    va = Path->BufferVa;
+    Path->BufferVa = NULL;
     KeReleaseSpinLock(&Context->HardwareLock, oldIrql);
     KeFlushQueuedDpcs();
 
-    T2AudioMicFreeRing(Context, va);
-    Context->MicBufferSize = 0;
-    KdPrint(("T2Audio: mic ring released\n"));
+    T2AudioMicFreeRing(Path, va);
+    Path->BufferSize = 0;
+    KdPrint(("T2Audio: %s ring released\n", Path->Name));
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +427,7 @@ typedef struct _T2AUDIO_MIC_STREAM {
     IMiniportWaveRTStream Interface;
     LONG ReferenceCount;
     PT2AUDIO_DEVICE_CONTEXT DeviceContext;
+    PT2AUDIO_CAPTURE_PATH Path;
     PPORTWAVERTSTREAM PortStream;
     KSSTATE State;
     KSPIN_LOCK StreamLock;
@@ -408,6 +446,7 @@ typedef struct _T2AUDIO_MIC_STREAM {
     ULONG64 RunStartNs;
     BOOLEAN HardwareIoStarted;
     T2AUDIO_MIC_STATE Dsp;
+    T2AUDIO_MIC_GATE_STATE Gate;
     // Run diagnostics.
     ULONG ReAims;
     ULONG64 SilentFrames;
@@ -424,6 +463,7 @@ static VOID
 T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
 {
     PT2AUDIO_DEVICE_CONTEXT context = s->DeviceContext;
+    PT2AUDIO_CAPTURE_PATH path = s->Path;
     LARGE_INTEGER qpc, qpcFreq;
     ULONG64 target;
     ULONG64 frame;
@@ -434,7 +474,7 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
     PULONG client;
 
     if (s->State != KSSTATE_RUN || s->SystemBufferVa == NULL || s->AudioBufferSize < 4 ||
-        context == NULL) {
+        context == NULL || path == NULL) {
         return;
     }
     qpc = KeQueryPerformanceCounter(&qpcFreq);
@@ -455,16 +495,16 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
     // The T2 write position: the latest anchor of this run plus the time
     // since, minus the device's input latency (kaiT2en's capture pointer).
     KeAcquireSpinLockAtDpcLevel(&context->ClockLock);
-    if (context->MicClockAnchorNs >= s->RunStartNs && context->MicClockGeneration != 0 &&
-        context->MicClockAnchorQpc != 0) {
+    if (path->ClockAnchorNs >= s->RunStartNs && path->ClockGeneration != 0 &&
+        path->ClockAnchorQpc != 0) {
         ULONG64 elapsed = 0;
 
-        if ((ULONG64)qpc.QuadPart > context->MicClockAnchorQpc && qpcFreq.QuadPart > 0) {
-            elapsed = T2AudioTicksToFrames((ULONG64)qpc.QuadPart - context->MicClockAnchorQpc,
+        if ((ULONG64)qpc.QuadPart > path->ClockAnchorQpc && qpcFreq.QuadPart > 0) {
+            elapsed = T2AudioTicksToFrames((ULONG64)qpc.QuadPart - path->ClockAnchorQpc,
                                            48000, (ULONG64)qpcFreq.QuadPart);
         }
-        writeFrame = context->MicClockAnchorFrames + elapsed;
-        writeFrame = (writeFrame > context->MicLatencyFrames) ? writeFrame - context->MicLatencyFrames : 0;
+        writeFrame = path->ClockAnchorFrames + elapsed;
+        writeFrame = (writeFrame > path->LatencyFrames) ? writeFrame - path->LatencyFrames : 0;
         haveWriter = TRUE;
     }
     KeReleaseSpinLockFromDpcLevel(&context->ClockLock);
@@ -474,8 +514,8 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
             if (s->OffsetValid) {
                 s->ReAims++;
                 if (s->ReAims <= 8 || (s->ReAims % 100) == 0) {
-                    KdPrint(("T2Audio: mic clock: re-aimed (#%u, write=%I64u host=%I64u)\n",
-                             s->ReAims, writeFrame, target));
+                    KdPrint(("T2Audio: %s clock: re-aimed (#%u, write=%I64u host=%I64u)\n",
+                             path->Name, s->ReAims, writeFrame, target));
                 }
             }
             s->OffsetValid = TRUE;
@@ -484,8 +524,8 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
 
     client = (PULONG)s->SystemBufferVa;
     KeAcquireSpinLockAtDpcLevel(&context->HardwareLock);
-    if (context->MicRegistered && context->MicBufferVa != NULL && !context->PoweredDown) {
-        ring = (PUCHAR)context->MicBufferVa;
+    if (path->Registered && path->BufferVa != NULL && !context->PoweredDown) {
+        ring = (PUCHAR)path->BufferVa;
     }
     for (; frame < target; frame++) {
         LONGLONG t2Frame = (LONGLONG)frame + s->T2Offset;
@@ -493,13 +533,20 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
 
         if (ring != NULL && s->OffsetValid && t2Frame >= 0 && (ULONG64)t2Frame < writeFrame) {
             const volatile ULONG *slot = (const volatile ULONG *)(ring +
-                (SIZE_T)T2AudioMicRingSlot(t2Frame, T2AUDIO_MIC_RING_FRAMES) * T2AUDIO_MIC_BYTES_PER_FRAME);
-            unsigned int raw[3];
+                (SIZE_T)T2AudioMicRingSlot(t2Frame, path->RingFrames) * path->BytesPerFrame);
+            int sample;
 
-            raw[0] = slot[0];
-            raw[1] = slot[1];
-            raw[2] = slot[2];
-            out = (ULONG)T2AudioMicProcessFrame(&s->Dsp, raw, context->MicDsp);
+            if (path->Headset) {
+                sample = T2AudioHeadsetMicSample(slot[0]);
+            } else {
+                unsigned int raw[3];
+
+                raw[0] = slot[0];
+                raw[1] = slot[1];
+                raw[2] = slot[2];
+                sample = T2AudioMicProcessFrame(&s->Dsp, raw, context->MicDsp);
+            }
+            out = (ULONG)T2AudioMicNoiseGate(&s->Gate, sample, context->MicNoiseSuppression);
             s->CapturedFrames++;
         } else {
             s->SilentFrames++;
@@ -627,8 +674,8 @@ T2AudioMicStreamRelease(_In_ PMINIPORTWAVERTSTREAM Unknown)
     LONG references = InterlockedDecrement(&s->ReferenceCount);
 
     if (references == 0) {
-        if (s->DeviceContext != NULL) {
-            (VOID)InterlockedCompareExchangePointer(&s->DeviceContext->MicRunningStream, NULL, s);
+        if (s->Path != NULL) {
+            (VOID)InterlockedCompareExchangePointer(&s->Path->RunningStream, NULL, s);
         }
         T2AudioMicReleaseBuffer(s);
         if (s->PortStream != NULL) {
@@ -697,17 +744,18 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
             return STATUS_INVALID_DEVICE_STATE;
         }
         qpc = KeQueryPerformanceCounter(&qpcFreq);
-        if (!context->MicStartIo) {
-            KdPrint(("T2Audio: mic RUN without START_IO (MicStartIo=0): the endpoint records silence\n"));
-        } else if (context->BceIoEnabled && context->MicRegistered && context->MicDeviceId != 0 &&
+        if (!s->Path->StartIo) {
+            KdPrint(("T2Audio: %s RUN without START_IO (%s=0): the endpoint records silence\n",
+                     s->Path->Name, s->Path->Headset ? "HeadsetMicStartIo" : "MicStartIo"));
+        } else if (context->BceIoEnabled && s->Path->Registered && s->Path->DeviceId != 0 &&
             !s->HardwareIoStarted) {
-            status = T2AudioStartIoDevice(context, context->MicDeviceId);
-            KdPrint(("T2Audio: mic RUN START_IO: 0x%08X\n", status));
+            status = T2AudioStartIoDevice(context, s->Path->DeviceId);
+            KdPrint(("T2Audio: %s RUN START_IO: 0x%08X\n", s->Path->Name, status));
             if (!NT_SUCCESS(status)) {
                 return status;
             }
             s->HardwareIoStarted = TRUE;
-            InterlockedExchange(&context->MicIoActive, 1);
+            InterlockedExchange(&s->Path->IoActive, 1);
         }
         KeAcquireSpinLock(&s->StreamLock, &oldIrql);
         s->AnchorQpc = (ULONG64)qpc.QuadPart;
@@ -720,6 +768,7 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
         s->MaxCopyUs = 0;
         if (s->LastFrame == 0) {
             T2AudioMicReset(&s->Dsp);
+            T2AudioMicGateReset(&s->Gate);
         }
         s->State = KSSTATE_RUN;
         KeReleaseSpinLock(&s->StreamLock, oldIrql);
@@ -742,13 +791,13 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
     }
     s->State = State;
     KeReleaseSpinLock(&s->StreamLock, oldIrql);
-    KdPrint(("T2Audio: mic run summary: captured=%I64u silent=%I64u reAims=%u maxCopyUs=%u\n",
-             s->CapturedFrames, s->SilentFrames, s->ReAims, s->MaxCopyUs));
+    KdPrint(("T2Audio: %s run summary: captured=%I64u silent=%I64u reAims=%u maxCopyUs=%u\n",
+             s->Path->Name, s->CapturedFrames, s->SilentFrames, s->ReAims, s->MaxCopyUs));
     if (s->HardwareIoStarted) {
-        if (InterlockedExchange(&context->MicIoActive, 0) != 0) {
-            NTSTATUS status = T2AudioStopIoDevice(context, context->MicDeviceId);
+        if (InterlockedExchange(&s->Path->IoActive, 0) != 0) {
+            NTSTATUS status = T2AudioStopIoDevice(context, s->Path->DeviceId);
 
-            KdPrint(("T2Audio: mic leave RUN STOP_IO: 0x%08X\n", status));
+            KdPrint(("T2Audio: %s leave RUN STOP_IO: 0x%08X\n", s->Path->Name, status));
         }
         s->HardwareIoStarted = FALSE;
     }
@@ -762,15 +811,15 @@ T2AudioMicStreamSetState(_In_ PMINIPORTWAVERTSTREAM Stream, _In_ KSSTATE State)
     PT2AUDIO_DEVICE_CONTEXT context = s->DeviceContext;
     NTSTATUS status;
 
-    if (State < KSSTATE_STOP || State > KSSTATE_RUN || context == NULL) {
+    if (State < KSSTATE_STOP || State > KSSTATE_RUN || context == NULL || s->Path == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
     KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
     status = T2AudioMicSetStateLocked(s, State);
     if (s->State == KSSTATE_RUN) {
-        context->MicRunningStream = s;
-    } else if (context->MicRunningStream == (PVOID)s) {
-        context->MicRunningStream = NULL;
+        s->Path->RunningStream = s;
+    } else if (s->Path->RunningStream == (PVOID)s) {
+        s->Path->RunningStream = NULL;
     }
     KeReleaseMutex(&context->StreamMutex, FALSE);
     return status;
@@ -786,8 +835,8 @@ T2AudioMicStreamResumeAfterPower(_In_ PVOID Stream)
 
     PAGED_CODE();
 
-    if (s == NULL || s->DeviceContext == NULL || s->State != KSSTATE_RUN ||
-        !s->HardwareIoStarted || s->DeviceContext->MicIoActive != 0) {
+    if (s == NULL || s->DeviceContext == NULL || s->Path == NULL || s->State != KSSTATE_RUN ||
+        !s->HardwareIoStarted || s->Path->IoActive != 0) {
         return;
     }
     s->HardwareIoStarted = FALSE;
@@ -882,7 +931,7 @@ T2AudioMicStreamGetHWLatency(_In_ PMINIPORTWAVERTSTREAM Stream, _Out_ KSRTAUDIO_
     PT2AUDIO_MIC_STREAM s = CONTAINING_RECORD(Stream, T2AUDIO_MIC_STREAM, Interface);
 
     if (Latency != NULL) {
-        ULONG frames = (s->DeviceContext != NULL) ? s->DeviceContext->MicLatencyFrames : 0;
+        ULONG frames = (s->Path != NULL) ? s->Path->LatencyFrames : 0;
 
         RtlZeroMemory(Latency, sizeof(*Latency));
         Latency->FifoSize = T2AUDIO_MIC_CAPTURE_LAG * 4u;
@@ -922,6 +971,7 @@ typedef struct _T2AUDIO_MIC_MINIPORT {
     IMiniportWaveRT Interface;
     LONG ReferenceCount;
     PT2AUDIO_DEVICE_CONTEXT DeviceContext;
+    PT2AUDIO_CAPTURE_PATH Path;
 } T2AUDIO_MIC_MINIPORT, *PT2AUDIO_MIC_MINIPORT;
 
 static KSDATARANGE_AUDIO g_T2AudioMicRange = {
@@ -1121,7 +1171,7 @@ T2AudioMicMiniportNewStream(
         return STATUS_INVALID_PARAMETER;
     }
     *Stream = NULL;
-    if (!Capture || Pin != T2AUDIO_MIC_WAVE_PIN_CAPTURE ||
+    if (m->Path == NULL || !Capture || Pin != T2AUDIO_MIC_WAVE_PIN_CAPTURE ||
         !NT_SUCCESS(T2AudioMicValidateFormat(DataFormat))) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1133,17 +1183,19 @@ T2AudioMicMiniportNewStream(
     s->Interface.lpVtbl = &g_T2AudioMicStreamVtbl;
     s->ReferenceCount = 1;
     s->DeviceContext = m->DeviceContext;
+    s->Path = m->Path;
     s->PortStream = PortStream;
     s->State = KSSTATE_STOP;
     if (PortStream != NULL) {
         PortStream->lpVtbl->AddRef((PVOID)PortStream);
     }
     T2AudioMicReset(&s->Dsp);
+    T2AudioMicGateReset(&s->Gate);
     KeInitializeSpinLock(&s->StreamLock);
     KeInitializeTimer(&s->CopyTimer);
     KeInitializeDpc(&s->CopyDpc, T2AudioMicCopyTick, s);
     *Stream = &s->Interface;
-    KdPrint(("T2Audio: mic NewStream\n"));
+    KdPrint(("T2Audio: %s NewStream\n", s->Path->Name));
     return STATUS_SUCCESS;
 }
 
@@ -1297,10 +1349,196 @@ static PCAUTOMATION_TABLE g_T2AudioMicPinAutomation = {
     0
 };
 
+// ---------------------------------------------------------------------------
+// Headset microphone topology ("TopologyMicIn"): headset microphone ->
+// bridge. The source pin carries the 3.5 mm jack ('inpt'/'jack' of "Codec
+// Input", polled in BceTransport.c): KSPROPERTY_JACK_DESCRIPTION(2) and
+// KSEVENT_PINCAPS_JACKINFOCHANGE, as on the headphone topology.
+// ---------------------------------------------------------------------------
+
 typedef struct _T2AUDIO_MIC_TOPOLOGY {
     IMiniportTopology Interface;
     LONG ReferenceCount;
+    PT2AUDIO_DEVICE_CONTEXT DeviceContext;
+    PT2AUDIO_CAPTURE_PATH Path;
 } T2AUDIO_MIC_TOPOLOGY, *PT2AUDIO_MIC_TOPOLOGY;
+
+static BOOLEAN
+T2AudioHeadsetMicJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    if (Context == NULL) {
+        return TRUE;
+    }
+    return T2AudioJackReportConnected(Context->JackEvents, Context->HeadsetMicJackSeen ? 1 : 0,
+                                      Context->HeadsetMicJackPlugged) ? TRUE : FALSE;
+}
+
+static NTSTATUS
+T2AudioHeadsetMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
+{
+    PT2AUDIO_MIC_TOPOLOGY t;
+    ULONG pinId = (ULONG)-1;
+    ULONG needed;
+    PKSMULTIPLE_ITEM item;
+    BOOLEAN connected;
+
+    if (Request == NULL || Request->PropertyItem == NULL || Request->MajorTarget == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    t = CONTAINING_RECORD((PMINIPORTTOPOLOGY)Request->MajorTarget, T2AUDIO_MIC_TOPOLOGY, Interface);
+    if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL) {
+        pinId = *(PULONG)Request->Instance;
+    }
+    if (t->Path == NULL || !t->Path->Headset ||
+        (pinId != T2AUDIO_MIC_TOPO_PIN_MIC && pinId != (ULONG)-1)) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
+        return T2AudioMicBasicSupport(Request);
+    }
+    if (!(Request->Verb & KSPROPERTY_TYPE_GET)) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    needed = sizeof(KSMULTIPLE_ITEM) +
+             ((Request->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION)
+                  ? sizeof(KSJACK_DESCRIPTION) : sizeof(KSJACK_DESCRIPTION2));
+    if (Request->ValueSize == 0) {
+        Request->ValueSize = needed;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    if (Request->ValueSize < needed || Request->Value == NULL) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    connected = T2AudioHeadsetMicJackConnected(t->DeviceContext);
+    item = (PKSMULTIPLE_ITEM)Request->Value;
+    item->Size = needed;
+    item->Count = 1;
+    if (Request->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION) {
+        PKSJACK_DESCRIPTION jack = (PKSJACK_DESCRIPTION)(item + 1);
+
+        RtlZeroMemory(jack, sizeof(*jack));
+        jack->ChannelMapping = KSAUDIO_SPEAKER_MONO;
+        jack->Color = 0;
+        jack->ConnectionType = eConnType3Point5mm;
+        jack->GeoLocation = eGeoLocLeft;          // the combo jack of the MacBook Pro 16"
+        jack->GenLocation = eGenLocPrimaryBox;
+        jack->PortConnection = ePortConnJack;
+        jack->IsConnected = connected;
+    } else {
+        PKSJACK_DESCRIPTION2 jack2 = (PKSJACK_DESCRIPTION2)(item + 1);
+
+        RtlZeroMemory(jack2, sizeof(*jack2));
+        jack2->DeviceStateInfo = connected ? 1 : 0;
+        jack2->JackCapabilities = (t->DeviceContext != NULL && t->DeviceContext->JackEvents)
+                                      ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
+    }
+    Request->ValueSize = needed;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+T2AudioHeadsetMicJackEvent(_In_ PPCEVENT_REQUEST Request)
+{
+    PT2AUDIO_MIC_TOPOLOGY t;
+    PPORTEVENTS events;
+
+    if (Request == NULL || Request->MajorTarget == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    t = CONTAINING_RECORD((PMINIPORTTOPOLOGY)Request->MajorTarget, T2AUDIO_MIC_TOPOLOGY, Interface);
+    events = (t->Path != NULL) ? (PPORTEVENTS)t->Path->PortEvents : NULL;
+    switch (Request->Verb) {
+    case PCEVENT_VERB_ADD:
+        if (events == NULL || Request->EventEntry == NULL) {
+            return STATUS_UNSUCCESSFUL;
+        }
+        events->lpVtbl->AddEventToEventList((PVOID)events, Request->EventEntry);
+        return STATUS_SUCCESS;
+    case PCEVENT_VERB_REMOVE:
+        // PortCls removes the entry from its list itself.
+        return STATUS_SUCCESS;
+    case PCEVENT_VERB_SUPPORT:
+        return (t->Path != NULL && t->Path->Headset) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+}
+
+static PCPROPERTY_ITEM g_T2AudioHeadsetMicProperties[] = {
+    {
+        &KSPROPSETID_Jack,
+        KSPROPERTY_JACK_DESCRIPTION,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioHeadsetMicJackProperty
+    },
+    {
+        &KSPROPSETID_Jack,
+        KSPROPERTY_JACK_DESCRIPTION2,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioHeadsetMicJackProperty
+    }
+};
+
+static PCEVENT_ITEM g_T2AudioHeadsetMicEvents[] = {
+    {
+        &KSEVENTSETID_PinCapsChange,
+        KSEVENT_PINCAPS_JACKINFOCHANGE,
+        KSEVENT_TYPE_ENABLE | KSEVENT_TYPE_BASICSUPPORT,
+        T2AudioHeadsetMicJackEvent
+    }
+};
+
+static PCAUTOMATION_TABLE g_T2AudioHeadsetMicPinAutomation = {
+    sizeof(PCPROPERTY_ITEM),
+    SIZEOF_ARRAY(g_T2AudioHeadsetMicProperties),
+    g_T2AudioHeadsetMicProperties,
+    0, 0, NULL,
+    sizeof(PCEVENT_ITEM),
+    SIZEOF_ARRAY(g_T2AudioHeadsetMicEvents),
+    g_T2AudioHeadsetMicEvents,
+    0
+};
+
+// Called at PASSIVE_LEVEL when the polled headset jack changed (BceTransport.c).
+VOID
+T2AudioNotifyHeadsetMicJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PPORTEVENTS events;
+
+    if (Context == NULL || !Context->HeadsetMic.FiltersRegistered) {
+        return;
+    }
+    events = (PPORTEVENTS)Context->HeadsetMic.PortEvents;
+    if (events == NULL) {
+        return;
+    }
+    events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
+                                      KSEVENT_PINCAPS_JACKINFOCHANGE,
+                                      TRUE, T2AUDIO_MIC_TOPO_PIN_MIC,
+                                      FALSE, (ULONG)-1);
+    KdPrint(("T2Audio: headset mic jack change signalled to Windows\n"));
+}
+
+// PnP stop/removal (after the jack poll stopped): drop the IPortEvents
+// reference taken at Init.
+VOID
+T2AudioReleaseHeadsetMicEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PPORTEVENTS events;
+
+    if (Context == NULL) {
+        return;
+    }
+    events = (PPORTEVENTS)InterlockedExchangePointer(&Context->HeadsetMic.PortEvents, NULL);
+    if (events != NULL) {
+        events->lpVtbl->Release((PVOID)events);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Topology filters
+// ---------------------------------------------------------------------------
 
 static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
     // Pin 0: the built-in microphone array (physical source).
@@ -1325,6 +1563,29 @@ static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
     }
 };
 
+static PCPIN_DESCRIPTOR g_T2AudioHeadsetMicTopoPins[] = {
+    // Pin 0: the headset microphone on the 3.5 mm jack (physical source).
+    {
+        1, 1, 0, &g_T2AudioHeadsetMicPinAutomation,
+        {
+            0, NULL, 0, NULL,
+            SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
+            KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE,
+            &KSNODETYPE_HEADSET_MICROPHONE, NULL, 0
+        }
+    },
+    // Pin 1: bridge to the capture WaveRT filter.
+    {
+        1, 1, 0, NULL,
+        {
+            0, NULL, 0, NULL,
+            SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
+            KSPIN_DATAFLOW_OUT, KSPIN_COMMUNICATION_NONE,
+            &KSCATEGORY_AUDIO, NULL, 0
+        }
+    }
+};
+
 static PCCONNECTION_DESCRIPTOR g_T2AudioMicTopoConnections[] = {
     { PCFILTER_NODE, T2AUDIO_MIC_TOPO_PIN_MIC, PCFILTER_NODE, T2AUDIO_MIC_TOPO_PIN_BRIDGE }
 };
@@ -1332,6 +1593,14 @@ static PCCONNECTION_DESCRIPTOR g_T2AudioMicTopoConnections[] = {
 static PCFILTER_DESCRIPTOR g_T2AudioMicTopoDescriptor = {
     0, NULL,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_T2AudioMicTopoPins), g_T2AudioMicTopoPins,
+    sizeof(PCNODE_DESCRIPTOR), 0, NULL,
+    SIZEOF_ARRAY(g_T2AudioMicTopoConnections), g_T2AudioMicTopoConnections,
+    0, NULL
+};
+
+static PCFILTER_DESCRIPTOR g_T2AudioHeadsetMicTopoDescriptor = {
+    0, NULL,
+    sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_T2AudioHeadsetMicTopoPins), g_T2AudioHeadsetMicTopoPins,
     sizeof(PCNODE_DESCRIPTOR), 0, NULL,
     SIZEOF_ARRAY(g_T2AudioMicTopoConnections), g_T2AudioMicTopoConnections,
     0, NULL
@@ -1379,11 +1648,13 @@ T2AudioMicTopoRelease(_In_ PMINIPORTTOPOLOGY Unknown)
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioMicTopoGetDescription(_In_ PMINIPORT Miniport, _Out_ PPCFILTER_DESCRIPTOR *Description)
 {
-    UNREFERENCED_PARAMETER(Miniport);
+    PT2AUDIO_MIC_TOPOLOGY t = CONTAINING_RECORD((PMINIPORTTOPOLOGY)Miniport, T2AUDIO_MIC_TOPOLOGY, Interface);
+
     if (Description == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    *Description = &g_T2AudioMicTopoDescriptor;
+    *Description = (t->Path != NULL && t->Path->Headset) ? &g_T2AudioHeadsetMicTopoDescriptor
+                                                         : &g_T2AudioMicTopoDescriptor;
     return STATUS_SUCCESS;
 }
 
@@ -1411,10 +1682,21 @@ static NTSTATUS STDMETHODCALLTYPE
 T2AudioMicTopoInit(_In_ PMINIPORTTOPOLOGY Miniport, _In_ PUNKNOWN UnknownAdapter,
                    _In_ PRESOURCELIST ResourceList, _In_ PPORTTOPOLOGY Port)
 {
-    UNREFERENCED_PARAMETER(Miniport);
+    PT2AUDIO_MIC_TOPOLOGY t = CONTAINING_RECORD(Miniport, T2AUDIO_MIC_TOPOLOGY, Interface);
+
     UNREFERENCED_PARAMETER(UnknownAdapter);
     UNREFERENCED_PARAMETER(ResourceList);
-    UNREFERENCED_PARAMETER(Port);
+    // Headset filter: keep the port's IPortEvents to signal jack changes
+    // (T2AudioNotifyHeadsetMicJackChange); released in the PnP stop path.
+    if (t->Path != NULL && t->Path->Headset && Port != NULL) {
+        PVOID events = NULL;
+
+        if (NT_SUCCESS(Port->lpVtbl->QueryInterface((PVOID)Port, &IID_IPortEvents, &events)) &&
+            events != NULL &&
+            InterlockedCompareExchangePointer(&t->Path->PortEvents, events, NULL) != NULL) {
+            ((PPORTEVENTS)events)->lpVtbl->Release(events);
+        }
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1427,23 +1709,33 @@ static const IMiniportTopologyVtbl g_T2AudioMicTopoVtbl = {
     (void *)T2AudioMicTopoInit
 };
 
-// Register "TopologyMic" + "WaveMic" and wire topology pin 1 -> wave pin 1.
+// Register the topology + wave pair of a capture path ("TopologyMic" +
+// "WaveMic", or for the headset AppleAudio's "TopologyMicIn" + "WaveMicIn")
+// and wire topology pin 1 -> wave pin 1.
 NTSTATUS
 T2AudioRegisterMicFilters(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
     _In_ PRESOURCELIST ResourceList,
-    _In_ PT2AUDIO_DEVICE_CONTEXT Context)
+    _In_ PT2AUDIO_DEVICE_CONTEXT Context,
+    _In_ PT2AUDIO_CAPTURE_PATH Path)
 {
     PPORT base = NULL;
     PPORTTOPOLOGY topoPort = NULL;
     PPORTWAVERT wavePort = NULL;
     PT2AUDIO_MIC_TOPOLOGY topo = NULL;
     PT2AUDIO_MIC_MINIPORT wave = NULL;
+    PWSTR topoName;
+    PWSTR waveName;
     NTSTATUS status;
 
     PAGED_CODE();
 
+    if (Path == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    topoName = Path->Headset ? L"TopologyMicIn" : L"TopologyMic";
+    waveName = Path->Headset ? L"WaveMicIn" : L"WaveMic";
     topo = (PT2AUDIO_MIC_TOPOLOGY)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*topo), T2AUDIO_MIC_POOL_TAG);
     wave = (PT2AUDIO_MIC_MINIPORT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*wave), T2AUDIO_MIC_POOL_TAG);
     if (topo == NULL || wave == NULL) {
@@ -1458,10 +1750,13 @@ T2AudioRegisterMicFilters(
     RtlZeroMemory(topo, sizeof(*topo));
     topo->Interface.lpVtbl = &g_T2AudioMicTopoVtbl;
     topo->ReferenceCount = 1;
+    topo->DeviceContext = Context;
+    topo->Path = Path;
     RtlZeroMemory(wave, sizeof(*wave));
     wave->Interface.lpVtbl = &g_T2AudioMicMiniportVtbl;
     wave->ReferenceCount = 1;
     wave->DeviceContext = Context;
+    wave->Path = Path;
 
     status = PcNewPort(&base, &CLSID_PortTopology);
     if (NT_SUCCESS(status)) {
@@ -1474,7 +1769,7 @@ T2AudioRegisterMicFilters(
                                         NULL, ResourceList);
     }
     if (NT_SUCCESS(status)) {
-        status = PcRegisterSubdevice(DeviceObject, L"TopologyMic", (PUNKNOWN)topoPort);
+        status = PcRegisterSubdevice(DeviceObject, topoName, (PUNKNOWN)topoPort);
     }
     if (NT_SUCCESS(status)) {
         status = PcNewPort(&base, &CLSID_PortWaveRT);
@@ -1489,7 +1784,7 @@ T2AudioRegisterMicFilters(
                                         NULL, ResourceList);
     }
     if (NT_SUCCESS(status)) {
-        status = PcRegisterSubdevice(DeviceObject, L"WaveMic", (PUNKNOWN)wavePort);
+        status = PcRegisterSubdevice(DeviceObject, waveName, (PUNKNOWN)wavePort);
     }
     if (NT_SUCCESS(status)) {
         status = PcRegisterPhysicalConnection(DeviceObject,

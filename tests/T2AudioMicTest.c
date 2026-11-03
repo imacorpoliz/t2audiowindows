@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
+#include <limits.h>
 #include "../src/T2AudioMicLogic.h"
 
 #ifndef M_PI
@@ -150,6 +152,53 @@ static void test_capture_aim(void)
     CHECK(T2AudioMicRingSlot(T2AUDIO_MIC_RING_FRAMES + 5, T2AUDIO_MIC_RING_FRAMES) == 5, "wrap");
 }
 
+// Headset microphone ("Codec Input"): signed 32-bit mono passes unchanged,
+// one 32-bit slot per frame, and the ring wraps like the array's.
+static void test_headset_mic(void)
+{
+    static const int samples[] = { 0, 1, -1, 0x12345678, -0x12345678, INT_MAX, INT_MIN };
+    unsigned int ring[T2AUDIO_HEADSET_MIC_RING_FRAMES];
+    T2AUDIO_MIC_GATE_STATE g;
+    unsigned long slot;
+    size_t i;
+
+    CHECK(T2AUDIO_HEADSET_MIC_BYTES_PER_FRAME == 4, "4 bytes a frame");
+    CHECK(T2AUDIO_HEADSET_MIC_RING_BYTES == T2AUDIO_HEADSET_MIC_RING_FRAMES * 4u, "ring bytes");
+    CHECK(T2AUDIO_HEADSET_MIC_RING_BYTES < T2AUDIO_MIC_RING_BYTES, "smaller than the array ring");
+    for (i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        CHECK(T2AudioHeadsetMicSample((unsigned int)samples[i]) == samples[i],
+              "sample %d not passed through", samples[i]);
+    }
+    // Gate off is bit-exact on this path too.
+    T2AudioMicGateReset(&g);
+    for (i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        CHECK(T2AudioMicNoiseGate(&g, T2AudioHeadsetMicSample((unsigned int)samples[i]), 0) == samples[i],
+              "gate bypass changed %d", samples[i]);
+    }
+    // Slots stay inside the ring across a wrap and for frames before START_IO.
+    for (i = 0; i < T2AUDIO_HEADSET_MIC_RING_FRAMES; i++) {
+        ring[i] = (unsigned int)i;
+    }
+    slot = T2AudioMicRingSlot((long long)T2AUDIO_HEADSET_MIC_RING_FRAMES * 3 + 7,
+                              T2AUDIO_HEADSET_MIC_RING_FRAMES);
+    CHECK(slot == 7 && ring[slot] == 7, "wrap slot %lu", slot);
+    CHECK(T2AudioMicRingSlot(-5, T2AUDIO_HEADSET_MIC_RING_FRAMES) == 0, "negative frame -> slot 0");
+    CHECK((T2AudioMicRingSlot(0x7FFFFFFFFFFFll, T2AUDIO_HEADSET_MIC_RING_FRAMES) + 1) *
+              T2AUDIO_HEADSET_MIC_BYTES_PER_FRAME <= T2AUDIO_HEADSET_MIC_RING_BYTES,
+          "last byte in ring");
+}
+
+// Jack reporting: "connected" until a read succeeded once, then the jack.
+static void test_jack_report(void)
+{
+    CHECK(T2AudioJackReportConnected(0, 0, 0) == 1, "no jack events -> connected");
+    CHECK(T2AudioJackReportConnected(0, 1, 0) == 1, "no jack events, seen -> connected");
+    CHECK(T2AudioJackReportConnected(1, 0, 0) == 1, "never read -> connected");
+    CHECK(T2AudioJackReportConnected(1, 1, 0) == 0, "read unplugged -> unplugged");
+    CHECK(T2AudioJackReportConnected(1, 1, 1) == 1, "read plugged -> plugged");
+    CHECK(T2AudioJackReportConnected(1, 1, 5) == 1, "non-zero -> plugged");
+}
+
 static void test_geometry(void)
 {
     CHECK(T2AUDIO_MIC_ARRAY_COUNT == 3, "mic count");
@@ -160,12 +209,165 @@ static void test_geometry(void)
     CHECK(T2AUDIO_MIC_ARRAY_WORK_ANGLE > 0, "work angle positive");
 }
 
+static void test_noise_gate(void)
+{
+    T2AUDIO_MIC_GATE_STATE g;
+    int samples[] = { 0, 1, -1, 12345, -12345, 0x7FFFFFFF, INT_MIN, 0x12345678, -0x76543210 };
+    unsigned i;
+    int out, prev;
+    long n;
+
+    // Disabled: bit-exact pass-through and the gate state is not touched.
+    T2AudioMicGateReset(&g);
+    for (i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+        CHECK(T2AudioMicNoiseGate(&g, samples[i], 0) == samples[i], "bypass sample %d", samples[i]);
+    }
+    CHECK(g.Gain == 0 && g.Open == 0, "bypass left the gate state untouched");
+
+    // Enabled, from reset (closed): silence stays silent.
+    T2AudioMicGateReset(&g);
+    for (n = 0; n < 1000; n++) {
+        CHECK(T2AudioMicNoiseGate(&g, 0, 1) == 0, "silence while closed");
+    }
+
+    // A loud signal opens the gate over ~96 samples, then passes the input
+    // through exactly (the gain saturates at Q16 1.0).
+    {
+        int loud = 0x40000000;   // -6 dBFS, far above the open threshold
+
+        T2AudioMicGateReset(&g);
+        for (n = 0; n < 200; n++) {
+            out = T2AudioMicNoiseGate(&g, loud, 1);
+            if (n < 95) {
+                CHECK(out != loud, "attack ramp not yet open at sample %ld", n);
+            } else {
+                CHECK(out == loud, "gate did not reach full gain at sample %ld", n);
+            }
+        }
+        CHECK(g.Gain == T2AUDIO_MIC_GATE_GAIN_FULL, "gain not saturated");
+    }
+
+    // Once open, a quiet signal ramps the gain down monotonically (envelope
+    // fall + 100 ms hold + ~150 ms release) and then stays silent.
+    {
+        int quiet = 0x200000;    // well below the close threshold
+
+        T2AudioMicGateReset(&g);
+        for (n = 0; n < 96; n++) {
+            (void)T2AudioMicNoiseGate(&g, 0x40000000, 1);
+        }
+        CHECK(g.Gain == T2AUDIO_MIC_GATE_GAIN_FULL, "pre-open");
+        prev = 0x40000000;
+        for (n = 0; n < 48000; n++) {
+            out = T2AudioMicNoiseGate(&g, quiet, 1);
+            CHECK(abs(out) <= abs(prev), "release not monotonic at sample %ld", n);
+            prev = out;
+        }
+        CHECK(g.Gain == 0, "gate did not fully close");
+        CHECK(T2AudioMicNoiseGate(&g, quiet, 1) == 0, "gate passed noise after closing");
+    }
+
+    // Hysteresis: a mid-level sample holds whichever state the gate is in.
+    {
+        int mid = (int)((T2AUDIO_MIC_GATE_OPEN_THRESHOLD + T2AUDIO_MIC_GATE_CLOSE_THRESHOLD) / 2u);
+
+        T2AudioMicGateReset(&g);
+        (void)T2AudioMicNoiseGate(&g, mid, 1);
+        CHECK(g.Gain == 0, "mid-level opened a closed gate");
+        for (n = 0; n < 96; n++) {
+            (void)T2AudioMicNoiseGate(&g, 0x40000000, 1);
+        }
+        (void)T2AudioMicNoiseGate(&g, mid, 1);
+        CHECK(g.Gain == T2AUDIO_MIC_GATE_GAIN_FULL, "mid-level closed an open gate");
+    }
+}
+
+// Continuous tones at -30 dBFS (above OPEN) must keep the gate fully open
+// through every zero crossing once the attack has finished.
+static void test_noise_gate_tones(void)
+{
+    static const double freqs[] = { 50.0, 100.0, 440.0, 1000.0, 8000.0 };
+    T2AUDIO_MIC_GATE_STATE g;
+    unsigned i;
+    long n;
+
+    for (i = 0; i < sizeof(freqs) / sizeof(freqs[0]); i++) {
+        double amp = 2147483647.0 * pow(10.0, -30.0 / 20.0);
+        int bad = 0;
+
+        T2AudioMicGateReset(&g);
+        for (n = 0; n < 48000; n++) {
+            int x = (int)(amp * sin(2 * M_PI * freqs[i] * n / 48000.0));
+            int y = T2AudioMicNoiseGate(&g, x, 1);
+            // The tone first reaches OPEN within a quarter period; allow that
+            // plus the 2 ms attack, then the output must equal the input.
+            if (n > (long)(48000.0 / freqs[i] / 4.0) + 200 && y != x) {
+                bad++;
+            }
+        }
+        CHECK(bad == 0, "%.0f Hz tone: %d gated samples after attack", freqs[i], bad);
+    }
+}
+
+// Noise floor at -60 dBFS never opens the gate.
+static void test_noise_gate_floor(void)
+{
+    T2AUDIO_MIC_GATE_STATE g;
+    unsigned int seed = 12345;
+    long n;
+    int leaked = 0;
+    int amp = (int)(2147483647.0 * pow(10.0, -60.0 / 20.0));
+
+    T2AudioMicGateReset(&g);
+    for (n = 0; n < 48000; n++) {
+        int x;
+
+        seed = seed * 1103515245u + 12345u;
+        x = (int)((long long)amp * (long long)((int)(seed >> 16) % 2001 - 1000) / 1000);
+        if (T2AudioMicNoiseGate(&g, x, 1) != 0) {
+            leaked++;
+        }
+    }
+    CHECK(leaked == 0, "noise floor leaked %d samples", leaked);
+}
+
+// A 50 ms pause between words is bridged by the hold timer (gain stays full);
+// a long silence then closes the gate completely.
+static void test_noise_gate_pause(void)
+{
+    T2AUDIO_MIC_GATE_STATE g;
+    double amp = 2147483647.0 * pow(10.0, -25.0 / 20.0);
+    long n;
+    unsigned int minGain = T2AUDIO_MIC_GATE_GAIN_FULL;
+
+    T2AudioMicGateReset(&g);
+    for (n = 0; n < 9600; n++) {
+        (void)T2AudioMicNoiseGate(&g, (int)(amp * sin(2 * M_PI * 300.0 * n / 48000.0)), 1);
+    }
+    CHECK(g.Gain == T2AUDIO_MIC_GATE_GAIN_FULL, "word did not open the gate");
+    for (n = 0; n < 2400; n++) {
+        (void)T2AudioMicNoiseGate(&g, 0, 1);
+        if (g.Gain < minGain) minGain = g.Gain;
+    }
+    CHECK(minGain == T2AUDIO_MIC_GATE_GAIN_FULL, "50 ms pause dipped gain to %u", minGain);
+    for (n = 0; n < 48000; n++) {
+        (void)T2AudioMicNoiseGate(&g, 0, 1);
+    }
+    CHECK(g.Gain == 0 && g.Open == 0, "1 s silence did not close the gate");
+}
+
 int main(void)
 {
     test_geometry();
     test_sample24();
     test_dsp();
     test_capture_aim();
+    test_headset_mic();
+    test_jack_report();
+    test_noise_gate();
+    test_noise_gate_tones();
+    test_noise_gate_floor();
+    test_noise_gate_pause();
     if (g_failures) {
         printf("%d FAILURE(S)\n", g_failures);
         return 1;
