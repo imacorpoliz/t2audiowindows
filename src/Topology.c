@@ -1,4 +1,5 @@
 #include "T2AudioMiniport.h"
+#include "T2AudioMicLogic.h"
 
 #ifndef VT_ILLEGAL
 #define VT_ILLEGAL 0xffff
@@ -57,6 +58,7 @@ static PKSDATARANGE g_TopologySpeakerPinDataRanges[] = {
 // Forward declarations
 static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor;
 static PCFILTER_DESCRIPTOR g_T2AudioHeadphoneTopologyFilterDescriptor;
+static PCAUTOMATION_TABLE g_T2AudioJackAutomation;
 
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioTopologyQueryInterface(
@@ -157,18 +159,18 @@ T2AudioTopologyInit(
     UNREFERENCED_PARAMETER(ResourceList);
     
     instance->Port = Port;
-    // Headphone filter: keep the port's IPortEvents to signal jack changes
-    // (T2AudioNotifyJackChange); released in the PnP stop path.
-    if (instance->Headphone && Port != NULL && instance->DeviceContext != NULL &&
-        instance->DeviceContext->HeadphonePortEvents == NULL) {
+    // Keep the port's IPortEvents to signal jack changes (T2AudioNotifyJackChange):
+    // the headphone jack pin, and the speaker pin that yields to it. Released
+    // in the PnP stop path. The first poll signals the state read at probe.
+    if (Port != NULL && instance->DeviceContext != NULL) {
+        PVOID *slot = instance->Headphone ? &instance->DeviceContext->HeadphonePortEvents
+                                          : &instance->DeviceContext->SpeakerPortEvents;
         PVOID events = NULL;
 
         if (NT_SUCCESS(Port->lpVtbl->QueryInterface((PVOID)Port, &IID_IPortEvents, &events)) &&
-            events != NULL) {
-            instance->DeviceContext->HeadphonePortEvents = events;
-            if (instance->DeviceContext->JackEvents && instance->DeviceContext->JackSeenPlugged) {
-                T2AudioNotifyJackChange(instance->DeviceContext);
-            }
+            events != NULL &&
+            InterlockedCompareExchangePointer(slot, events, NULL) != NULL) {
+            ((PPORTEVENTS)events)->lpVtbl->Release(events);
         }
     }
     KdPrint(("T2Audio: Topology Init success (headphone=%u)\n", instance->Headphone ? 1u : 0u));
@@ -201,9 +203,10 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
             0
         }
     },
-    // Pin 1: speaker output (physical connector).
+    // Pin 1: speaker output (physical connector). Its jack description
+    // follows the headphone jack with auto-switch (T2AudioTopologySpeakerConnected).
     {
-        1, 1, 0, NULL,
+        1, 1, 0, &g_T2AudioJackAutomation,
         {
             0, NULL,
             0, NULL,
@@ -241,6 +244,27 @@ T2AudioTopologyJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
     return (Context->HeadphoneJackPlugged != 0) ? TRUE : FALSE;
 }
 
+// Whether the speaker pin follows the headphone jack: only with the separate
+// headphone endpoint (the unified path routes by itself) and auto-mute on.
+static BOOLEAN
+T2AudioTopologySpeakerYields(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    return (Context != NULL && Context->HeadphoneAutoMute && Context->JackEvents &&
+            Context->HeadphoneFiltersRegistered) ? TRUE : FALSE;
+}
+
+// Speakers: "unplugged" while the headphones are plugged in (auto-switch).
+static BOOLEAN
+T2AudioTopologySpeakerConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    if (Context == NULL) {
+        return TRUE;
+    }
+    return T2AudioJackYieldConnected(T2AudioTopologySpeakerYields(Context) ? 1u : 0u,
+                                     Context->JackEvents, Context->JackSeenPlugged ? 1 : 0,
+                                     Context->HeadphoneJackPlugged) ? TRUE : FALSE;
+}
+
 static NTSTATUS
 T2AudioTopologyBasicSupport(_Inout_ PPCPROPERTY_REQUEST Request)
 {
@@ -273,6 +297,7 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     ULONG pinId = (ULONG)-1;
     ULONG needed;
     PKSMULTIPLE_ITEM item;
+    BOOLEAN connected;
 
     if (Request == NULL || Request->PropertyItem == NULL || Request->MajorTarget == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -281,7 +306,8 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL) {
         pinId = *(PULONG)Request->Instance;
     }
-    if (!instance->Headphone || (pinId != T2AUDIO_TOPO_PIN_HEADPHONE && pinId != (ULONG)-1)) {
+    // Pin 1 of both filters (T2AUDIO_TOPO_PIN_HEADPHONE == T2AUDIO_TOPO_PIN_SPEAKER).
+    if (pinId != T2AUDIO_TOPO_PIN_HEADPHONE && pinId != (ULONG)-1) {
         return STATUS_NOT_SUPPORTED;
     }
     KdPrint(("T2Audio: JackProperty id=%u verb=0x%X pinId=%u\n",
@@ -303,6 +329,8 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->ValueSize < needed || Request->Value == NULL) {
         return STATUS_BUFFER_TOO_SMALL;
     }
+    connected = instance->Headphone ? T2AudioTopologyJackConnected(instance->DeviceContext)
+                                    : T2AudioTopologySpeakerConnected(instance->DeviceContext);
     item = (PKSMULTIPLE_ITEM)Request->Value;
     item->Size = needed;
     item->Count = 1;
@@ -312,20 +340,28 @@ T2AudioTopologyJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
         RtlZeroMemory(jack, sizeof(*jack));
         jack->ChannelMapping = KSAUDIO_SPEAKER_STEREO;
         jack->Color = 0;
-        jack->ConnectionType = eConnType3Point5mm;
-        jack->GeoLocation = eGeoLocLeft;          // the MacBook Pro 16" jack is on the left
-        jack->GenLocation = eGenLocPrimaryBox;
-        jack->PortConnection = ePortConnJack;
-        jack->IsConnected = T2AudioTopologyJackConnected(instance->DeviceContext);
+        if (instance->Headphone) {
+            jack->ConnectionType = eConnType3Point5mm;
+            jack->GeoLocation = eGeoLocLeft;      // the MacBook Pro 16" jack is on the left
+            jack->GenLocation = eGenLocPrimaryBox;
+            jack->PortConnection = ePortConnJack;
+        } else {
+            jack->ConnectionType = eConnTypeUnknown;
+            jack->GeoLocation = eGeoLocNotApplicable;
+            jack->GenLocation = eGenLocInternal;
+            jack->PortConnection = ePortConnIntegratedDevice;
+        }
+        jack->IsConnected = connected;
     } else {
         PKSJACK_DESCRIPTION2 jack2 = (PKSJACK_DESCRIPTION2)(item + 1);
+        BOOLEAN detect = instance->Headphone
+            ? (instance->DeviceContext != NULL && instance->DeviceContext->JackEvents)
+            : T2AudioTopologySpeakerYields(instance->DeviceContext);
 
         RtlZeroMemory(jack2, sizeof(*jack2));
-        jack2->DeviceStateInfo = T2AudioTopologyJackConnected(instance->DeviceContext) ? 1 : 0;
+        jack2->DeviceStateInfo = connected ? 1 : 0;
         // Presence detection when JackEvents is enabled and verified on hardware
-        jack2->JackCapabilities = (instance->DeviceContext != NULL &&
-                                   instance->DeviceContext->JackEvents)
-                                      ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
+        jack2->JackCapabilities = detect ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;
     return STATUS_SUCCESS;
@@ -341,20 +377,21 @@ T2AudioTopologyJackEvent(_In_ PPCEVENT_REQUEST Request)
         return STATUS_INVALID_PARAMETER;
     }
     instance = CONTAINING_RECORD((PMINIPORTTOPOLOGY)Request->MajorTarget, T2AUDIO_TOPOLOGY, Interface);
-    events = (instance->DeviceContext != NULL)
-                 ? (PPORTEVENTS)instance->DeviceContext->HeadphonePortEvents : NULL;
+    events = (instance->DeviceContext == NULL) ? NULL
+             : (PPORTEVENTS)(instance->Headphone ? instance->DeviceContext->HeadphonePortEvents
+                                                 : instance->DeviceContext->SpeakerPortEvents);
     switch (Request->Verb) {
     case PCEVENT_VERB_ADD:
-        if (!instance->Headphone || events == NULL || Request->EventEntry == NULL) {
+        if (events == NULL || Request->EventEntry == NULL) {
             return STATUS_UNSUCCESSFUL;
         }
-        events->lpVtbl->AddEventToEventList(events, Request->EventEntry);
+        events->lpVtbl->AddEventToEventList((PVOID)events, Request->EventEntry);
         return STATUS_SUCCESS;
     case PCEVENT_VERB_REMOVE:
         // PortCls removes the entry from its list itself.
         return STATUS_SUCCESS;
     case PCEVENT_VERB_SUPPORT:
-        return instance->Headphone ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+        return STATUS_SUCCESS;
     default:
         return STATUS_INVALID_PARAMETER;
     }
@@ -407,14 +444,24 @@ T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
         return;
     }
     events = (PPORTEVENTS)Context->HeadphonePortEvents;
-    if (events == NULL) {
-        return;
+    if (events != NULL) {
+        events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
+                                          KSEVENT_PINCAPS_JACKINFOCHANGE,
+                                          TRUE, T2AUDIO_TOPO_PIN_HEADPHONE,
+                                          FALSE, (ULONG)-1);
     }
-    events->lpVtbl->GenerateEventList(events, (GUID *)&KSEVENTSETID_PinCapsChange,
-                                      KSEVENT_PINCAPS_JACKINFOCHANGE,
-                                      TRUE, T2AUDIO_TOPO_PIN_HEADPHONE,
-                                      FALSE, (ULONG)-1);
-    KdPrint(("T2Audio: jack change signalled to Windows\n"));
+    // The speaker pin yields to the headphones: it changes with the same jack.
+    events = (PPORTEVENTS)Context->SpeakerPortEvents;
+    if (events != NULL && T2AudioTopologySpeakerYields(Context)) {
+        events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
+                                          KSEVENT_PINCAPS_JACKINFOCHANGE,
+                                          TRUE, T2AUDIO_TOPO_PIN_SPEAKER,
+                                          FALSE, (ULONG)-1);
+    }
+    KdPrint(("T2Audio: jack change signalled to Windows (speakers %s)\n",
+             T2AudioTopologySpeakerConnected(Context) ? "available" : "yield to headphones"));
+    // The built-in microphones yield to a headset on the same combo jack.
+    T2AudioNotifyHeadsetMicJackChange(Context);
 }
 
 // PnP stop/removal: drop the IPortEvents reference taken at Init.
@@ -428,7 +475,11 @@ T2AudioReleaseHeadphoneEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
     events = (PPORTEVENTS)InterlockedExchangePointer(&Context->HeadphonePortEvents, NULL);
     if (events != NULL) {
-        events->lpVtbl->Release(events);
+        events->lpVtbl->Release((PVOID)events);
+    }
+    events = (PPORTEVENTS)InterlockedExchangePointer(&Context->SpeakerPortEvents, NULL);
+    if (events != NULL) {
+        events->lpVtbl->Release((PVOID)events);
     }
 }
 

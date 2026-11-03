@@ -197,6 +197,22 @@ static void test_jack_report(void)
     CHECK(T2AudioJackReportConnected(1, 1, 0) == 0, "read unplugged -> unplugged");
     CHECK(T2AudioJackReportConnected(1, 1, 1) == 1, "read plugged -> plugged");
     CHECK(T2AudioJackReportConnected(1, 1, 5) == 1, "non-zero -> plugged");
+
+    // Auto-switch: the built-in device yields while the jack device is plugged.
+    CHECK(T2AudioJackYieldConnected(1, 1, 1, 0) == 1, "nothing plugged -> built-in available");
+    CHECK(T2AudioJackYieldConnected(1, 1, 1, 1) == 0, "plugged -> built-in yields");
+    CHECK(T2AudioJackYieldConnected(0, 1, 1, 1) == 1, "auto-switch off -> stays available");
+    CHECK(T2AudioJackYieldConnected(1, 0, 1, 1) == 1, "no jack events -> stays available");
+    CHECK(T2AudioJackYieldConnected(1, 1, 0, 1) == 1, "jack never read -> stays available");
+    // The two sides never both read unplugged once the jack is known.
+    {
+        long plugged;
+
+        for (plugged = 0; plugged <= 1; plugged++) {
+            CHECK(T2AudioJackReportConnected(1, 1, plugged) + T2AudioJackYieldConnected(1, 1, 1, plugged) == 1,
+                  "exactly one side available (plugged=%ld)", plugged);
+        }
+    }
 }
 
 static void test_geometry(void)

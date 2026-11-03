@@ -141,6 +141,22 @@ T2AudioJackReportConnected(unsigned int JackEvents, int Seen, long Plugged)
     return Plugged != 0;
 }
 
+// Auto-switch (Parameters\HeadphoneAutoMute): a built-in device that yields
+// to a plugged-in jack device reports itself "unplugged" while that one is
+// plugged, so Windows moves the default endpoint over and back by itself
+// (it only changes the default when the current one goes away). Speakers
+// yield to headphones; the built-in microphones yield to a headset. Without
+// auto-switch, jack tracking, or a verified jack read it stays connected.
+static __inline int
+T2AudioJackYieldConnected(unsigned int AutoSwitch, unsigned int JackEvents, int Seen,
+                          long OtherPlugged)
+{
+    if (!AutoSwitch || !JackEvents || !Seen) {
+        return 1;
+    }
+    return OtherPlugged == 0;
+}
+
 // Capture clock. Host frame H (the capture cursor reported to Windows) reads
 // T2 frame H + *Offset, i.e. ring slot (H + *Offset) % RingFrames. WriteFrame
 // is the T2's current write position (from UPDATE_TIMESTAMP, interpolated).

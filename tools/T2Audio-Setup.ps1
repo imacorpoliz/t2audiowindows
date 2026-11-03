@@ -445,46 +445,50 @@ public static class Volume {
 }
 '@
 
-function Get-T2Endpoint {
-    $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
-    if (-not (Test-Path $root)) { return $null }
-    $prop = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
-    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
-    $first = $null
-    # The driver can expose two T2 outputs (speakers and headphones): prefer
-    # the speakers, fall back to the first T2 endpoint.
-    foreach ($k in Get-ChildItem $root) {
-        $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
-        if ($st -ne 1) { continue }
-        $props = Join-Path $k.PSPath 'Properties'
-        if (-not (Test-Path $props)) { continue }
-        $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
-        $v = $all.$prop
-        if (-not ($v -and $v.StartsWith($HardwareId))) { continue }
-        $id = '{0.0.0.00000000}.' + $k.PSChildName
-        if ("$($all.$descProp)" -match 'Speaker') { return $id }
-        if (-not $first) { $first = $id }
+# Kind of a T2 endpoint from its form factor (PKEY_AudioEndpoint_FormFactor:
+# 1 speakers, 3 headphones, 4 microphone, 5 headset), which unlike the
+# description does not depend on the Windows display language. The English
+# description is only the fallback for endpoints without it.
+function Get-T2EndpointKind($flow, $all) {
+    $ff = $all.'{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},0'
+    $desc = "$($all.'{a45c254e-df1c-4efd-8020-67d146a850e0},2')"
+    if ($flow -eq 'Capture') {
+        if ($ff -eq 5 -or $desc -match 'Headset') { return 'Headset microphone' }
+        return 'Microphone'
     }
-    return $first
+    if ($ff -eq 3 -or ($null -eq $ff -and $desc -match 'Headphone')) { return 'Headphones' }
+    if ($ff -eq 1 -or ($null -eq $ff -and $desc -match 'Speaker')) { return 'Speakers' }
+    return $desc
 }
 
-function Get-T2HeadphoneEndpoint {
+# Id of the T2 render endpoint of one kind. Active wins over Unplugged (with
+# auto-switch only one of speakers / headphones is active at a time; Windows
+# still keeps the volume of the other); endpoints left behind by AppleAudio
+# (Not present) and disabled ones are skipped.
+function Get-T2RenderEndpoint($kind) {
     $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
     if (-not (Test-Path $root)) { return $null }
     $prop = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
-    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    $unplugged = $null
     foreach ($k in Get-ChildItem $root) {
+        $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
+        if ($st -ne 1 -and $st -ne 8) { continue }
         $props = Join-Path $k.PSPath 'Properties'
         if (-not (Test-Path $props)) { continue }
         $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
         $v = $all.$prop
         if (-not ($v -and $v.StartsWith($HardwareId))) { continue }
-        if ("$($all.$descProp)" -match 'Headphone') {
-            return '{0.0.0.00000000}.' + $k.PSChildName
-        }
+        if ((Get-T2EndpointKind 'Render' $all) -ne $kind) { continue }
+        $id = '{0.0.0.00000000}.' + $k.PSChildName
+        if ($st -eq 1) { return $id }
+        if (-not $unplugged) { $unplugged = $id }
     }
-    return $null
+    return $unplugged
 }
+
+function Get-T2Endpoint { Get-T2RenderEndpoint 'Speakers' }
+
+function Get-T2HeadphoneEndpoint { Get-T2RenderEndpoint 'Headphones' }
 
 function Set-T2Volume([double]$level) {
     if ($level -lt 0) { return }
@@ -1082,7 +1086,6 @@ function Add-T2Code { if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDe
 # Headphones / Microphone / other), Name, State (Active, Unplugged, Disabled).
 function Get-T2Endpoints {
     $hwProp = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
-    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
     $nameProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},14'
     $states = @{ 1 = 'Active'; 2 = 'Disabled'; 4 = 'Not present'; 8 = 'Unplugged' }
     foreach ($flow in 'Render', 'Capture') {
@@ -1094,9 +1097,8 @@ function Get-T2Endpoints {
             $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
             $hw = $all.$hwProp
             if (-not ($hw -and $hw.StartsWith($HardwareId))) { continue }
-            $desc = "$($all.$descProp)"
             $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
-            $kind = if ($flow -eq 'Capture') { 'Microphone' } elseif ($desc -match 'Headphone') { 'Headphones' } elseif ($desc -match 'Speaker') { 'Speakers' } else { $desc }
+            $kind = Get-T2EndpointKind $flow $all
             [pscustomobject]@{
                 Id    = $(if ($flow -eq 'Render') { '{0.0.0.00000000}.' } else { '{0.0.1.00000000}.' }) + $k.PSChildName
                 Flow  = $flow
@@ -1108,18 +1110,24 @@ function Get-T2Endpoints {
     }
 }
 
-# Manual speakers <-> headphones switch until the jack is detected (ROADMAP 4.5).
+# Manual speakers <-> headphones switch. With auto-switch (HeadphoneAutoMute)
+# only the output that matches the jack is active, so Windows switches by
+# itself and this just confirms the current one.
 function Invoke-Switch {
     Add-T2Code
     $eps = @(Get-T2Endpoints | Where-Object { $_.Flow -eq 'Render' -and $_.State -eq 'Active' })
     $spk = $eps | Where-Object Kind -eq 'Speakers' | Select-Object -First 1
     $hp = $eps | Where-Object Kind -eq 'Headphones' | Select-Object -First 1
-    if (-not $spk) { Write-Fail 'The T2 speaker output is not active.'; return }
-    if (-not $hp -and $To -ne 'Speakers') { Write-Fail 'No T2 headphone output: -Action Features -Headphones 1 first.'; return }
+    if (-not $spk -and -not $hp) { Write-Fail 'No active T2 output.'; return }
+    if ($To -eq 'Speakers' -and -not $spk) { Write-Fail 'The T2 speakers are not available: the headphones are plugged in (auto-switch). Unplug them first.'; return }
+    if ($To -eq 'Headphones' -and -not $hp) { Write-Fail 'No active T2 headphone output: plug the headphones in, or -Action Features -Headphones 1 first.'; return }
     $target = switch ($To) {
         'Speakers'   { $spk }
         'Headphones' { $hp }
-        default      { if ([T2Setup.Endpoints]::DefaultId(0, 1) -eq $hp.Id) { $spk } else { $hp } }
+        default {
+            if (-not $hp) { $spk } elseif (-not $spk) { $hp }
+            elseif ([T2Setup.Endpoints]::DefaultId(0, 1) -eq $hp.Id) { $spk } else { $hp }
+        }
     }
     $hr = [T2Setup.Endpoints]::SetDefault($target.Id)
     if ($hr -eq 0) { Write-Ok "Default output: $($target.Kind) ($($target.Name))" } else { Write-Fail ("Could not switch: 0x{0:X8}" -f $hr) }
@@ -1148,8 +1156,9 @@ function Invoke-SoundTest {
     $cur = $t2 | Where-Object Id -eq $def | Select-Object -First 1
     if (-not $cur) {
         Write-Warn 'The default output is not a T2 device.'
-        $spk = $t2 | Where-Object Kind -eq 'Speakers' | Select-Object -First 1
-        if (-not $spk -or -not (Confirm-Action 'Make the T2 speakers the default output for the test?')) { return }
+        # The speakers, or the headphones while they are plugged in (auto-switch).
+        $spk = @($t2 | Where-Object Kind -eq 'Speakers') + @($t2 | Where-Object Kind -eq 'Headphones') | Select-Object -First 1
+        if (-not $spk -or -not (Confirm-Action "Make the T2 $($spk.Kind.ToLower()) the default output for the test?")) { return }
         $null = [T2Setup.Endpoints]::SetDefault($spk.Id); $cur = $spk
     }
     Write-Info "Playing on: $($cur.Kind) ($($cur.Name)). Quiet tones, about -20 dBFS."
@@ -1256,11 +1265,19 @@ function Invoke-Doctor {
     if ($strikes -ge 2) { Bad "Crash guard tripped ($strikes)" 'find the cause (-Action Report), then -Action ResetGuard' }
     elseif ($strikes -ge 1) { Write-Warn 'One unclean end recorded (power loss, BSOD or hang)' } else { Write-Ok 'Crash guard: OK' }
     $eps = @(Get-T2Endpoints)
-    foreach ($kind in 'Speakers', 'Headphones', 'Microphone') {
-        $e = $eps | Where-Object Kind -eq $kind | Select-Object -First 1
-        $feature = @{ Headphones = 'HeadphoneOutput'; Microphone = 'MicInput' }[$kind]
-        $wanted = (-not $feature) -or ((Get-Param $feature) -eq 1)
+    foreach ($kind in 'Speakers', 'Headphones', 'Microphone', 'Headset microphone') {
+        # Prefer the live endpoint: AppleAudio leaves "Not present" ones behind.
+        $all = @($eps | Where-Object Kind -eq $kind)
+        $e = @($all | Where-Object State -eq 'Active') + @($all | Where-Object State -eq 'Unplugged') + $all |
+             Select-Object -First 1
+        $feature = @{ Headphones = 'HeadphoneOutput'; Microphone = 'MicInput'; 'Headset microphone' = 'HeadsetMicInput' }[$kind]
+        $wanted = (-not $feature) -or ((Get-FeatureParam $feature) -eq 1)
         if ($e -and $e.State -eq 'Active') { Write-Ok "$kind endpoint: $($e.Name)" }
+        elseif ($e -and $e.State -eq 'Unplugged' -and $wanted) {
+            # Jack-driven: headphones / headset while unplugged, and with
+            # auto-switch the speakers / built-in mics while they are plugged.
+            Write-Ok "$kind endpoint: $($e.Name) (unplugged - follows the 3.5 mm jack)"
+        }
         elseif ($wanted) { Bad "$kind endpoint missing or $($e.State)" 'restart the device (-Action Preset -Preset macos) or reboot' }
         else { Write-Info "$kind endpoint: off (-Action Features)" }
     }

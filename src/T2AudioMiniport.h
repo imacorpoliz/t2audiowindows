@@ -149,8 +149,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // Jack events (Parameters\JackEvents=1): a PROPERTY_LISTENER on
     // 'outp'/'jack' of the headphone device; each PROPERTY_CHANGED queues a
     // PASSIVE work item that re-reads the jack (JackWorkPending coalesces).
-    // HeadphoneAutoMute (needs JackEvents) silences the speakers while the
-    // jack reads plugged in.
+    // HeadphoneAutoMute (needs JackEvents, default 1) is the auto-switch: it
+    // silences the speakers while the jack reads plugged in, and with the
+    // separate headphone endpoint the speaker pin then reports "unplugged",
+    // so Windows moves the default output to the headphones and back. With a
+    // headset microphone the built-in microphones yield the same way.
     ULONG JackEvents;
     ULONG HeadphoneAutoMute;
     ULONG HeadphoneCrossfeed;
@@ -214,6 +217,10 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     ULONG64 HpClockAnchorQpc;
     ULONG64 HpClockAnchorNs;
     PVOID HeadphonePortEvents;
+    // IPortEvents of the speaker topology port: with HeadphoneAutoMute the
+    // speaker pin reports "unplugged" while the headphones are plugged in
+    // (T2AudioJackYieldConnected), and is signalled with the headphone jack.
+    PVOID SpeakerPortEvents;
     // Built-in microphones (Parameters\MicInput=1, default 0; ROADMAP 5.2-5.4)
     // and the headset microphone (Parameters\HeadsetMicInput=1, default 0):
     // see T2AUDIO_CAPTURE_PATH. MicDsp (default 1) runs kaiT2en's 16_1 mic

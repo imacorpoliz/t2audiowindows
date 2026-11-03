@@ -1331,29 +1331,13 @@ T2AudioMicArrayProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     return STATUS_SUCCESS;
 }
 
-static PCPROPERTY_ITEM g_T2AudioMicProperties[] = {
-    {
-        &KSPROPSETID_Audio,
-        KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY,
-        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
-        T2AudioMicArrayProperty
-    }
-};
-
-static PCAUTOMATION_TABLE g_T2AudioMicPinAutomation = {
-    sizeof(PCPROPERTY_ITEM),
-    SIZEOF_ARRAY(g_T2AudioMicProperties),
-    g_T2AudioMicProperties,
-    0, 0, NULL,
-    0, 0, NULL,
-    0
-};
-
 // ---------------------------------------------------------------------------
-// Headset microphone topology ("TopologyMicIn"): headset microphone ->
-// bridge. The source pin carries the 3.5 mm jack ('inpt'/'jack' of "Codec
-// Input", polled in BceTransport.c): KSPROPERTY_JACK_DESCRIPTION(2) and
-// KSEVENT_PINCAPS_JACKINFOCHANGE, as on the headphone topology.
+// Microphone jack state. The headset pin ("TopologyMicIn") carries the
+// 3.5 mm jack ('inpt'/'jack' of "Codec Input", polled in BceTransport.c);
+// the built-in array pin yields to it with auto-switch: "unplugged" while a
+// headset is plugged in, so Windows moves the default recording device over
+// and back by itself. Both use KSPROPERTY_JACK_DESCRIPTION(2) and
+// KSEVENT_PINCAPS_JACKINFOCHANGE, as the headphone/speaker topology does.
 // ---------------------------------------------------------------------------
 
 typedef struct _T2AUDIO_MIC_TOPOLOGY {
@@ -1373,14 +1357,40 @@ T2AudioHeadsetMicJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
                                       Context->HeadsetMicJackPlugged) ? TRUE : FALSE;
 }
 
+// Whether the built-in microphones follow the headset jack: auto-switch on
+// and a registered headset endpoint to switch to.
+static BOOLEAN
+T2AudioBuiltInMicYields(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    return (Context != NULL && Context->HeadphoneAutoMute && Context->JackEvents &&
+            Context->HeadsetMic.Enabled && Context->HeadsetMic.FiltersRegistered) ? TRUE : FALSE;
+}
+
+// Built-in array: "unplugged" while a headset is plugged in. The headset
+// counts only while the headphone jack (verified on hardware) reads plugged
+// too - it is the same combo jack - so a stuck 'inpt' read cannot hide the
+// built-in microphones for good.
+static BOOLEAN
+T2AudioBuiltInMicJackConnected(_In_opt_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    if (Context == NULL) {
+        return TRUE;
+    }
+    return T2AudioJackYieldConnected(T2AudioBuiltInMicYields(Context) ? 1u : 0u, Context->JackEvents,
+                                     (Context->HeadsetMicJackSeen && Context->JackSeenPlugged) ? 1 : 0,
+                                     (Context->HeadsetMicJackPlugged != 0 &&
+                                      Context->HeadphoneJackPlugged != 0) ? 1 : 0) ? TRUE : FALSE;
+}
+
 static NTSTATUS
-T2AudioHeadsetMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
+T2AudioMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
 {
     PT2AUDIO_MIC_TOPOLOGY t;
     ULONG pinId = (ULONG)-1;
     ULONG needed;
     PKSMULTIPLE_ITEM item;
     BOOLEAN connected;
+    BOOLEAN detect;
 
     if (Request == NULL || Request->PropertyItem == NULL || Request->MajorTarget == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -1389,8 +1399,7 @@ T2AudioHeadsetMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL) {
         pinId = *(PULONG)Request->Instance;
     }
-    if (t->Path == NULL || !t->Path->Headset ||
-        (pinId != T2AUDIO_MIC_TOPO_PIN_MIC && pinId != (ULONG)-1)) {
+    if (t->Path == NULL || (pinId != T2AUDIO_MIC_TOPO_PIN_MIC && pinId != (ULONG)-1)) {
         return STATUS_NOT_SUPPORTED;
     }
     if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
@@ -1410,7 +1419,13 @@ T2AudioHeadsetMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->ValueSize < needed || Request->Value == NULL) {
         return STATUS_BUFFER_TOO_SMALL;
     }
-    connected = T2AudioHeadsetMicJackConnected(t->DeviceContext);
+    if (t->Path->Headset) {
+        connected = T2AudioHeadsetMicJackConnected(t->DeviceContext);
+        detect = (t->DeviceContext != NULL && t->DeviceContext->JackEvents) ? TRUE : FALSE;
+    } else {
+        connected = T2AudioBuiltInMicJackConnected(t->DeviceContext);
+        detect = T2AudioBuiltInMicYields(t->DeviceContext);
+    }
     item = (PKSMULTIPLE_ITEM)Request->Value;
     item->Size = needed;
     item->Count = 1;
@@ -1420,25 +1435,31 @@ T2AudioHeadsetMicJackProperty(_Inout_ PPCPROPERTY_REQUEST Request)
         RtlZeroMemory(jack, sizeof(*jack));
         jack->ChannelMapping = KSAUDIO_SPEAKER_MONO;
         jack->Color = 0;
-        jack->ConnectionType = eConnType3Point5mm;
-        jack->GeoLocation = eGeoLocLeft;          // the combo jack of the MacBook Pro 16"
-        jack->GenLocation = eGenLocPrimaryBox;
-        jack->PortConnection = ePortConnJack;
+        if (t->Path->Headset) {
+            jack->ConnectionType = eConnType3Point5mm;
+            jack->GeoLocation = eGeoLocLeft;      // the combo jack of the MacBook Pro 16"
+            jack->GenLocation = eGenLocPrimaryBox;
+            jack->PortConnection = ePortConnJack;
+        } else {
+            jack->ConnectionType = eConnTypeUnknown;
+            jack->GeoLocation = eGeoLocNotApplicable;
+            jack->GenLocation = eGenLocInternal;
+            jack->PortConnection = ePortConnIntegratedDevice;
+        }
         jack->IsConnected = connected;
     } else {
         PKSJACK_DESCRIPTION2 jack2 = (PKSJACK_DESCRIPTION2)(item + 1);
 
         RtlZeroMemory(jack2, sizeof(*jack2));
         jack2->DeviceStateInfo = connected ? 1 : 0;
-        jack2->JackCapabilities = (t->DeviceContext != NULL && t->DeviceContext->JackEvents)
-                                      ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
+        jack2->JackCapabilities = detect ? JACKDESC2_PRESENCE_DETECT_CAPABILITY : 0;
     }
     Request->ValueSize = needed;
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS
-T2AudioHeadsetMicJackEvent(_In_ PPCEVENT_REQUEST Request)
+T2AudioMicJackEvent(_In_ PPCEVENT_REQUEST Request)
 {
     PT2AUDIO_MIC_TOPOLOGY t;
     PPORTEVENTS events;
@@ -1459,34 +1480,67 @@ T2AudioHeadsetMicJackEvent(_In_ PPCEVENT_REQUEST Request)
         // PortCls removes the entry from its list itself.
         return STATUS_SUCCESS;
     case PCEVENT_VERB_SUPPORT:
-        return (t->Path != NULL && t->Path->Headset) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+        return (t->Path != NULL) ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
     default:
         return STATUS_INVALID_PARAMETER;
     }
 }
+
+// Built-in array pin: geometry plus the jack it reports while yielding.
+static PCPROPERTY_ITEM g_T2AudioMicProperties[] = {
+    {
+        &KSPROPSETID_Audio,
+        KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioMicArrayProperty
+    },
+    {
+        &KSPROPSETID_Jack,
+        KSPROPERTY_JACK_DESCRIPTION,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioMicJackProperty
+    },
+    {
+        &KSPROPSETID_Jack,
+        KSPROPERTY_JACK_DESCRIPTION2,
+        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
+        T2AudioMicJackProperty
+    }
+};
 
 static PCPROPERTY_ITEM g_T2AudioHeadsetMicProperties[] = {
     {
         &KSPROPSETID_Jack,
         KSPROPERTY_JACK_DESCRIPTION,
         PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
-        T2AudioHeadsetMicJackProperty
+        T2AudioMicJackProperty
     },
     {
         &KSPROPSETID_Jack,
         KSPROPERTY_JACK_DESCRIPTION2,
         PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
-        T2AudioHeadsetMicJackProperty
+        T2AudioMicJackProperty
     }
 };
 
-static PCEVENT_ITEM g_T2AudioHeadsetMicEvents[] = {
+static PCEVENT_ITEM g_T2AudioMicJackEvents[] = {
     {
         &KSEVENTSETID_PinCapsChange,
         KSEVENT_PINCAPS_JACKINFOCHANGE,
         KSEVENT_TYPE_ENABLE | KSEVENT_TYPE_BASICSUPPORT,
-        T2AudioHeadsetMicJackEvent
+        T2AudioMicJackEvent
     }
+};
+
+static PCAUTOMATION_TABLE g_T2AudioMicPinAutomation = {
+    sizeof(PCPROPERTY_ITEM),
+    SIZEOF_ARRAY(g_T2AudioMicProperties),
+    g_T2AudioMicProperties,
+    0, 0, NULL,
+    sizeof(PCEVENT_ITEM),
+    SIZEOF_ARRAY(g_T2AudioMicJackEvents),
+    g_T2AudioMicJackEvents,
+    0
 };
 
 static PCAUTOMATION_TABLE g_T2AudioHeadsetMicPinAutomation = {
@@ -1495,33 +1549,45 @@ static PCAUTOMATION_TABLE g_T2AudioHeadsetMicPinAutomation = {
     g_T2AudioHeadsetMicProperties,
     0, 0, NULL,
     sizeof(PCEVENT_ITEM),
-    SIZEOF_ARRAY(g_T2AudioHeadsetMicEvents),
-    g_T2AudioHeadsetMicEvents,
+    SIZEOF_ARRAY(g_T2AudioMicJackEvents),
+    g_T2AudioMicJackEvents,
     0
 };
 
-// Called at PASSIVE_LEVEL when the polled headset jack changed (BceTransport.c).
-VOID
-T2AudioNotifyHeadsetMicJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+static VOID
+T2AudioMicSignalJack(_In_ PT2AUDIO_CAPTURE_PATH Path)
 {
-    PPORTEVENTS events;
+    PPORTEVENTS events = (PPORTEVENTS)Path->PortEvents;
 
-    if (Context == NULL || !Context->HeadsetMic.FiltersRegistered) {
-        return;
-    }
-    events = (PPORTEVENTS)Context->HeadsetMic.PortEvents;
-    if (events == NULL) {
+    if (!Path->FiltersRegistered || events == NULL) {
         return;
     }
     events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
                                       KSEVENT_PINCAPS_JACKINFOCHANGE,
                                       TRUE, T2AUDIO_MIC_TOPO_PIN_MIC,
                                       FALSE, (ULONG)-1);
-    KdPrint(("T2Audio: headset mic jack change signalled to Windows\n"));
+}
+
+// Called at PASSIVE_LEVEL when the polled headset or headphone jack changed
+// (BceTransport.c, Topology.c): the headset pin and the built-in pin that
+// yields to it.
+VOID
+T2AudioNotifyHeadsetMicJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    if (Context == NULL || !Context->HeadsetMic.FiltersRegistered) {
+        return;
+    }
+    T2AudioMicSignalJack(&Context->HeadsetMic);
+    if (T2AudioBuiltInMicYields(Context)) {
+        T2AudioMicSignalJack(&Context->Mic);
+    }
+    KdPrint(("T2Audio: mic jack change signalled to Windows (headset %s, built-in mics %s)\n",
+             T2AudioHeadsetMicJackConnected(Context) ? "connected" : "unplugged",
+             T2AudioBuiltInMicJackConnected(Context) ? "available" : "yield to headset"));
 }
 
 // PnP stop/removal (after the jack poll stopped): drop the IPortEvents
-// reference taken at Init.
+// references taken at Init.
 VOID
 T2AudioReleaseHeadsetMicEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 {
@@ -1531,6 +1597,10 @@ T2AudioReleaseHeadsetMicEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         return;
     }
     events = (PPORTEVENTS)InterlockedExchangePointer(&Context->HeadsetMic.PortEvents, NULL);
+    if (events != NULL) {
+        events->lpVtbl->Release((PVOID)events);
+    }
+    events = (PPORTEVENTS)InterlockedExchangePointer(&Context->Mic.PortEvents, NULL);
     if (events != NULL) {
         events->lpVtbl->Release((PVOID)events);
     }
@@ -1686,9 +1756,10 @@ T2AudioMicTopoInit(_In_ PMINIPORTTOPOLOGY Miniport, _In_ PUNKNOWN UnknownAdapter
 
     UNREFERENCED_PARAMETER(UnknownAdapter);
     UNREFERENCED_PARAMETER(ResourceList);
-    // Headset filter: keep the port's IPortEvents to signal jack changes
-    // (T2AudioNotifyHeadsetMicJackChange); released in the PnP stop path.
-    if (t->Path != NULL && t->Path->Headset && Port != NULL) {
+    // Keep the port's IPortEvents to signal jack changes (the headset jack,
+    // and the built-in pin that yields to it; T2AudioNotifyHeadsetMicJackChange).
+    // Released in the PnP stop path.
+    if (t->Path != NULL && Port != NULL) {
         PVOID events = NULL;
 
         if (NT_SUCCESS(Port->lpVtbl->QueryInterface((PVOID)Port, &IID_IPortEvents, &events)) &&
