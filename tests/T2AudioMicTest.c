@@ -227,16 +227,67 @@ static void test_anc(void)
     unsigned int resets;
 
     // A talker alone: the references are empty, nothing adapts, the voice
-    // comes through exactly (delayed).
+    // comes through (delayed; only the DC blocker touches it).
     run_anc(0.05, 0, 0, 0, 0, 0, &po, &pr, &gain, &pn, &resets);
-    CHECK(pr == 0.0, "voice alone changed: residual %g", pr);
-    CHECK(fabs(gain - 1.0) < 1e-9, "voice alone gain %g", gain);
+    CHECK(10 * log10(pr / po) < -30.0, "voice alone changed: residual %.1f dB", 10 * log10(pr / po));
+    CHECK(fabs(20 * log10(gain)) < 0.05, "voice alone gain %.3f dB", 20 * log10(gain));
+    // DC offsets on the channels (as on hardware) are removed, not cancelled
+    // into the voice: same scene with +-30000 offsets per mic.
+    {
+        T2AUDIO_MIC_ANC_STATE a;
+        long n;
+        double ps = 0, pe = 0;
+
+        T2AudioMicAncReset(&a);
+        for (n = 0; n < 48000 * 3; n++) {
+            int s = speech24(n, 0.001);
+            int mic[3] = { s + 30000, s - 25000, s + 12000 };
+            int out = T2AudioMicAncProcess(&a, mic, 1);
+
+            if (n >= 48000 * 2) {
+                double sd = (double)speech24(n - T2AUDIO_MIC_ANC_DELAY, 0.001);
+
+                ps += sd * sd;
+                pe += ((double)out - sd) * ((double)out - sd);
+            }
+        }
+        CHECK(10 * log10(pe / ps) < -20.0, "DC offsets leak: residual %.1f dB", 10 * log10(pe / ps));
+    }
 
     // Speaker noise alone, arriving off-axis (mic 0 first, mic 2 last).
     run_anc(0, 400000, 0, 2, 4, 0, &po, &pr, &gain, &pn, &resets);
     printf("  anc: off-axis noise alone: %.1f dB\n", 10 * log10(po / pn));
     CHECK(10 * log10(po / pn) < -6.0, "off-axis noise reduced only %.1f dB", 10 * log10(po / pn));
     CHECK(resets == 0, "canceller reset %u times on plain noise", resets);
+
+    // The same at the real raw level: the microphones sit around -75 dBFS
+    // before the +39 dB output gain (hardware, 2026-11-04). Must adapt too.
+    run_anc(0, 1500, 0, 2, 4, 0, &po, &pr, &gain, &pn, &resets);
+    printf("  anc: off-axis noise at -75 dBFS raw: %.1f dB\n", 10 * log10(po / pn));
+    CHECK(10 * log10(po / pn) < -6.0, "quiet off-axis noise reduced only %.1f dB", 10 * log10(po / pn));
+    // A tone (the speakers playing music) arriving off-axis, quiet.
+    {
+        T2AUDIO_MIC_ANC_STATE a;
+        long n;
+        double pin = 0, pout = 0;
+
+        T2AudioMicAncReset(&a);
+        for (n = 0; n < 48000 * 3; n++) {
+            int mic[3], out;
+
+            mic[0] = (int)lrint(1500.0 * sin(2 * M_PI * 1000.0 * (n - 0) / 48000.0));
+            mic[1] = (int)lrint(1500.0 * sin(2 * M_PI * 1000.0 * (n - 2) / 48000.0));
+            mic[2] = (int)lrint(1500.0 * sin(2 * M_PI * 1000.0 * (n - 4) / 48000.0));
+            out = T2AudioMicAncProcess(&a, mic, 1);
+            if (n >= 48000 * 2) {
+                pin += (double)mic[1] * mic[1];
+                pout += (double)out * out;
+            }
+        }
+        printf("  anc: quiet 1 kHz speaker tone: %.1f dB, adapted %.0f%%\n", 10 * log10(pout / pin),
+               100.0 * (double)a.AdaptSamples / (double)a.Samples);
+        CHECK(10 * log10(pout / pin) < -10.0, "quiet speaker tone reduced only %.1f dB", 10 * log10(pout / pin));
+    }
 
     // Talker + off-axis noise: the voice keeps its level, the noise drops.
     run_anc(0.05, 400000, 0, 2, 4, 0, &po, &pr, &gain, &pn, &resets);
@@ -245,11 +296,52 @@ static void test_anc(void)
     CHECK(fabs(20 * log10(gain)) < 1.0, "speech gain %.2f dB", 20 * log10(gain));
     CHECK(10 * log10(pr / pn) < -3.0, "noise under speech reduced only %.1f dB", 10 * log10(pr / pn));
 
-    // Uncorrelated noise at each mic (nothing to cancel): never louder than
-    // the plain voice by more than the guard's 3 dB.
+    // Uncorrelated noise at each mic (each capsule's own hiss): nothing in
+    // the reference relates to the voice mic, so the output keeps its level
+    // - neither cancelled into the voice nor boosted.
     run_anc(0, 400000, 0, 0, 0, 1, &po, &pr, &gain, &pn, &resets);
     printf("  anc: diffuse noise: %.1f dB, resets %u\n", 10 * log10(po / pn), resets);
-    CHECK(10 * log10(po / pn) < 3.5, "diffuse noise boosted %.1f dB", 10 * log10(po / pn));
+    CHECK(fabs(10 * log10(po / pn)) < 1.5, "diffuse noise changed by %.1f dB", 10 * log10(po / pn));
+
+    // Capsules with different sensitivity (hardware: mic1 4.6 dB below the
+    // others): mic 0 at +4 dB, quiet talker in front plus off-axis noise.
+    // The level match keeps the talker out of the reference: the voice
+    // keeps its level and the noise still drops.
+    {
+        T2AUDIO_MIC_ANC_STATE a;
+        int hist[ANC_HIST] = { 0 };
+        long n, total = 48000 * 6;
+        double ps = 0, cross = 0, pres = 0, pnv = 0;
+
+        T2AudioMicAncReset(&a);
+        g_lcg = 99u;
+        for (n = 0; n < total; n++) {
+            int s = speech24(n, 0.0005);
+            long t = n % ANC_HIST;
+            int mic[3], out;
+
+            hist[t] = noise24(2000);
+            mic[0] = (int)lrint(1.585 * (s + hist[t]));
+            mic[1] = s + hist[(t - 2 + ANC_HIST) % ANC_HIST];
+            mic[2] = s + hist[(t - 4 + ANC_HIST) % ANC_HIST];
+            out = T2AudioMicAncProcess(&a, mic, 1);
+            if (n >= total - 48000) {
+                double sd = (double)speech24(n - T2AUDIO_MIC_ANC_DELAY, 0.0005);
+                double nv = (double)hist[(t - 2 - T2AUDIO_MIC_ANC_DELAY + 2 * ANC_HIST) % ANC_HIST];
+
+                ps += sd * sd;
+                cross += (double)out * sd;
+                pres += ((double)out - sd) * ((double)out - sd);
+                pnv += nv * nv;
+            }
+        }
+        printf("  anc: mismatched capsules: speech %.2f dB, noise %.1f dB, match gain %.3f\n",
+               20 * log10(cross / ps), 10 * log10(pres / pnv), a.MatchGain / 65536.0);
+        CHECK(fabs(20 * log10(cross / ps)) < 1.0, "mismatched: speech gain %.2f dB", 20 * log10(cross / ps));
+        CHECK(10 * log10(pres / pnv) < -3.0, "mismatched: noise reduced only %.1f dB", 10 * log10(pres / pnv));
+        // a = mic 2, b = mic 0 (the +4 dB one): G = 1 / 1.585 = 0.631.
+        CHECK(a.MatchGain > 38000 && a.MatchGain < 45000, "match gain %u, expected ~0.631 (41350)", a.MatchGain);
+    }
 
     // Full scale, out of phase: saturates, no overflow.
     {
@@ -268,29 +360,30 @@ static void test_anc(void)
         (void)out;
     }
 
-    // Through the full chain: with the talker alone MicDsp=2 is MicDsp=1
-    // delayed by T2AUDIO_MIC_ANC_DELAY frames.
+    // Through the full chain: with the talker alone MicDsp=2 has the level
+    // of MicDsp=1 (delayed by T2AUDIO_MIC_ANC_DELAY frames).
     {
         T2AUDIO_MIC_STATE s1, s2;
-        int out1[48000];
         long n;
-        int same = 1;
+        double e1 = 0, e2 = 0;
 
         T2AudioMicReset(&s1);
         T2AudioMicReset(&s2);
         for (n = 0; n < 48000; n++) {
             unsigned int f[3];
-            int v = speech24(n, 0.01);
-            int o2;
+            int v = speech24(n, 0.001);
+            int o1, o2;
 
             f[0] = f[1] = f[2] = raw24(v);
-            out1[n] = T2AudioMicProcessFrameEx(&s1, f, 1, 1);
+            o1 = T2AudioMicProcessFrameEx(&s1, f, 1, 1);
             o2 = T2AudioMicProcessFrameEx(&s2, f, 2, 1);
-            if (n >= T2AUDIO_MIC_ANC_DELAY && o2 != out1[n - T2AUDIO_MIC_ANC_DELAY]) {
-                same = 0;
+            if (n >= 24000) {
+                e1 += (double)o1 * o1;
+                e2 += (double)o2 * o2;
             }
         }
-        CHECK(same, "MicDsp=2 differs from delayed MicDsp=1 on a frontal talker");
+        CHECK(fabs(10 * log10(e2 / e1)) < 0.1, "MicDsp=2 level differs from MicDsp=1 by %.2f dB",
+              10 * log10(e2 / e1));
     }
     // The voice microphone index wraps safely.
     {
@@ -298,8 +391,13 @@ static void test_anc(void)
         int mic[3] = { 100, 200, 300 };
 
         T2AudioMicAncReset(&a);
+        {
+            int zero[3] = { 0, 0, 0 };   // primes the DC blocker at 0
+
+            (void)T2AudioMicAncProcess(&a, zero, 7);
+        }
         (void)T2AudioMicAncProcess(&a, mic, 7);
-        CHECK(a.Ref[0][a.Pos] == 100 && a.Ref[1][a.Pos] == -100, "bad voice index not treated as 1");
+        CHECK(a.Ref[a.Pos] == 200, "bad voice index not treated as 1 (ref %d)", a.Ref[a.Pos]);
     }
 }
 

@@ -18,6 +18,42 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.27 (2026-11-04)
+Hardware run on MacBookPro16,1, Windows 11 build 28000 (2026-11-03/04), installed
+through `-Action Install` (update path, settings kept):
+
+- **Jack switching fixed for real.** `KSPROPERTY_JACK_DESCRIPTION(2)` and
+  `KSEVENT_PINCAPS_JACKINFOCHANGE` were in the *pin* automation tables; Windows
+  asks the topology *filter* with a KSP_PIN, so it had never read the jack
+  (no `JackProperty` line in any log). They are now on the filters (speaker,
+  headphone, both microphone topologies). Verified: Windows queries the jack
+  right after start, and with nothing plugged in the headphone endpoint is
+  `Unplugged` (state 8). Plugging in by hand on this build is still to do.
+- **Auto-switch:** with `HeadphoneAutoMute` the speaker pin reports
+  "unplugged" while headphones are in, so Windows moves the default output by
+  itself (it only does so when the current default goes away). The built-in
+  microphones yield to a headset the same way.
+- **Headset microphone:** "Codec Input" (device 0x48 on this boot) answers
+  `'inpt'/'jack'` with 0xC0000010; "Codec Output" answers it. The poll falls
+  back to Codec Output. Stream 0x49: mono S32, flags 0xC, latency 47 frames.
+  Capture itself not yet tested (no headset at hand).
+- **Built-in microphones:** recording verified (RMS -42 dBFS room noise).
+  Per-capsule levels differ: mic1 is 4.6 dB below mic0 / mic2.
+- **MicDsp=2 (beta, off by default):** noise canceller - voice mic plus one
+  reference from the other two (level-matched, DC-blocked). Adapts on hardware
+  (100 % of samples, no resets); the speaker-sound reduction could not be
+  measured at the very low test volume and is not claimed yet.
+- MicDsp, MicVoiceMic and MicNoiseSuppression change live (no restart).
+- Event-driven WaveRT (`IMiniportWaveRTStreamNotification`) for render and
+  capture; 16/24-bit capture with `ExtraFormats`.
+- Installer: keeps settings on update, checks the package (signatures, INF in
+  the catalog), warns on downgrade, removes stale driver-store copies (11
+  removed on the test machine), returns exit codes; menu fixes.
+- Release artifacts: `T2AudioMiniport.sys` SHA256
+  `833FE84612BA7624D5D94415B91CB1829EF8825932E340FD7A46070E9CBDFE98`;
+  `t2audiominiport.cat` SHA256
+  `A18EC68E3138CA4CEFAF4FEC084F2FFF4DDB24072CF30262006F9FCB9A208C30`.
+
 ### v1.0.13.21 (2026-11-02)
 - Fixed headphone auto-switching: corrected initial presence reporting in `Topology.c` (`KSJACK_DESCRIPTION2.DeviceStateInfo`) and hardware validation in `BceTransport.c` (`T2AudioProbeBceDevices` sets `JackSeenPlugged` on successful property read).
 - Restored clean direct headphone rendering: delegated headphone frame processing to `T2AudioStreamRenderHeadphoneFrames` supporting both stereo and surround downmixing with pure passthrough (crossfeed off by default).

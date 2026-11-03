@@ -206,7 +206,7 @@ static PCPIN_DESCRIPTOR g_T2AudioTopologyPins[] = {
     // Pin 1: speaker output (physical connector). Its jack description
     // follows the headphone jack with auto-switch (T2AudioTopologySpeakerConnected).
     {
-        1, 1, 0, &g_T2AudioJackAutomation,
+        1, 1, 0, NULL,
         {
             0, NULL,
             0, NULL,
@@ -447,7 +447,7 @@ T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (events != NULL) {
         events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
                                           KSEVENT_PINCAPS_JACKINFOCHANGE,
-                                          TRUE, T2AUDIO_TOPO_PIN_HEADPHONE,
+                                          FALSE, (ULONG)-1,
                                           FALSE, (ULONG)-1);
     }
     // The speaker pin yields to the headphones: it changes with the same jack.
@@ -455,7 +455,7 @@ T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context)
     if (events != NULL && T2AudioTopologySpeakerYields(Context)) {
         events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
                                           KSEVENT_PINCAPS_JACKINFOCHANGE,
-                                          TRUE, T2AUDIO_TOPO_PIN_SPEAKER,
+                                          FALSE, (ULONG)-1,
                                           FALSE, (ULONG)-1);
     }
     KdPrint(("T2Audio: jack change signalled to Windows (speakers %s)\n",
@@ -501,7 +501,7 @@ static PCPIN_DESCRIPTOR g_T2AudioHeadphoneTopologyPins[] = {
     },
     // Pin 1: the 3.5 mm headphone jack.
     {
-        1, 1, 0, &g_T2AudioJackAutomation,
+        1, 1, 0, NULL,
         {
             0, NULL,
             0, NULL,
@@ -523,7 +523,7 @@ static PCCONNECTION_DESCRIPTOR g_T2AudioTopologyConnections[] = {
 
 static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor = {
     0,
-    NULL,
+    &g_T2AudioJackAutomation,
     sizeof(PCPIN_DESCRIPTOR),
     SIZEOF_ARRAY(g_T2AudioTopologyPins),
     g_T2AudioTopologyPins,
@@ -538,7 +538,7 @@ static PCFILTER_DESCRIPTOR g_T2AudioTopologyFilterDescriptor = {
 
 static PCFILTER_DESCRIPTOR g_T2AudioHeadphoneTopologyFilterDescriptor = {
     0,
-    NULL,
+    &g_T2AudioJackAutomation,
     sizeof(PCPIN_DESCRIPTOR),
     SIZEOF_ARRAY(g_T2AudioHeadphoneTopologyPins),
     g_T2AudioHeadphoneTopologyPins,

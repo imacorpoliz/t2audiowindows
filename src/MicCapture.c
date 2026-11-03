@@ -861,6 +861,16 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
     KeReleaseSpinLock(&s->StreamLock, oldIrql);
     KdPrint(("T2Audio: %s run summary: captured=%I64u silent=%I64u reAims=%u maxCopyUs=%u\n",
              s->Path->Name, s->CapturedFrames, s->SilentFrames, s->ReAims, s->MaxCopyUs));
+    if (!s->Path->Headset && context->MicDsp >= 2 && s->Dsp.Anc.Samples != 0) {
+        const T2AUDIO_MIC_ANC_STATE *a = &s->Dsp.Anc;
+
+        // Mean powers (x^2/16 of 24-bit samples), adaption share, resets.
+        KdPrint(("T2Audio: mic canceller: voice=%I64u refs=%I64u out=%I64u adapted=%I64u/%I64u resets=%u mic0=%I64u mic1=%I64u mic2=%I64u voiceMic=%u\n",
+                 a->SumVoice / a->Samples, a->SumRef / a->Samples, a->SumOut / a->Samples,
+                 a->AdaptSamples, a->Samples, a->Resets,
+                 a->SumMic[0] / a->Samples, a->SumMic[1] / a->Samples, a->SumMic[2] / a->Samples,
+                 context->MicVoiceMic, a->MatchGain));
+    }
     if (s->HardwareIoStarted) {
         if (InterlockedExchange(&s->Path->IoActive, 0) != 0) {
             NTSTATUS status = T2AudioStopIoDevice(context, s->Path->DeviceId);
@@ -1448,6 +1458,11 @@ T2AudioMicArrayProperty(_Inout_ PPCPROPERTY_REQUEST Request)
     if (Request->PropertyItem->Id != KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY) {
         return STATUS_NOT_SUPPORTED;
     }
+    // A filter property addressed to a pin (KSP_PIN): only the array pin.
+    if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL &&
+        *(PULONG)Request->Instance != T2AUDIO_MIC_TOPO_PIN_MIC) {
+        return STATUS_NOT_SUPPORTED;
+    }
     if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
         return T2AudioMicBasicSupport(Request);
     }
@@ -1740,7 +1755,7 @@ T2AudioMicSignalJack(_In_ PT2AUDIO_CAPTURE_PATH Path)
     }
     events->lpVtbl->GenerateEventList((PVOID)events, (GUID *)&KSEVENTSETID_PinCapsChange,
                                       KSEVENT_PINCAPS_JACKINFOCHANGE,
-                                      TRUE, T2AUDIO_MIC_TOPO_PIN_MIC,
+                                      FALSE, (ULONG)-1,
                                       FALSE, (ULONG)-1);
 }
 
@@ -1789,7 +1804,7 @@ T2AudioReleaseHeadsetMicEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
 static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
     // Pin 0: the built-in microphone array (physical source).
     {
-        1, 1, 0, &g_T2AudioMicPinAutomation,
+        1, 1, 0, NULL,
         {
             0, NULL, 0, NULL,
             SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
@@ -1812,7 +1827,7 @@ static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
 static PCPIN_DESCRIPTOR g_T2AudioHeadsetMicTopoPins[] = {
     // Pin 0: the headset microphone on the 3.5 mm jack (physical source).
     {
-        1, 1, 0, &g_T2AudioHeadsetMicPinAutomation,
+        1, 1, 0, NULL,
         {
             0, NULL, 0, NULL,
             SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
@@ -1837,7 +1852,7 @@ static PCCONNECTION_DESCRIPTOR g_T2AudioMicTopoConnections[] = {
 };
 
 static PCFILTER_DESCRIPTOR g_T2AudioMicTopoDescriptor = {
-    0, NULL,
+    0, &g_T2AudioMicPinAutomation,       // filter-level KSP_PIN properties and jack event
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_T2AudioMicTopoPins), g_T2AudioMicTopoPins,
     sizeof(PCNODE_DESCRIPTOR), 0, NULL,
     SIZEOF_ARRAY(g_T2AudioMicTopoConnections), g_T2AudioMicTopoConnections,
@@ -1845,7 +1860,7 @@ static PCFILTER_DESCRIPTOR g_T2AudioMicTopoDescriptor = {
 };
 
 static PCFILTER_DESCRIPTOR g_T2AudioHeadsetMicTopoDescriptor = {
-    0, NULL,
+    0, &g_T2AudioHeadsetMicPinAutomation,
     sizeof(PCPIN_DESCRIPTOR), SIZEOF_ARRAY(g_T2AudioHeadsetMicTopoPins), g_T2AudioHeadsetMicTopoPins,
     sizeof(PCNODE_DESCRIPTOR), 0, NULL,
     SIZEOF_ARRAY(g_T2AudioMicTopoConnections), g_T2AudioMicTopoConnections,

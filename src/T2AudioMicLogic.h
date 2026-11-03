@@ -66,46 +66,75 @@ T2AudioMicSar(long long v, unsigned int s)
 
 // ---------------------------------------------------------------------------
 // Three-microphone noise canceller (Parameters\MicDsp=2): one microphone
-// carries the voice, the other two are noise references for what the
-// speakers (and other off-axis sources) put into it. A generalized sidelobe
-// canceller in integer arithmetic:
+// carries the voice, the other two together give the noise reference for
+// what the speakers (and other off-axis sources) put into it. An adaptive
+// noise canceller in integer arithmetic:
 //
-//   v      = voice microphone (MicVoiceMic, default 1 = the middle one)
-//   b_a/b  = other microphone - v   (blocking references: a talker in front
-//            reaches all three nearly together, so the differences hold
-//            little voice; sound from the speakers below / beside the
-//            keyboard arrives with a delay between the microphones and stays)
-//   out    = v(n - D) - sum_k W_a[k] b_a(n - k) - sum_k W_b[k] b_b(n - k)
+//   v    = voice microphone (MicVoiceMic, default 1 = the middle one)
+//   r    = a - G * b   for the other two microphones a, b; G matches b's
+//          level to a's (slow, from their long-term power), because the
+//          capsules differ by several dB (hardware 2026-11-04). A talker in
+//          front reaches a and b nearly alike, so r holds little voice;
+//          sound from the speakers below / beside the keyboard reaches them
+//          with different delays and stays. r holds nothing of v itself, so
+//          the filter cannot learn to subtract the voice microphone's own
+//          signal (the first, v-based design did on hardware).
+//   out  = v(n - D) - sum_k W[k] r(n - k)
 //
-// The two FIR filters (TAPS taps each, the voice path delayed by D = TAPS/2
-// so they can model either arrival order) adapt by normalized LMS. While the
-// talker is active the references are small against the voice and adaption
-// pauses (no voice is learnt away); a filter that makes the output louder
-// than the voice for HOLD samples is reset. All state is per stream,
-// O(TAPS) per sample, with one 64-bit division - fine at DISPATCH_LEVEL.
+// The FIR filter (TAPS taps, the voice path delayed by D = TAPS/2 so it can
+// model either arrival order) adapts by normalized LMS. While the talker
+// dominates (r small against v) adaption pauses; a filter that makes the
+// output louder than the voice for HOLD samples is reset. Each channel's DC
+// is removed first. All state is per stream, O(TAPS) per sample, one 64-bit
+// division a sample - fine at DISPATCH_LEVEL.
 // ---------------------------------------------------------------------------
-#define T2AUDIO_MIC_ANC_TAPS          32
+#define T2AUDIO_MIC_ANC_TAPS          64
 #define T2AUDIO_MIC_ANC_DELAY         (T2AUDIO_MIC_ANC_TAPS / 2)
-#define T2AUDIO_MIC_ANC_WEIGHT_ONE    (1ll << 24)          // W in Q24
-#define T2AUDIO_MIC_ANC_WEIGHT_MAX    (4ll << 24)
+#define T2AUDIO_MIC_ANC_WEIGHT_MAX    (4ll << 24)          // W in Q24, |W| <= 4
 #define T2AUDIO_MIC_ANC_MU_Q16        1311                 // step 0.02
 #define T2AUDIO_MIC_ANC_GAIN_SHIFT    13                   // extra fraction bits of the step
-#define T2AUDIO_MIC_ANC_EPS           (1ll << 28)          // norm floor (about -84 dBFS a tap)
+#define T2AUDIO_MIC_ANC_EPS           (1ll << 14)          // norm floor (about -114 dBFS a tap)
 #define T2AUDIO_MIC_ANC_POWER_SHIFT   10                   // power smoothing, ~21 ms
-#define T2AUDIO_MIC_ANC_ADAPT_RATIO   64                   // adapt while refs > voice - 18 dB
-#define T2AUDIO_MIC_ANC_FLOOR         (1ll << 12)          // smoothed power floor (~-102 dBFS)
+#define T2AUDIO_MIC_ANC_ADAPT_RATIO   64                   // adapt while ref > voice - 18 dB
+#define T2AUDIO_MIC_ANC_FLOOR         (16ll << T2AUDIO_MIC_ANC_POWER_SHIFT) // power floor (~-114 dBFS raw)
 #define T2AUDIO_MIC_ANC_DIVERGE_HOLD  4800                 // 100 ms louder than the voice -> reset
+#define T2AUDIO_MIC_ANC_MATCH_SHIFT   14                   // level matching power smoothing, ~0.34 s
+#define T2AUDIO_MIC_ANC_WARMUP        24000                // 0.5 s: match the levels before adapting
+#define T2AUDIO_MIC_ANC_LEAK_PERIOD   64                   // weights decay by 1/2048 every 64 samples
+#define T2AUDIO_MIC_ANC_LEAK_SHIFT    11                   // (time constant ~2.7 s): stale weights fade
+#define T2AUDIO_MIC_ANC_MATCH_PERIOD  4096                 // samples between gain updates
+#define T2AUDIO_MIC_ANC_MATCH_MIN     16384u               // G in Q16: 0.25 .. 4 (+-12 dB)
+#define T2AUDIO_MIC_ANC_MATCH_MAX     262144u
 
 typedef struct _T2AUDIO_MIC_ANC_STATE {
-    int Ref[2][T2AUDIO_MIC_ANC_TAPS];      // blocking references, ring
+    int Ref[T2AUDIO_MIC_ANC_TAPS];         // noise reference, ring
     int Voice[T2AUDIO_MIC_ANC_DELAY];      // voice delay line, ring
-    long long W[2][T2AUDIO_MIC_ANC_TAPS];  // filter weights, Q24
-    long long Norm;                        // sum of Ref^2 over both rings
-    long long PowVoice, PowRef, PowOut;    // smoothed powers (x^2 >> 16)
+    long long W[T2AUDIO_MIC_ANC_TAPS];     // filter weights, Q24
+    long long Norm;                        // sum of Ref^2 over the ring
+    // Smoothed powers as accumulators: Acc += x^2/16 - Acc/1024, so tiny
+    // raw levels (the microphones sit near -80 dBFS before the +39 dB gain)
+    // are not rounded away.
+    long long PowVoice, PowRef, PowOut;
+    // Level matching of the reference pair: slow powers of a and b, and G.
+    long long PowA, PowB;
+    unsigned int MatchGain;                // Q16
+    unsigned int MatchTick;
+    unsigned int Warmup;                   // samples left before adaption may start
+    unsigned int LeakTick;
+    int DcPrimed;                          // the DC blocker starts at the first sample
     unsigned int Pos;                      // ring position of the newest reference
     unsigned int VoicePos;
     unsigned int Diverging;                // samples the output was louder than the voice
-    unsigned int Resets;                   // diagnostics
+    unsigned int Resets;
+    // Run diagnostics (logged with the run summary): summed powers of the
+    // voice, the reference and the output (x^2 >> 4), per-microphone powers,
+    // samples, and how many of them adapted.
+    unsigned long long SumVoice, SumRef, SumOut;
+    unsigned long long SumMic[3];
+    unsigned long long Samples, AdaptSamples;
+    // DC blocker per microphone (Q8 running mean, ~4 Hz): the raw channels
+    // carry DC offsets.
+    long long Dc[3];
 } T2AUDIO_MIC_ANC_STATE;
 
 typedef struct _T2AUDIO_MIC_STATE {
@@ -120,17 +149,29 @@ T2AudioMicAncReset(T2AUDIO_MIC_ANC_STATE *A)
     unsigned int k;
 
     for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
-        A->Ref[0][k] = A->Ref[1][k] = 0;
-        A->W[0][k] = A->W[1][k] = 0;
+        A->Ref[k] = 0;
+        A->W[k] = 0;
     }
     for (k = 0; k < T2AUDIO_MIC_ANC_DELAY; k++) {
         A->Voice[k] = 0;
     }
     A->Norm = 0;
     A->PowVoice = A->PowRef = A->PowOut = 0;
+    A->PowA = A->PowB = 0;
+    A->MatchGain = 65536u;
+    A->MatchTick = 0;
+    A->Warmup = T2AUDIO_MIC_ANC_WARMUP;
+    A->LeakTick = 0;
+    A->DcPrimed = 0;
     A->Pos = A->VoicePos = 0;
     A->Diverging = 0;
     A->Resets = 0;
+    A->SumVoice = A->SumRef = A->SumOut = 0;
+    A->Samples = A->AdaptSamples = 0;
+    for (k = 0; k < 3; k++) {
+        A->Dc[k] = 0;
+        A->SumMic[k] = 0;
+    }
 }
 
 static __inline void
@@ -152,32 +193,110 @@ T2AudioMicAncClamp(long long v, long long limit)
     return (int)v;
 }
 
-// One frame of the canceller. Mic[] are the three 24-bit samples; Voice is
+// Integer square root of a non-negative 64-bit value (bit by bit).
+static __inline unsigned long long
+T2AudioMicIsqrt(unsigned long long v)
+{
+    unsigned long long r = 0, bit = 1ull << 62;
+
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return r;
+}
+
+// G = sqrt(PowA / PowB) in Q16, clamped to +-12 dB; unchanged while either
+// microphone is silent.
+static __inline void
+T2AudioMicAncUpdateMatch(T2AUDIO_MIC_ANC_STATE *A)
+{
+    unsigned long long pa = (unsigned long long)A->PowA;
+    unsigned long long pb = (unsigned long long)A->PowB;
+    unsigned long long ratio;
+    unsigned long long g;
+
+    if (pa < (16ull << T2AUDIO_MIC_ANC_MATCH_SHIFT) || pb < (16ull << T2AUDIO_MIC_ANC_MATCH_SHIFT)) {
+        return;
+    }
+    while (pa > (1ull << 40) || pb > (1ull << 40)) {
+        pa >>= 1;
+        pb >>= 1;
+    }
+    ratio = (pa << 22) / pb;                    // PowA / PowB in Q22
+    if (ratio < (1ull << 18)) {
+        ratio = 1ull << 18;                     // 1/16
+    } else if (ratio > (1ull << 26)) {
+        ratio = 1ull << 26;                     // 16
+    }
+    g = T2AudioMicIsqrt(ratio << 10);           // sqrt(ratio) in Q16
+    if (g < T2AUDIO_MIC_ANC_MATCH_MIN) {
+        g = T2AUDIO_MIC_ANC_MATCH_MIN;
+    } else if (g > T2AUDIO_MIC_ANC_MATCH_MAX) {
+        g = T2AUDIO_MIC_ANC_MATCH_MAX;
+    }
+    A->MatchGain = (unsigned int)g;
+}
+
+// One frame of the canceller. Raw[] are the three 24-bit samples; Voice is
 // the index of the voice microphone (0..2). Returns a 24-bit sample: the
 // voice delayed by T2AUDIO_MIC_ANC_DELAY frames, minus the estimated noise.
 static __inline int
-T2AudioMicAncProcess(T2AUDIO_MIC_ANC_STATE *A, const int *Mic, unsigned int Voice)
+T2AudioMicAncProcess(T2AUDIO_MIC_ANC_STATE *A, const int *Raw, unsigned int Voice)
 {
-    int v, refs[2];
+    int Mic[3];
+    int v, ma, mb, ref;
     int delayed;
     long long y = 0;
     long long e;
-    unsigned int r, k, idx;
+    unsigned int k, idx;
 
     if (Voice > 2) {
         Voice = 1;
     }
+    // Remove each channel's DC first (the kaiT2en high-pass after the
+    // canceller still shapes the low end as before).
+    for (k = 0; k < 3; k++) {
+        long long x = (long long)Raw[k];
+
+        // Start at the first sample: no settling transient that would upset
+        // the level match.
+        if (!A->DcPrimed) {
+            A->Dc[k] = x * 256;
+        }
+        A->Dc[k] += T2AudioMicSar(x * 256 - A->Dc[k], 11);
+        Mic[k] = T2AudioMicAncClamp(x - T2AudioMicSar(A->Dc[k], 8), 1ll << 23);
+        A->SumMic[k] += (unsigned long long)(((long long)Mic[k] * Mic[k]) >> 4);
+    }
+    A->DcPrimed = 1;
     v = Mic[Voice];
-    refs[0] = T2AudioMicAncClamp((long long)Mic[(Voice + 1) % 3] - v, 1ll << 24);
-    refs[1] = T2AudioMicAncClamp((long long)Mic[(Voice + 2) % 3] - v, 1ll << 24);
+    ma = Mic[(Voice + 1) % 3];
+    mb = Mic[(Voice + 2) % 3];
 
-    // Push the references (keeping the running norm) and the voice.
+    // Level-match b to a, then the reference is their difference.
+    A->PowA += (((long long)ma * ma) >> 4) - (A->PowA >> T2AUDIO_MIC_ANC_MATCH_SHIFT);
+    A->PowB += (((long long)mb * mb) >> 4) - (A->PowB >> T2AUDIO_MIC_ANC_MATCH_SHIFT);
+    if (++A->MatchTick >= T2AUDIO_MIC_ANC_MATCH_PERIOD) {
+        A->MatchTick = 0;
+        T2AudioMicAncUpdateMatch(A);
+    }
+    ref = T2AudioMicAncClamp((long long)ma - T2AudioMicSar((long long)mb * A->MatchGain, 16), 1ll << 24);
+
+    // Push the reference (keeping the running norm) and the voice.
     A->Pos = (A->Pos + 1) % T2AUDIO_MIC_ANC_TAPS;
-    for (r = 0; r < 2; r++) {
-        long long old = A->Ref[r][A->Pos];
+    {
+        long long old = A->Ref[A->Pos];
 
-        A->Norm += (long long)refs[r] * refs[r] - old * old;
-        A->Ref[r][A->Pos] = refs[r];
+        A->Norm += (long long)ref * ref - old * old;
+        A->Ref[A->Pos] = ref;
     }
     if (A->Norm < 0) {
         A->Norm = 0;
@@ -186,52 +305,67 @@ T2AudioMicAncProcess(T2AUDIO_MIC_ANC_STATE *A, const int *Mic, unsigned int Voic
     A->Voice[A->VoicePos] = v;
     A->VoicePos = (A->VoicePos + 1) % T2AUDIO_MIC_ANC_DELAY;
 
-    // Noise estimate: |W| < 2^26, |Ref| <= 2^24, 64 terms: |y| < 2^56.
-    for (r = 0; r < 2; r++) {
-        idx = A->Pos;
-        for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
-            y += A->W[r][k] * A->Ref[r][idx];
-            idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
-        }
+    // Noise estimate: |W| <= 2^26, |Ref| <= 2^24, 64 terms: |y| < 2^57.
+    idx = A->Pos;
+    for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+        y += A->W[k] * A->Ref[idx];
+        idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
     }
     y = T2AudioMicSar(y, 24);
     e = (long long)delayed - y;
 
-    // Smoothed powers of voice, references and output.
+    // Smoothed powers of voice, reference and output.
     {
-        long long pv = ((long long)delayed * delayed) >> 16;
-        long long pr = (((long long)refs[0] * refs[0]) + ((long long)refs[1] * refs[1])) >> 16;
+        long long pv = ((long long)delayed * delayed) >> 4;
+        long long pr = ((long long)ref * ref) >> 4;
         long long ec = (e > (1ll << 26)) ? (1ll << 26) : ((e < -(1ll << 26)) ? -(1ll << 26) : e);
-        long long po = (ec * ec) >> 16;
+        long long po = (ec * ec) >> 4;
 
-        A->PowVoice += (pv - A->PowVoice) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
-        A->PowRef += (pr - A->PowRef) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
-        A->PowOut += (po - A->PowOut) / (1ll << T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->PowVoice += pv - (A->PowVoice >> T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->PowRef += pr - (A->PowRef >> T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->PowOut += po - (A->PowOut >> T2AUDIO_MIC_ANC_POWER_SHIFT);
+        A->SumVoice += (unsigned long long)pv;
+        A->SumRef += (unsigned long long)pr;
+        A->SumOut += (unsigned long long)po;
+        A->Samples++;
     }
 
-    // Adapt only while the references carry a noticeable share (no talker
-    // in front, or a pause), never on silence.
-    if (A->PowVoice > T2AUDIO_MIC_ANC_FLOOR &&
+    // Slow leak: weights learnt under conditions that are gone (a level
+    // match that has since moved, a talker who stopped) fade out instead of
+    // staying applied for good.
+    if (++A->LeakTick >= T2AUDIO_MIC_ANC_LEAK_PERIOD) {
+        A->LeakTick = 0;
+        for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+            A->W[k] -= T2AudioMicSar(A->W[k], T2AUDIO_MIC_ANC_LEAK_SHIFT);
+        }
+    }
+
+    // Adapt only after the warm-up (level match settled) and while the
+    // reference carries a noticeable share (no talker in front, or a
+    // pause), never on silence.
+    if (A->Warmup > 0) {
+        A->Warmup--;
+    } else if (A->PowVoice > T2AUDIO_MIC_ANC_FLOOR &&
         A->PowRef * T2AUDIO_MIC_ANC_ADAPT_RATIO > A->PowVoice) {
         long long ec = (e > (1ll << 25)) ? (1ll << 25) : ((e < -(1ll << 25)) ? -(1ll << 25) : e);
         // g = mu * e / (eps + norm), with GAIN_SHIFT extra bits: |e*mu| < 2^36,
-        // << (8 + 13) < 2^57.
+        // << (8 + 13) < 2^57. Every reference in the ring is part of Norm,
+        // so |g * Ref| < |e| * mu * 2^21 / sqrt(Norm + EPS) < 2^50.
         long long g = (ec * T2AUDIO_MIC_ANC_MU_Q16 * (1ll << (8 + T2AUDIO_MIC_ANC_GAIN_SHIFT))) /
                       (A->Norm + T2AUDIO_MIC_ANC_EPS);
 
-        for (r = 0; r < 2; r++) {
-            idx = A->Pos;
-            for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
-                long long w = A->W[r][k] + T2AudioMicSar(g * A->Ref[r][idx], T2AUDIO_MIC_ANC_GAIN_SHIFT);
+        A->AdaptSamples++;
+        idx = A->Pos;
+        for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
+            long long w = A->W[k] + T2AudioMicSar(g * A->Ref[idx], T2AUDIO_MIC_ANC_GAIN_SHIFT);
 
-                if (w > T2AUDIO_MIC_ANC_WEIGHT_MAX) {
-                    w = T2AUDIO_MIC_ANC_WEIGHT_MAX;
-                } else if (w < -T2AUDIO_MIC_ANC_WEIGHT_MAX) {
-                    w = -T2AUDIO_MIC_ANC_WEIGHT_MAX;
-                }
-                A->W[r][k] = w;
-                idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
+            if (w > T2AUDIO_MIC_ANC_WEIGHT_MAX) {
+                w = T2AUDIO_MIC_ANC_WEIGHT_MAX;
+            } else if (w < -T2AUDIO_MIC_ANC_WEIGHT_MAX) {
+                w = -T2AUDIO_MIC_ANC_WEIGHT_MAX;
             }
+            A->W[k] = w;
+            idx = (idx == 0) ? T2AUDIO_MIC_ANC_TAPS - 1 : idx - 1;
         }
     }
 
@@ -240,7 +374,7 @@ T2AudioMicAncProcess(T2AUDIO_MIC_ANC_STATE *A, const int *Mic, unsigned int Voic
     if (A->PowVoice > T2AUDIO_MIC_ANC_FLOOR && A->PowOut > 2 * A->PowVoice) {
         if (++A->Diverging >= T2AUDIO_MIC_ANC_DIVERGE_HOLD) {
             for (k = 0; k < T2AUDIO_MIC_ANC_TAPS; k++) {
-                A->W[0][k] = A->W[1][k] = 0;
+                A->W[k] = 0;
             }
             A->Diverging = 0;
             A->Resets++;

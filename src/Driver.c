@@ -409,6 +409,26 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->AntiRattle = antiRattle;
     Context->SpeakerDsp = newDsp;
 
+    // Microphone processing is per frame too, so it can change live: MicDsp
+    // (0 raw / 1 kaiT2en / 2 three-mic canceller), MicVoiceMic and the
+    // noise gate. Each is a single aligned ULONG store.
+    {
+        ULONG micDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1);
+        ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
+        ULONG gate = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0) ? 1u : 0u;
+
+        micDsp = (micDsp > 2u) ? 2u : micDsp;
+        voice = (voice > 2u) ? 1u : voice;
+        if (micDsp != Context->MicDsp || voice != Context->MicVoiceMic ||
+            gate != Context->MicNoiseSuppression) {
+            Context->MicDsp = micDsp;
+            Context->MicVoiceMic = voice;
+            Context->MicNoiseSuppression = gate;
+            KdPrint(("T2Audio: live mic params updated on the fly: MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u\n",
+                     micDsp, voice, gate));
+        }
+    }
+
     if (oldDsp != Context->SpeakerDsp || oldBass != Context->BassDb ||
         oldTreble != Context->TrebleDb || oldClarity != Context->ClarityDb ||
         oldGain != Context->DspGainDb) {

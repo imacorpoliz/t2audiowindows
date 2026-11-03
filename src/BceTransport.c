@@ -849,17 +849,30 @@ T2AudioJackWorkRoutine(
         } else if (polls <= 8 || (polls % 600) == 0) {
             KdPrint(("T2Audio: headphone jack re-read #%d failed: 0x%08X\n", polls, status));
         }
-        // Headset microphone (Parameters\HeadsetMicInput): 'inpt'/'jack' of
-        // "Codec Input", which AppleAudio listens to (RE_headset_mic.md
-        // section 4). A 3-pole plug may read unplugged here while the
-        // headphone jack reads plugged.
+        // Headset microphone (Parameters\HeadsetMicInput): 'inpt'/'jack',
+        // which AppleAudio listens to (RE_headset_mic.md section 4). On
+        // hardware "Codec Input" refuses it and "Codec Output" answers, so
+        // try the former once and fall back to the latter. A 3-pole plug may
+        // read unplugged here while the headphone jack reads plugged.
         if (context->HeadsetMic.Enabled && context->HeadsetMic.FiltersRegistered &&
             context->HeadsetMic.BceDeviceId != 0 && context->JackPollStop == 0) {
             ULONG micPlugged = 0;
-            NTSTATUS micStatus = T2AudioGetU32Property(context->HeadsetMic.BceDeviceId,
-                                                       context->HeadsetMic.BceDeviceId,
+            ULONG64 jackDevice = (context->HeadsetMicJackDevice != 0) ? context->HeadsetMicJackDevice
+                                                                       : context->HeadsetMic.BceDeviceId;
+            NTSTATUS micStatus = T2AudioGetU32Property(jackDevice, jackDevice,
                                                        T2AUDIO_PROP_SCOPE_INPUT,
                                                        T2AUDIO_PROP_JACK_PLUGGED, &micPlugged);
+
+            if (!NT_SUCCESS(micStatus) && context->HeadsetMicJackDevice == 0 &&
+                context->BceHeadphoneDeviceId != 0) {
+                jackDevice = context->BceHeadphoneDeviceId;
+                micStatus = T2AudioGetU32Property(jackDevice, jackDevice, T2AUDIO_PROP_SCOPE_INPUT,
+                                                  T2AUDIO_PROP_JACK_PLUGGED, &micPlugged);
+            }
+            if (NT_SUCCESS(micStatus) && context->HeadsetMicJackDevice == 0) {
+                context->HeadsetMicJackDevice = jackDevice;
+                KdPrint(("T2Audio: headset mic jack read from device 0x%I64X ('inpt'/'jack')\n", jackDevice));
+            }
 
             if (NT_SUCCESS(micStatus)) {
                 BOOLEAN firstRead = !context->HeadsetMicJackSeen;

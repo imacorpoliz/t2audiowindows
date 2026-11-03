@@ -191,6 +191,10 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // HeadsetMicJackSeen: a read succeeded, so the state is reported.
     volatile LONG HeadsetMicJackPlugged;
     volatile BOOLEAN HeadsetMicJackSeen;
+    // Device the headset jack is read from: on hardware (2026-11-03) "Codec
+    // Input" refuses 'inpt'/'jack' (0xC0000010) while "Codec Output" answers
+    // it, so the poll falls back to the latter once and keeps the choice.
+    ULONG64 HeadsetMicJackDevice;
     // Headphone output (Parameters\HeadphoneOutput=1, default 1; ROADMAP 4.4).
     // A second WaveRT + topology filter pair renders to the "Codec Output"
     // device: its ring is located in BufferStruct at MapResources, its

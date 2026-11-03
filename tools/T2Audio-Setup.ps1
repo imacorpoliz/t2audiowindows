@@ -1170,7 +1170,7 @@ function Invoke-Features([switch]$Interactive) {
         $changes['Microphone'] = 1
     }
     if ($changes.Contains('HeadsetMic') -and $changes['HeadsetMic'] -eq 1) {
-        Write-Warn 'Headset microphone is EXPERIMENTAL: not yet tested on hardware. If the Mac misbehaves, turn it off again (-HeadsetMic 0).'
+        Write-Warn 'Headset microphone is EXPERIMENTAL: its capture is not yet tested on hardware. If the Mac misbehaves, turn it off again (-HeadsetMic 0).'
     }
 
     foreach ($name in $changes.Keys) {
@@ -1194,7 +1194,9 @@ function Add-T2Code { if (-not ('T2Setup.Volume' -as [type])) { Add-Type -TypeDe
 # Headphones / Microphone / other), Name, State (Active, Unplugged, Disabled).
 function Get-T2Endpoints {
     $hwProp = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6},8'
-    $nameProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},14'
+    # Endpoint description ("Speakers", localized) and the device name.
+    $descProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    $ifaceProp = '{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
     $states = @{ 1 = 'Active'; 2 = 'Disabled'; 4 = 'Not present'; 8 = 'Unplugged' }
     foreach ($flow in 'Render', 'Capture') {
         $root = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow"
@@ -1211,7 +1213,7 @@ function Get-T2Endpoints {
                 Id    = $(if ($flow -eq 'Render') { '{0.0.0.00000000}.' } else { '{0.0.1.00000000}.' }) + $k.PSChildName
                 Flow  = $flow
                 Kind  = $kind
-                Name  = "$($all.$nameProp)"
+                Name  = ("{0} ({1})" -f "$($all.$descProp)", "$($all.$ifaceProp)")
                 State = $(if ($states.ContainsKey([int]$st)) { $states[[int]$st] } else { "state $st" })
             }
         }

@@ -1,6 +1,6 @@
 # T2AudioPort — Project Roadmap & Milestone Verification
 
-**Current Release:** v1.0.13.20
+**Current Release:** v1.0.13.27
 **Target Hardware:** Apple MacBook Pro 16" (2019, `MacBookPro16,1`), Apple T2 Security Chip (`PCI\VEN_106B&DEV_1803`), Windows 11 Pro 64-bit.
 
 ---
@@ -21,13 +21,15 @@
 | **Sleep / Wake State Transitions** | ✅ | ✅ Verified | 1.0.13 | Clean power D0/D3 handling; optional stream resume on lid open |
 | **Unified Headphone / Speaker Routing** | ✅ | ✅ Verified | 1.0.13.17 | Dynamic seamless switching between 6 speakers and 3.5 mm headphones with bs2b crossfeed and −12 dB attenuation |
 | **Bauer bs2b Binaural Crossfeed** | ✅ | ✅ Verified | 1.0.13.11 | Headphone crossfeed in 64-bit Q16 fixed point |
-| **Bidirectional Jack Auto-Switching** | ✅ | ✅ Verified | 1.0.13.13 | Hardware register poll + `KSEVENT_PINCAPS_JACKINFOCHANGE` |
+| **Bidirectional Jack Auto-Switching** | ✅ | Partly | 1.0.13.27 | Jack read verified since 1.0.13.13, but Windows only saw it from 1.0.13.27 (filter-level jack properties); unplugged state verified, plug by hand pending |
 | **Automatic Speaker Muting** | ✅ | ✅ Verified | 1.0.13.13 | `HeadphoneAutoMute` mutes speakers while plugged in |
 | **Built-in 3-Microphone Array** | ✅ | ✅ Verified | 1.0.13.4 | Digital Mic capture stream, host DMA buffer registration |
-| **Windows Mic Array Geometry** | ✅ | ✅ Verified | 1.0.13.11 | `KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY` reported to Windows |
+| **Windows Mic Array Geometry** | ✅ | Pending | 1.0.13.27 | Moved to the filter automation table in 1.0.13.27; before that Windows never queried it |
 | **5.1 Virtual Surround Sound** | ✅ | ✅ Verified | 1.0.13.14 | Multichannel downmix + XTC spatial acoustic expansion |
 | **SMBIOS Hardware Model Detection** | ✅ | ✅ Verified | 1.0.13.14 | Automatic kernel detection of `MacBookPro16,1` |
-| **Headset TRRS Mic Stream Probe** | ✅ | ✅ Verified | 1.0.13.14 | Codec Input (0x44) stream 0x45 probed on hardware |
+| **Headset Microphone Endpoint** | ✅ | Probe only | 1.0.13.27 | Codec Input stream probed; endpoint, ring and jack fallback (Codec Output inpt/jack) implemented; capture untested |
+| **3-Mic Speaker-Sound Canceller (MicDsp=2)** | ✅ | Beta | 1.0.13.27 | Adapts on hardware; reduction not yet measured |
+| **Event-Driven WaveRT** | ✅ | Pending | 1.0.13.27 | IMiniportWaveRTStreamNotification on render and capture |
 
 ---
 
@@ -56,8 +58,8 @@ These items represent long-term enhancements and community-driven goals:
 - **Milestone:** Enable community testing on physical hardware for non-16,1 models. The driver already queries SMBIOS to identify the machine.
 
 ### 2.2 Low-Latency Event-Driven Mode
-- **Current State:** WaveRT polling mode with ~21 ms lead time.
-- **Milestone:** Support event-driven WaveRT notifications for ultra-low latency pro-audio DAWs (ASIO/WASAPI exclusive).
+- **Current State:** Implemented in 1.0.13.27 (packet events from the 2 ms copy tick, ~21 ms lead time); not yet tried with an exclusive-mode DAW.
+- **Milestone:** Hardware check with an event-driven exclusive WASAPI client; shorter copy period if 2 ms granularity is too coarse.
 
 ### 2.3 WHQL / Attestation Signing
 - **Current State:** Self-signed package using test certificate (`certificate/T2AudioCertNew.cer`). Requires Windows Test Mode (`bcdedit /set testsigning on`) and Secure Boot disabled in macOS Startup Security Utility.
