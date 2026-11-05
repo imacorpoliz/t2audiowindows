@@ -410,22 +410,27 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->SpeakerDsp = newDsp;
 
     // Microphone processing is per frame too, so it can change live: MicDsp
-    // (0 raw / 1 kaiT2en / 2 three-mic canceller / 3 matched 3-capsule beam), MicVoiceMic and the
-    // noise gate. Each is a single aligned ULONG store.
+    // (0 raw / 1 kaiT2en / 2 three-mic canceller / 3 matched 3-capsule beam), MicVoiceMic,
+    // MicNoiseSuppression (0 off / 1 gate / 2 spectral suppressor) and
+    // MicGainDb (0..48, default 39). Each is a single aligned ULONG store.
     {
         ULONG micDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1);
         ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
-        ULONG gate = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0) ? 1u : 0u;
+        ULONG gate = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0);
+        ULONG gainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicGainDb", 39);
 
         micDsp = (micDsp > 3u) ? 3u : micDsp;
         voice = (voice > 2u) ? 1u : voice;
+        gate = (gate > 2u) ? 2u : gate;
+        gainDb = (gainDb > 48u) ? 48u : gainDb;
         if (micDsp != Context->MicDsp || voice != Context->MicVoiceMic ||
-            gate != Context->MicNoiseSuppression) {
+            gate != Context->MicNoiseSuppression || gainDb != Context->MicGainDb) {
             Context->MicDsp = micDsp;
             Context->MicVoiceMic = voice;
             Context->MicNoiseSuppression = gate;
-            KdPrint(("T2Audio: live mic params updated on the fly: MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u\n",
-                     micDsp, voice, gate));
+            Context->MicGainDb = gainDb;
+            KdPrint(("T2Audio: live mic params updated on the fly: MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u MicGainDb=%u\n",
+                     micDsp, voice, gate, gainDb));
         }
     }
 
@@ -712,7 +717,14 @@ T2AudioStartDeviceInner(
     // mono output of both microphone endpoints, independent of MicDsp and the
     // START_IO gates. Off is a bit-exact bypass (T2AudioMicLogic.h).
     context->MicNoiseSuppression =
-        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0) ? 1u : 0u;
+        T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0);
+    if (context->MicNoiseSuppression > 2u) {
+        context->MicNoiseSuppression = 2u;
+    }
+    context->MicGainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicGainDb", 39);
+    if (context->MicGainDb > 48u) {
+        context->MicGainDb = 48u;
+    }
     // START_IO on the microphone only with this second, explicit gate: the
     // first try powered the Mac off (EXCERPT_20261029_part2_mics.md).
     context->Mic.StartIo = (context->Mic.Enabled &&

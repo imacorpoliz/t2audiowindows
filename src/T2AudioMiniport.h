@@ -239,6 +239,9 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     // references for the speakers' sound (T2AudioMicAncProcess).
     ULONG MicDsp;
     ULONG MicVoiceMic;
+    // MicGainDb (Parameters\MicGainDb, 0..48, default 39 = kaiT2en): output gain
+    // of the built-in microphone chain.
+    ULONG MicGainDb;
     // MicNoiseSuppression (Parameters\MicNoiseSuppression=1, default 0): a
     // smooth, per-stream integer noise gate on the mono output of both
     // microphone endpoints (T2AudioMicLogic.h). Independent of MicDsp and

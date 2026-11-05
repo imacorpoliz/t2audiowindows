@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include "../src/T2AudioMicLogic.h"
+#include "../src/T2AudioMicDenoise.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -401,6 +402,104 @@ static void test_anc(void)
     }
 }
 
+// Spectral noise suppressor (MicNoiseSuppression=2).
+static void test_denoise(void)
+{
+    static T2AUDIO_MIC_DENOISE_STATE d;
+    long n, total;
+    int maxErr = 0;
+
+    // Gain 1 everywhere reconstructs the input exactly, 256 samples later.
+    T2AudioMicDenoiseReset(&d);
+    d.FixedGain = 1;
+    g_lcg = 11u;
+    {
+        static int in[48000];
+
+        for (n = 0; n < 48000; n++) {
+            int x = (int)((unsigned int)(speech24(n, 0.3) + noise24(200000)) << 8);
+            int y = T2AudioMicDenoise(&d, x);
+
+            in[n] = x;
+            if (n >= T2AUDIO_DN_N) {
+                int e = (y >> 8) - (in[n - T2AUDIO_DN_N] >> 8);
+
+                if (e < 0) e = -e;
+                if (e > maxErr) maxErr = e;
+            }
+        }
+        CHECK(maxErr <= 16, "reconstruction error %d LSB (24-bit)", maxErr);
+    }
+
+    // Steady hiss plus a talker in syllables (4 Hz on/off): the hiss drops
+    // by at least 12 dB in the pauses, the speech keeps its level within 2 dB.
+    T2AudioMicDenoiseReset(&d);
+    g_lcg = 12u;
+    total = 48000 * 6;
+    {
+        double pPause = 0, pPauseIn = 0, pSpeech = 0, pSpeechIn = 0;
+
+        for (n = 0; n < total; n++) {
+            int on = ((n / 6000) % 2) == 0;        // 125 ms syllables
+            int s = on ? speech24(n, 0.05) : 0;
+            int hiss = noise24(30000);            // about -49 dBFS, as on hardware
+            int y = T2AudioMicDenoise(&d, (int)((unsigned int)(s + hiss) << 8)) >> 8;
+            long m = n - T2AUDIO_DN_N;            // the input this output belongs to
+
+            if (n >= total - 48000 * 2 && m >= 0) {
+                int onm = ((m / 6000) % 2) == 0;
+                long inside = m % 6000;
+
+                if (inside < 1000 || inside > 5000) {
+                    continue;                     // skip the edges of each segment
+                }
+                if (onm) {
+                    double sm = (double)speech24(m, 0.05);
+
+                    pSpeech += (double)y * y;
+                    pSpeechIn += sm * sm;
+                } else {
+                    pPause += (double)y * y;
+                    pPauseIn += 30000.0 * 30000.0 / 3.0;
+                }
+            }
+        }
+        printf("  denoise: hiss in pauses %.1f dB, speech %.2f dB\n",
+               10 * log10(pPause / pPauseIn), 10 * log10(pSpeech / pSpeechIn));
+        CHECK(10 * log10(pPause / pPauseIn) < -12.0, "hiss reduced only %.1f dB", 10 * log10(pPause / pPauseIn));
+        CHECK(fabs(10 * log10(pSpeech / pSpeechIn)) < 2.0, "speech changed %.2f dB", 10 * log10(pSpeech / pSpeechIn));
+    }
+
+    // Full scale square wave: saturates, never wraps.
+    T2AudioMicDenoiseReset(&d);
+    for (n = 0; n < 48000; n++) {
+        int y = T2AudioMicDenoise(&d, (n & 64) ? INT_MAX : INT_MIN);
+
+        (void)y;
+    }
+    CHECK(1, "full scale ran");
+}
+
+// No click at capture start: a capsule DC offset must not become a step
+// through the +39 dB chain.
+static void test_start_click(void)
+{
+    T2AUDIO_MIC_STATE st;
+    unsigned int f[3];
+    long n;
+    int peak = 0;
+
+    T2AudioMicReset(&st);
+    f[0] = raw24(-60000); f[1] = raw24(-55000); f[2] = raw24(-70000);   // DC offsets only
+    for (n = 0; n < 4800; n++) {
+        int o = T2AudioMicProcessFrameEx(&st, f, 1, 1);
+
+        if (o < 0) o = -o;
+        if (o > peak) peak = o;
+    }
+    CHECK(peak < (1 << 24), "start click peak %d (%.1f dBFS)", peak, 20 * log10(peak / 2147483648.0));
+}
+
 // Matched 3-capsule beam (MicDsp=3): a frontal talker keeps the MicDsp=1
 // level, independent capsule noise drops, a quiet capsule is matched.
 static void test_beam(void)
@@ -696,6 +795,8 @@ int main(void)
     test_capture_aim();
     test_anc();
     test_beam();
+    test_denoise();
+    test_start_click();
     test_store_sample();
     test_headset_mic();
     test_jack_report();

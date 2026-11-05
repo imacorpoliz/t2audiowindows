@@ -52,6 +52,19 @@ static const int g_T2AudioMicHp48k[5] = {
 };
 // mic.json "out": 89.12509381337455 in Q16.
 #define T2AUDIO_MIC_OUT_GAIN_Q16      5840902ll
+// Parameters\MicGainDb (0..48, default 39 = the kaiT2en value above).
+#define T2AUDIO_MIC_GAIN_DB_DEFAULT   39u
+#define T2AUDIO_MIC_GAIN_DB_MAX       48u
+// 10^(dB/20) in Q16 for 0..48 dB (generated).
+static const long long g_T2AudioMicGainQ16[49] = {
+    65536, 73533, 82505, 92572, 103868, 116541, 130762, 146717,
+    164619, 184706, 207243, 232531, 260904, 292739, 328458, 368536,
+    413504, 463959, 520571, 584090, 655360, 735326, 825049, 925721,
+    1038676, 1165413, 1307615, 1467168, 1646190, 1847055, 2072430, 2325305,
+    2609035, 2927386, 3284581, 3685360, 4135042, 4639593, 5205710, 5840902,
+    6553600, 7353260, 8250494, 9257206, 10386756, 11654132, 13076151, 14671683,
+    16461899,
+};
 
 // Internal precision: samples are processed as 24-bit values << 6.
 #define T2AUDIO_MIC_SHIFT             6
@@ -164,6 +177,11 @@ typedef struct _T2AUDIO_MIC_STATE {
     long long Err;     // error feedback of the >> 28 (keeps the 20 Hz pole clean)
     T2AUDIO_MIC_ANC_STATE Anc;
     T2AUDIO_MIC_BEAM_STATE Beam;
+    // Output gain in Q16 (0 = the default +39 dB) and the high-pass priming:
+    // the filter starts from the first sample, so a DC offset is no step
+    // (it used to give a click of up to half scale at every capture start).
+    long long OutGainQ16;
+    int HpPrimed;
 } T2AUDIO_MIC_STATE;
 
 static __inline void
@@ -217,6 +235,8 @@ T2AudioMicReset(T2AUDIO_MIC_STATE *S)
     S->X1 = S->X2 = S->Y1 = S->Y2 = S->Err = 0;
     T2AudioMicAncReset(&S->Anc);
     T2AudioMicBeamReset(&S->Beam);
+    S->HpPrimed = 0;
+    S->OutGainQ16 = 0;
 }
 
 static __inline int
@@ -503,6 +523,13 @@ T2AudioMicProcessFrameEx(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsign
         x = ((long long)T2AudioMicSample24(Frame[0]) + (long long)T2AudioMicSample24(Frame[1]));
         x = x * (1ll << (T2AUDIO_MIC_SHIFT - 1));
     }
+    if (!S->HpPrimed) {
+        // Steady state for a constant input x: the high-pass outputs 0.
+        S->X1 = S->X2 = x;
+        S->Y1 = S->Y2 = 0;
+        S->Err = 0;
+        S->HpPrimed = 1;
+    }
     acc = (long long)g_T2AudioMicHp48k[0] * x +
           (long long)g_T2AudioMicHp48k[1] * S->X1 +
           (long long)g_T2AudioMicHp48k[2] * S->X2 -
@@ -516,7 +543,8 @@ T2AudioMicProcessFrameEx(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsign
     S->Y2 = S->Y1;
     S->Y1 = y;
     // +39 dB, back to 24 bits, saturate.
-    out = T2AudioMicSar(y * T2AUDIO_MIC_OUT_GAIN_Q16, 16 + T2AUDIO_MIC_SHIFT);
+    out = T2AudioMicSar(y * ((S->OutGainQ16 > 0) ? S->OutGainQ16 : T2AUDIO_MIC_OUT_GAIN_Q16),
+                        16 + T2AUDIO_MIC_SHIFT);
     if (out > 0x7FFFFF) {
         out = 0x7FFFFF;
     } else if (out < -0x800000) {

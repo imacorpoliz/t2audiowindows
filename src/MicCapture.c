@@ -3,6 +3,7 @@
 #include "T2AudioBufferLogic.h"
 #include "T2AudioSpeakerLogic.h"
 #include "T2AudioMicLogic.h"
+#include "T2AudioMicDenoise.h"
 #include <intrin.h>
 
 // Capture paths (ROADMAP section 5): the built-in microphones
@@ -447,6 +448,8 @@ typedef struct _T2AUDIO_MIC_STREAM {
     BOOLEAN HardwareIoStarted;
     T2AUDIO_MIC_STATE Dsp;
     T2AUDIO_MIC_GATE_STATE Gate;
+    // Spectral noise suppressor (MicNoiseSuppression=2), 7.7 KB.
+    T2AUDIO_MIC_DENOISE_STATE Denoise;
     // Run diagnostics.
     ULONG ReAims;
     ULONG64 SilentFrames;
@@ -555,9 +558,17 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
                 raw[0] = slot[0];
                 raw[1] = slot[1];
                 raw[2] = slot[2];
+                s->Dsp.OutGainQ16 = g_T2AudioMicGainQ16[(context->MicGainDb > T2AUDIO_MIC_GAIN_DB_MAX)
+                                                            ? T2AUDIO_MIC_GAIN_DB_DEFAULT : context->MicGainDb];
                 sample = T2AudioMicProcessFrameEx(&s->Dsp, raw, context->MicDsp, context->MicVoiceMic);
             }
-            out = (ULONG)T2AudioMicNoiseGate(&s->Gate, sample, context->MicNoiseSuppression);
+            // MicNoiseSuppression: 1 = gate (pauses only), 2 = spectral
+            // suppressor (also under speech).
+            if (context->MicNoiseSuppression >= 2) {
+                out = (ULONG)T2AudioMicDenoise(&s->Denoise, sample);
+            } else {
+                out = (ULONG)T2AudioMicNoiseGate(&s->Gate, sample, context->MicNoiseSuppression);
+            }
             s->CapturedFrames++;
         } else {
             s->SilentFrames++;
@@ -837,6 +848,7 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
         if (s->LastFrame == 0) {
             T2AudioMicReset(&s->Dsp);
             T2AudioMicGateReset(&s->Gate);
+            T2AudioMicDenoiseReset(&s->Denoise);
         }
         s->State = KSSTATE_RUN;
         KeReleaseSpinLock(&s->StreamLock, oldIrql);
@@ -861,7 +873,14 @@ T2AudioMicSetStateLocked(_Inout_ PT2AUDIO_MIC_STREAM s, _In_ KSSTATE State)
     KeReleaseSpinLock(&s->StreamLock, oldIrql);
     KdPrint(("T2Audio: %s run summary: captured=%I64u silent=%I64u reAims=%u maxCopyUs=%u\n",
              s->Path->Name, s->CapturedFrames, s->SilentFrames, s->ReAims, s->MaxCopyUs));
-    if (!s->Path->Headset && context->MicDsp >= 2 && s->Dsp.Anc.Samples != 0) {
+    if (context->MicNoiseSuppression >= 2) {
+        const T2AUDIO_MIC_DENOISE_STATE *d = &s->Denoise;
+
+        KdPrint(("T2Audio: %s denoise: hops=%u pos=%u gs[2]=%d gs[10]=%d gs[60]=%d noise[10]=%I64d ps[10]=%I64d in[0]=%d out[0]=%d\n",
+                 s->Path->Name, d->Hops, d->Pos, d->Gs[2], d->Gs[10], d->Gs[60], d->Noise[10], d->Ps[10],
+                 d->In[0], d->Out[0]));
+    }
+    if (!s->Path->Headset && context->MicDsp == 2 && s->Dsp.Anc.Samples != 0) {
         const T2AUDIO_MIC_ANC_STATE *a = &s->Dsp.Anc;
 
         // Mean powers (x^2/16 of 24-bit samples), adaption share, resets.
@@ -1377,6 +1396,7 @@ T2AudioMicMiniportNewStream(
     }
     T2AudioMicReset(&s->Dsp);
     T2AudioMicGateReset(&s->Gate);
+    T2AudioMicDenoiseReset(&s->Denoise);
     KeInitializeSpinLock(&s->StreamLock);
     KeInitializeTimer(&s->CopyTimer);
     KeInitializeDpc(&s->CopyDpc, T2AudioMicCopyTick, s);

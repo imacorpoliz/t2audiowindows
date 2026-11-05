@@ -994,7 +994,7 @@ $FeatureDefinitions = [ordered]@{
     MicNoiseSuppression = [ordered]@{
         Title = 'Microphone noise suppression'
         Params = @('MicNoiseSuppression')
-        On = @{ MicNoiseSuppression = 1 }
+        On = @{ MicNoiseSuppression = 2 }
         Off = @{ MicNoiseSuppression = 0 }
     }
     ResumeAfterSleep = [ordered]@{

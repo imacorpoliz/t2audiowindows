@@ -18,7 +18,16 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
-### v1.0.13.29 (2026-11-05, installed on the test machine)
+### v1.0.13.32 (2026-11-05, installed on the test machine)
+- `MicNoiseSuppression=2`: spectral noise suppressor (256-point STFT, minimum-tracking
+  noise estimate, -20 dB floor, 5.3 ms latency) on both microphone outputs. Host test:
+  hiss -15 dB, speech -1.4 dB, exact reconstruction at gain 1. Hardware: room noise
+  -38..-47 dBFS -> about -56 dBFS. `1` keeps the old gate. Changes live.
+- Click at every capture start removed (the high-pass now starts from the first sample;
+  start peak 0.44 -> 0.02 full scale on hardware).
+- `MicGainDb` (0..48, default 39) changes the microphone gain live.
+
+### v1.0.13.29 (2026-11-05)
 - Built-in microphone endpoint declared as a plain microphone (was a
   3-capsule array with geometry, while the stream is mono).
 - `MicDsp=3` (`-Action Features -MicBeam 1`, off by default): level-matched
