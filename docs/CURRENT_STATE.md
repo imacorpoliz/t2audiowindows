@@ -18,7 +18,23 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
-### v1.0.13.32 (2026-11-05, installed on the test machine)
+### v1.0.13.34 (2026-11-05, installed; loads after the next reboot)
+- **Correction:** from about 22:02 the audio engine (audiodg.exe) vetoed every
+  device restart (Kernel-PnP event 225), so Windows kept running the 1.0.13.31
+  image while 1.0.13.32-33 were installed on disk. The hardware numbers listed
+  for MicDsp=3 and MicNoiseSuppression=2 below were measured on that old image
+  (where 2 meant the gate) and are void until re-measured.
+- Setup stops Windows Audio + AudioEndpointBuilder around the driver swap, so
+  an open stream can no longer veto it; it warns when the device is pending a
+  reboot. DriverEntry writes Parameters\LoadedVersion; Install and Doctor
+  compare it with the package.
+- MicLowCut (default 1): 100 Hz 4th-order high-pass on the built-in mics. A
+  hardware spectrum of the room noise shows 20-300 Hz 25-30 dB above the band
+  above 1 kHz and no mains hum peaks: fan / chassis rumble, which kaiT2en's
+  20 Hz high-pass (the same 16_1 mic graph as MicDsp=1) keeps as well.
+- Noise suppressor softened: over-subtraction 2.5, floor -15 dB.
+
+### v1.0.13.32 (2026-11-05)
 - `MicNoiseSuppression=2`: spectral noise suppressor (256-point STFT, minimum-tracking
   noise estimate, -20 dB floor, 5.3 ms latency) on both microphone outputs. Host test:
   hiss -15 dB, speech -1.4 dB, exact reconstruction at gain 1. Hardware: room noise

@@ -1,6 +1,7 @@
 #include "T2AudioMiniport.h"
 #include "T2AudioSpeakerLogic.h"
 #include "T2AudioCrashGuard.h"
+#include "T2AudioVersion.h"
 
 // Registry subkeys under HKLM\SYSTEM\CurrentControlSet\Services. Parameters is
 // persistent (diagnostic tuning). TestSession MUST be created as a volatile key
@@ -140,7 +141,7 @@ DriverEntry(
 {
     NTSTATUS status;
     
-    KdPrint(("T2Audio: DriverEntry called\n"));
+    KdPrint(("T2Audio: DriverEntry called (%ws)\n", T2AUDIO_VERSION_W));
 
     // Initialize the BCE transport lock before any device can be started.
     T2AudioInitializeBceTransport();
@@ -157,6 +158,10 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = T2AudioDeviceControl;
     // Only sent to a device that registered (persistent mode, see StartDevice).
     DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = T2AudioShutdown;
+
+    // Tell the setup script which build is in memory (see T2AudioVersion.h).
+    (VOID)RtlWriteRegistryValue(RTL_REGISTRY_SERVICES, T2AUDIO_PARAMETERS_KEY, L"LoadedVersion",
+                                REG_SZ, (PVOID)T2AUDIO_VERSION_W, (ULONG)sizeof(T2AUDIO_VERSION_W));
 
     KdPrint(("T2Audio: PortCls driver initialized\n"));
     return STATUS_SUCCESS;
@@ -418,19 +423,22 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
         ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
         ULONG gate = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0);
         ULONG gainDb = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicGainDb", 39);
+        ULONG lowCut = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicLowCut", 1) ? 1u : 0u;
 
         micDsp = (micDsp > 3u) ? 3u : micDsp;
         voice = (voice > 2u) ? 1u : voice;
         gate = (gate > 2u) ? 2u : gate;
         gainDb = (gainDb > 48u) ? 48u : gainDb;
         if (micDsp != Context->MicDsp || voice != Context->MicVoiceMic ||
-            gate != Context->MicNoiseSuppression || gainDb != Context->MicGainDb) {
+            gate != Context->MicNoiseSuppression || gainDb != Context->MicGainDb ||
+            lowCut != Context->MicLowCut) {
             Context->MicDsp = micDsp;
             Context->MicVoiceMic = voice;
             Context->MicNoiseSuppression = gate;
             Context->MicGainDb = gainDb;
-            KdPrint(("T2Audio: live mic params updated on the fly: MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u MicGainDb=%u\n",
-                     micDsp, voice, gate, gainDb));
+            Context->MicLowCut = lowCut;
+            KdPrint(("T2Audio: live mic params updated on the fly: MicDsp=%u MicVoiceMic=%u MicNoiseSuppression=%u MicGainDb=%u MicLowCut=%u\n",
+                     micDsp, voice, gate, gainDb, lowCut));
         }
     }
 
@@ -725,6 +733,7 @@ T2AudioStartDeviceInner(
     if (context->MicGainDb > 48u) {
         context->MicGainDb = 48u;
     }
+    context->MicLowCut = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicLowCut", 1) ? 1u : 0u;
     // START_IO on the microphone only with this second, explicit gate: the
     // first try powered the Mac off (EXCERPT_20261029_part2_mics.md).
     context->Mic.StartIo = (context->Mic.Enabled &&

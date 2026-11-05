@@ -11,12 +11,12 @@
 //   N     = noise estimate: follows Ps down at once, rises only ~1.6 dB/s,
 //           so it settles on the noise floor between syllables and ignores
 //           speech (minimum tracking)
-//   G     = max(Gmin, 1 - OVER * N / Ps)   (spectral subtraction, OVER = 3
+//   G     = max(Gmin, 1 - OVER * N / Ps)   (spectral subtraction, OVER = 2.5
 //           makes up for the minimum's low bias)
 //   Gs    = G smoothed over time (rises fast, falls slowly) against
 //           "musical noise"
 //
-// Gmin = -20 dB: noise is pushed down by up to 20 dB, never to silence, so
+// Gmin = -15 dB: noise is pushed down by up to 15 dB, never to silence, so
 // the background stays natural. Everything is 64-bit fixed point; one hop
 // costs two 256-point FFTs (~2 x 1000 complex multiplies) - fine at
 // DISPATCH_LEVEL. The 7.7 KB state lives in the stream object, not on the
@@ -30,8 +30,8 @@
 #define T2AUDIO_DN_BINS         (T2AUDIO_DN_N / 2 + 1)
 #define T2AUDIO_DN_Q            20                  // window / twiddle fraction bits
 #define T2AUDIO_DN_GAIN_ONE     32768               // gains in Q15
-#define T2AUDIO_DN_GAIN_MIN     3277                // -20 dB
-#define T2AUDIO_DN_OVER         3                   // over-subtraction of the noise estimate
+#define T2AUDIO_DN_GAIN_MIN     5827                // -15 dB
+#define T2AUDIO_DN_OVER_Q8      640                 // over-subtraction of the noise estimate, 2.5 in Q8
 #define T2AUDIO_DN_RISE_SHIFT   10                  // noise rise: x(1 + 1/1024) a hop, ~1.6 dB/s
 #define T2AUDIO_DN_POWER_SHIFT  2                   // power smoothing: 1/4 a hop
 #define T2AUDIO_DN_SLOW_SHIFT   4                   // noise tracker input: 1/16 a hop (~45 ms)
@@ -238,7 +238,7 @@ T2AudioDnProcessHop(T2AUDIO_MIC_DENOISE_STATE *D)
         } else if (D->Ps[k] <= 0) {
             g = T2AUDIO_DN_GAIN_MIN;
         } else {
-            long long noise = D->Noise[k] * T2AUDIO_DN_OVER;
+            long long noise = T2AudioDnSar(D->Noise[k] * T2AUDIO_DN_OVER_Q8, 8);
             long long num = D->Ps[k] - noise;
 
             // g = 1 - OVER*N/Ps in Q15 (both below 2^49: scale before the shift).

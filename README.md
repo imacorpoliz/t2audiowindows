@@ -15,7 +15,8 @@ sound profile is not tuned for them.
 | All 6 speakers, macOS-like sound (EQ, crossover, virtual bass, limiter) | works, on by default |
 | Headphones as a separate output, automatic switching on plug / unplug | works, on by default |
 | Built-in microphones (3-mic array) | works, off by default |
-| Microphone noise suppression (removes steady hiss, also under speech, ~10-15 dB) | works, off by default |
+| Microphone low cut at 100 Hz (fan rumble) | on by default (`MicLowCut 0` turns it off) |
+| Microphone noise suppression (removes steady background noise, also under speech) | off by default |
 | Sound back after sleep without a restart | works, off by default |
 | 16/24-bit formats and event-driven mode for exclusive-mode apps (DAWs) | off by default |
 | All 3 built-in capsules, level-matched (lower self-noise) | beta, off by default |

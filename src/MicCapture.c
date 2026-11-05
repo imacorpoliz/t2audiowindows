@@ -560,6 +560,7 @@ T2AudioMicAdvanceLocked(_Inout_ PT2AUDIO_MIC_STREAM s)
                 raw[2] = slot[2];
                 s->Dsp.OutGainQ16 = g_T2AudioMicGainQ16[(context->MicGainDb > T2AUDIO_MIC_GAIN_DB_MAX)
                                                             ? T2AUDIO_MIC_GAIN_DB_DEFAULT : context->MicGainDb];
+                s->Dsp.LowCutOff = context->MicLowCut ? 0 : 1;
                 sample = T2AudioMicProcessFrameEx(&s->Dsp, raw, context->MicDsp, context->MicVoiceMic);
             }
             // MicNoiseSuppression: 1 = gate (pauses only), 2 = spectral

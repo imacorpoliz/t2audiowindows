@@ -717,11 +717,28 @@ function Invoke-Install {
     Set-Param 'CrashGuardStrikes' 0
     Write-Ok 'Persistent mode on, crash guard reset.'
 
+    # A device that is already waiting for a reboot (an earlier swap was
+    # refused) cannot be restarted again until Windows restarts.
+    if (Test-RebootRequired $d) {
+        Write-Warn 'Windows is still waiting for a reboot from an earlier driver change on this device.'
+        Write-Info 'The package is installed now; reboot Windows to load it.'
+    }
     # Disabling the device before binding avoids Code 14 (reboot required).
-    Write-Info 'Binding the driver to the device...'
-    $null = Invoke-Pnp @('/disable-device', $d.InstanceId)
-    $r = Invoke-Pnp @('/add-driver', $InfPath, '/install')
-    $null = Invoke-Pnp @('/enable-device', $d.InstanceId)
+    # The Windows audio services are stopped meanwhile: an open stream in the
+    # audio engine (audiodg.exe) otherwise vetoes the disable, and Windows
+    # then keeps the old driver image until a reboot (hardware 2026-11-05).
+    # Sound stops for a few seconds either way.
+    Write-Info 'Binding the driver to the device (sound stops for a few seconds)...'
+    try {
+        Stop-Service -Name Audiosrv -Force -ErrorAction SilentlyContinue
+        Stop-Service -Name AudioEndpointBuilder -Force -ErrorAction SilentlyContinue
+        $null = Invoke-Pnp @('/disable-device', $d.InstanceId)
+        $r = Invoke-Pnp @('/add-driver', $InfPath, '/install')
+        $null = Invoke-Pnp @('/enable-device', $d.InstanceId)
+    } finally {
+        Start-Service -Name AudioEndpointBuilder -ErrorAction SilentlyContinue
+        Start-Service -Name Audiosrv -ErrorAction SilentlyContinue
+    }
     if ($r.Code -ne 0 -and $r.Code -ne 3010) {
         Write-Fail "pnputil /add-driver returned $($r.Code)."
         Write-Info ($r.Out.Trim())
@@ -734,6 +751,7 @@ function Invoke-Install {
     }
     $d = Wait-DeviceService $ServiceName 30
     if ($d -and $d.Status -eq 'OK' -and (Get-DeviceService $d) -eq $ServiceName) {
+        $d = Confirm-NewDriverLoaded $d $pkgVer
         Write-Ok "T2AudioPort $(Get-DeviceDriverVersion $d) is installed and running."
         Remove-StaleT2Packages $d
         Set-T2Volume $Volume
@@ -748,6 +766,25 @@ function Invoke-Install {
     }
 }
 
+# The version the running driver image reports (Parameters\LoadedVersion,
+# written by DriverEntry; absent before 1.0.13.34).
+function Get-LoadedVersion { try { (Get-ItemProperty -Path $ParamsPath -Name LoadedVersion -ErrorAction Stop).LoadedVersion } catch { $null } }
+
+function Test-RebootRequired($dev) {
+    try { return [bool](Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_IsRebootRequired' -ErrorAction Stop).Data } catch { return $false }
+}
+
+# Whether Windows actually runs the installed build: the device must not be
+# waiting for a reboot, and the image must report the package version.
+function Confirm-NewDriverLoaded($dev, [string]$expected) {
+    $loaded = Get-LoadedVersion
+    if ((Test-RebootRequired $dev) -or ($expected -and $loaded -ne $expected)) {
+        Write-Warn "Windows still runs the previous driver ($(if ($loaded) { $loaded } else { 'an older build' })): reboot Windows to load $expected."
+    } else {
+        Write-Ok "Driver $loaded is loaded."
+    }
+    return $dev
+}
 function Get-PackageVersion {
     $m = Select-String -LiteralPath $InfPath -Pattern '^DriverVer\s*=\s*[^,]+,\s*([0-9.]+)' -ErrorAction SilentlyContinue |
          Select-Object -First 1
@@ -1382,7 +1419,11 @@ function Invoke-Doctor {
     $d = Get-T2Device
     if (-not $d) { Bad 'Apple T2 audio device not found' 'is this a T2 Mac with Boot Camp drivers?'; return }
     $svc = Get-DeviceService $d
-    if ($svc -eq $ServiceName -and $d.Status -eq 'OK') { Write-Ok "Driver T2AudioPort $(Get-DeviceDriverVersion $d) running" }
+    if ($svc -eq $ServiceName -and $d.Status -eq 'OK') {
+        $inst = Get-DeviceDriverVersion $d; $run = Get-LoadedVersion
+        if ((Test-RebootRequired $d) -or ($run -and $run -ne $inst)) { Bad "Driver $inst installed, but $(if ($run) { $run } else { 'an older build' }) still runs" 'reboot, or -Action Install again (restarts Windows Audio)' }
+        else { Write-Ok "Driver T2AudioPort $inst running" }
+    }
     elseif ($svc -eq 'AppleAudio') { Bad 'The device runs AppleAudio' '-Action Install' }
     else { Bad "Device: $($d.Status), driver $svc" '-Action Report and look at the log' }
     if (Test-Path -LiteralPath $SysPath) {

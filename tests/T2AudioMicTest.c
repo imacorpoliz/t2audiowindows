@@ -54,6 +54,7 @@ static double run_gain(double freq, double amp, double mic2, int *clipped)
     long n;
 
     T2AudioMicReset(&st);
+    st.LowCutOff = 1;      // the kaiT2en chain exactly
     *clipped = 0;
     for (n = 0; n < 96000; n++) {
         double x = amp * sin(2 * M_PI * freq * n / 48000.0);
@@ -466,7 +467,7 @@ static void test_denoise(void)
         }
         printf("  denoise: hiss in pauses %.1f dB, speech %.2f dB\n",
                10 * log10(pPause / pPauseIn), 10 * log10(pSpeech / pSpeechIn));
-        CHECK(10 * log10(pPause / pPauseIn) < -12.0, "hiss reduced only %.1f dB", 10 * log10(pPause / pPauseIn));
+        CHECK(10 * log10(pPause / pPauseIn) < -9.0, "hiss reduced only %.1f dB", 10 * log10(pPause / pPauseIn));
         CHECK(fabs(10 * log10(pSpeech / pSpeechIn)) < 2.0, "speech changed %.2f dB", 10 * log10(pSpeech / pSpeechIn));
     }
 
@@ -498,6 +499,43 @@ static void test_start_click(void)
         if (o > peak) peak = o;
     }
     CHECK(peak < (1 << 24), "start click peak %d (%.1f dBFS)", peak, 20 * log10(peak / 2147483648.0));
+}
+
+// Voice low cut (MicLowCut): fan rumble below 100 Hz goes, speech stays.
+static double lowcut_gain(double freq)
+{
+    T2AUDIO_MIC_STATE st;
+    unsigned int f[3];
+    long n;
+    double ein = 0, eout = 0;
+
+    T2AudioMicReset(&st);
+    for (n = 0; n < 96000; n++) {
+        int v = (int)lrint(0.0005 * 8388607.0 * sin(2 * M_PI * freq * n / 48000.0));
+        int on, off;
+
+        f[0] = f[1] = f[2] = raw24(v);
+        st.LowCutOff = 0;
+        on = T2AudioMicProcessFrameEx(&st, f, 1, 1);
+        (void)off;
+        if (n >= 48000) {
+            ein += (double)v * v;
+            eout += (double)on * on;
+        }
+    }
+    return 10 * log10(eout / ein);
+}
+
+static void test_low_cut(void)
+{
+    double ref = lowcut_gain(1000.0);
+    double g50 = lowcut_gain(50.0) - ref, g100 = lowcut_gain(100.0) - ref;
+    double g300 = lowcut_gain(300.0) - ref, g3k = lowcut_gain(3000.0) - ref;
+
+    printf("  low cut: 50 Hz %.1f dB, 100 Hz %.1f dB, 300 Hz %.2f dB, 3 kHz %.2f dB\n", g50, g100, g300, g3k);
+    CHECK(g50 < -20.0, "50 Hz only %.1f dB", g50);
+    CHECK(g100 > -6.0 && g100 < -2.0, "100 Hz at %.1f dB, expected -3..-5", g100);
+    CHECK(fabs(g300) < 0.3 && fabs(g3k) < 0.1, "passband changed (%.2f / %.2f dB)", g300, g3k);
 }
 
 // Matched 3-capsule beam (MicDsp=3): a frontal talker keeps the MicDsp=1
@@ -797,6 +835,7 @@ int main(void)
     test_beam();
     test_denoise();
     test_start_click();
+    test_low_cut();
     test_store_sample();
     test_headset_mic();
     test_jack_report();

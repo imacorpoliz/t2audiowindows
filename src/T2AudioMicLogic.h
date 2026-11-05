@@ -181,6 +181,13 @@ typedef struct _T2AUDIO_MIC_STATE {
     // the filter starts from the first sample, so a DC offset is no step
     // (it used to give a click of up to half scale at every capture start).
     long long OutGainQ16;
+    // Voice low cut (Parameters\MicLowCut, default on): 4th-order Butterworth
+    // high-pass at 100 Hz after the gain. The built-in capsules sit next to
+    // the fan and pick up a low rumble 25-30 dB above the band above 1 kHz
+    // (hardware spectrum 2026-11-05); kaiT2en's 20 Hz high-pass keeps it.
+    // Set by the caller per frame; LowCutOff = 1 disables it.
+    int LowCutOff;
+    long long Lc[2][5];                    // per stage: X1, X2, Y1, Y2, error feedback
     int HpPrimed;
 } T2AUDIO_MIC_STATE;
 
@@ -237,6 +244,16 @@ T2AudioMicReset(T2AUDIO_MIC_STATE *S)
     T2AudioMicBeamReset(&S->Beam);
     S->HpPrimed = 0;
     S->OutGainQ16 = 0;
+    S->LowCutOff = 0;
+    {
+        unsigned int i, j;
+
+        for (i = 0; i < 2; i++) {
+            for (j = 0; j < 5; j++) {
+                S->Lc[i][j] = 0;
+            }
+        }
+    }
 }
 
 static __inline int
@@ -453,6 +470,36 @@ T2AudioMicSample24(unsigned int Raw)
     return (v & 0x00800000u) ? (int)v - 0x01000000 : (int)v;
 }
 
+// 100 Hz 4th-order Butterworth high-pass at 48 kHz (two RBJ sections, Q 0.541
+// and 1.307), Q28 { b0, b1, b2, a1, a2 } (generated).
+static const long long g_T2AudioMicLowCut48k[2][5] = {
+    { 265216637, -530433274, 265216637, -530410551, 262020541 },
+    { 267086077, -534172155, 267086077, -534149272, 265759582 },
+};
+
+// The low cut on a 24-bit sample (|x| < 2^31 before saturation, Q28
+// coefficients: every product stays below 2^60).
+static __inline long long
+T2AudioMicLowCut(T2AUDIO_MIC_STATE *S, long long x)
+{
+    unsigned int i;
+
+    for (i = 0; i < 2; i++) {
+        const long long *c = g_T2AudioMicLowCut48k[i];
+        long long *z = S->Lc[i];
+        long long acc = c[0] * x + c[1] * z[0] + c[2] * z[1] - c[3] * z[2] - c[4] * z[3] + z[4];
+        long long y = T2AudioMicSar(acc, 28);
+
+        z[4] = acc - y * (1ll << 28);
+        z[1] = z[0];
+        z[0] = x;
+        z[3] = z[2];
+        z[2] = y;
+        x = y;
+    }
+    return x;
+}
+
 // One frame of the microphone DSP. Frame points at 3 raw slots. Dsp = 0
 // passes mic 0 through unprocessed (diagnostics); 1 is kaiT2en's 16_1 chain
 // (beam of mic 0 + mic 1); 2 replaces the beam with the three-microphone
@@ -545,6 +592,9 @@ T2AudioMicProcessFrameEx(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsign
     // +39 dB, back to 24 bits, saturate.
     out = T2AudioMicSar(y * ((S->OutGainQ16 > 0) ? S->OutGainQ16 : T2AUDIO_MIC_OUT_GAIN_Q16),
                         16 + T2AUDIO_MIC_SHIFT);
+    if (!S->LowCutOff) {
+        out = T2AudioMicLowCut(S, out);
+    }
     if (out > 0x7FFFFF) {
         out = 0x7FFFFF;
     } else if (out < -0x800000) {
