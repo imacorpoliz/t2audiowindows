@@ -18,6 +18,7 @@ sound profile is not tuned for them.
 | Microphone noise gate (silences hiss between phrases) | works, off by default |
 | Sound back after sleep without a restart | works, off by default |
 | 16/24-bit formats and event-driven mode for exclusive-mode apps (DAWs) | off by default |
+| All 3 built-in capsules, level-matched (lower self-noise) | beta, off by default |
 | 3-mic speaker-sound canceller for the built-in mics | beta, off by default |
 | Headset microphone on the 3.5 mm jack | experimental, not tested on hardware |
 
@@ -124,7 +125,7 @@ Fine tuning, for example a little more bass and less treble:
 ```
 
 Switches: `-Headphones`, `-Microphone`, `-MicNoiseSuppression`,
-`-MicCanceller`, `-HeadsetMic`, `-ResumeAfterSleep`, `-ExtraFormats`,
+`-MicBeam`, `-MicCanceller`, `-HeadsetMic`, `-ResumeAfterSleep`, `-ExtraFormats`,
 `-HeadphoneCrossfeed`, `-DspLoudness`, `-AntiRattle` (each `1` = on,
 `0` = off). The device restarts once to apply them; the sound stops for a
 couple of seconds.

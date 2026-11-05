@@ -410,14 +410,14 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     Context->SpeakerDsp = newDsp;
 
     // Microphone processing is per frame too, so it can change live: MicDsp
-    // (0 raw / 1 kaiT2en / 2 three-mic canceller), MicVoiceMic and the
+    // (0 raw / 1 kaiT2en / 2 three-mic canceller / 3 matched 3-capsule beam), MicVoiceMic and the
     // noise gate. Each is a single aligned ULONG store.
     {
         ULONG micDsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1);
         ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
         ULONG gate = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicNoiseSuppression", 0) ? 1u : 0u;
 
-        micDsp = (micDsp > 2u) ? 2u : micDsp;
+        micDsp = (micDsp > 3u) ? 3u : micDsp;
         voice = (voice > 2u) ? 1u : voice;
         if (micDsp != Context->MicDsp || voice != Context->MicVoiceMic ||
             gate != Context->MicNoiseSuppression) {
@@ -698,13 +698,14 @@ T2AudioStartDeviceInner(
     context->ResumeAfterSleep = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"ResumeAfterSleep", 0) ? 1u : 0u;
     // Built-in microphones (ROADMAP 5): off by default. MicDsp 0 = mic 0 raw,
     // 1 = kaiT2en chain (default, hardware-verified), 2 = three-microphone
-    // noise canceller around MicVoiceMic (0..2, default 1), then the same chain.
+    // noise canceller around MicVoiceMic (0..2, default 1), 3 = level-matched
+    // average of all three capsules; both then run the same chain.
     context->Mic.Enabled = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicInput", 0) ? 1u : 0u;
     {
         ULONG dsp = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicDsp", 1);
         ULONG voice = T2AudioReadDwordParameter(T2AUDIO_PARAMETERS_KEY, L"MicVoiceMic", 1);
 
-        context->MicDsp = (dsp > 2u) ? 2u : dsp;
+        context->MicDsp = (dsp > 3u) ? 3u : dsp;
         context->MicVoiceMic = (voice > 2u) ? 1u : voice;
     }
     // MicNoiseSuppression (default 0): a smooth per-stream noise gate on the

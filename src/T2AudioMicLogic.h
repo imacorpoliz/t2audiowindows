@@ -137,11 +137,48 @@ typedef struct _T2AUDIO_MIC_ANC_STATE {
     long long Dc[3];
 } T2AUDIO_MIC_ANC_STATE;
 
+// ---------------------------------------------------------------------------
+// Three-capsule matched beam (Parameters\MicDsp=3): the average of all three
+// microphones after matching each capsule's sensitivity to mic 0. A talker
+// in front adds up coherently and keeps the level of MicDsp=1, while each
+// capsule's own self-noise is independent and drops (about 1.8 dB below the
+// two-capsule average, more when the quiet capsule was dragging it down;
+// hardware 2026-11-04: mic1 4.6 dB below mic0 / mic2). The gains follow the
+// long-term (~1.4 s) power of each DC-blocked capsule, clamped to +-6 dB.
+// ---------------------------------------------------------------------------
+#define T2AUDIO_MIC_BEAM_POWER_SHIFT  16
+#define T2AUDIO_MIC_BEAM_PERIOD       4096                 // samples between gain updates
+#define T2AUDIO_MIC_BEAM_GAIN_MIN     32845u               // Q16, -6 dB
+#define T2AUDIO_MIC_BEAM_GAIN_MAX     130762u              // Q16, +6 dB
+
+typedef struct _T2AUDIO_MIC_BEAM_STATE {
+    long long Dc[3];                       // DC blocker, Q8 running mean
+    long long Pow[3];                      // long-term power accumulators
+    unsigned int Gain[3];                  // Q16, Gain[0] is always 1
+    unsigned int Tick;
+    int Primed;
+} T2AUDIO_MIC_BEAM_STATE;
+
 typedef struct _T2AUDIO_MIC_STATE {
     long long X1, X2, Y1, Y2;
     long long Err;     // error feedback of the >> 28 (keeps the 20 Hz pole clean)
     T2AUDIO_MIC_ANC_STATE Anc;
+    T2AUDIO_MIC_BEAM_STATE Beam;
 } T2AUDIO_MIC_STATE;
+
+static __inline void
+T2AudioMicBeamReset(T2AUDIO_MIC_BEAM_STATE *B)
+{
+    unsigned int k;
+
+    for (k = 0; k < 3; k++) {
+        B->Dc[k] = 0;
+        B->Pow[k] = 0;
+        B->Gain[k] = 65536u;
+    }
+    B->Tick = 0;
+    B->Primed = 0;
+}
 
 static __inline void
 T2AudioMicAncReset(T2AUDIO_MIC_ANC_STATE *A)
@@ -179,6 +216,7 @@ T2AudioMicReset(T2AUDIO_MIC_STATE *S)
 {
     S->X1 = S->X2 = S->Y1 = S->Y2 = S->Err = 0;
     T2AudioMicAncReset(&S->Anc);
+    T2AudioMicBeamReset(&S->Beam);
 }
 
 static __inline int
@@ -410,7 +448,50 @@ T2AudioMicProcessFrameEx(T2AUDIO_MIC_STATE *S, const unsigned int *Frame, unsign
     if (!Dsp) {
         return (int)((unsigned int)T2AudioMicSample24(Frame[0]) << 8);
     }
-    if (Dsp >= 2) {
+    if (Dsp >= 3) {
+        T2AUDIO_MIC_BEAM_STATE *b = &S->Beam;
+        long long sum = 0;
+        unsigned int k;
+
+        for (k = 0; k < 3; k++) {
+            long long v = (long long)T2AudioMicSample24(Frame[k]);
+            long long m;
+
+            if (!b->Primed) {
+                b->Dc[k] = v * 256;
+            }
+            b->Dc[k] += T2AudioMicSar(v * 256 - b->Dc[k], 11);
+            m = v - T2AudioMicSar(b->Dc[k], 8);
+            b->Pow[k] += ((m * m) >> 4) - (b->Pow[k] >> T2AUDIO_MIC_BEAM_POWER_SHIFT);
+            sum += T2AudioMicSar(m * (long long)b->Gain[k], 16);
+        }
+        b->Primed = 1;
+        if (++b->Tick >= T2AUDIO_MIC_BEAM_PERIOD) {
+            b->Tick = 0;
+            for (k = 1; k < 3; k++) {
+                unsigned long long p0 = (unsigned long long)b->Pow[0];
+                unsigned long long pk = (unsigned long long)b->Pow[k];
+                unsigned long long g;
+
+                if (p0 < (16ull << T2AUDIO_MIC_BEAM_POWER_SHIFT) || pk < (16ull << T2AUDIO_MIC_BEAM_POWER_SHIFT)) {
+                    continue;      // silent capsule: keep the gain
+                }
+                while (p0 > (1ull << 40) || pk > (1ull << 40)) {
+                    p0 >>= 1;
+                    pk >>= 1;
+                }
+                g = T2AudioMicIsqrt(((p0 << 22) / pk) << 10);   // sqrt(P0/Pk) in Q16
+                if (g < T2AUDIO_MIC_BEAM_GAIN_MIN) {
+                    g = T2AUDIO_MIC_BEAM_GAIN_MIN;
+                } else if (g > T2AUDIO_MIC_BEAM_GAIN_MAX) {
+                    g = T2AUDIO_MIC_BEAM_GAIN_MAX;
+                }
+                b->Gain[k] = (unsigned int)g;
+            }
+        }
+        // Average of three (x 21845 / 65536), with the chain's extra precision.
+        x = T2AudioMicSar(sum * 21845, 16) * (1ll << T2AUDIO_MIC_SHIFT);
+    } else if (Dsp == 2) {
         int mic[3];
 
         mic[0] = T2AudioMicSample24(Frame[0]);

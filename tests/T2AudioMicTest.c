@@ -401,6 +401,51 @@ static void test_anc(void)
     }
 }
 
+// Matched 3-capsule beam (MicDsp=3): a frontal talker keeps the MicDsp=1
+// level, independent capsule noise drops, a quiet capsule is matched.
+static void test_beam(void)
+{
+    T2AUDIO_MIC_STATE s1, s3;
+    long n, total = 48000 * 6;
+    double e1s = 0, e3s = 0, e1n = 0, e3n = 0;
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {     // 0 = talker only, 1 = noise only
+        T2AudioMicReset(&s1);
+        T2AudioMicReset(&s3);
+        g_lcg = 4242u;
+        for (n = 0; n < total; n++) {
+            int s = pass == 0 ? speech24(n, 0.0005) : 0;
+            int nz0 = pass == 1 ? noise24(1500) : 0;
+            int nz1 = pass == 1 ? noise24(1500) : 0;
+            int nz2 = pass == 1 ? noise24(1500) : 0;
+            unsigned int f[3];
+            int o1, o3;
+
+            // mic1 is 4.6 dB less sensitive (x 0.589), as on hardware.
+            f[0] = raw24(s + nz0);
+            f[1] = raw24((int)lrint(0.589 * (s + nz1)));
+            f[2] = raw24(s + nz2);
+            o1 = T2AudioMicProcessFrameEx(&s1, f, 1, 1);
+            o3 = T2AudioMicProcessFrameEx(&s3, f, 3, 1);
+            if (n >= total - 48000) {
+                if (pass == 0) { e1s += (double)o1 * o1; e3s += (double)o3 * o3; }
+                else { e1n += (double)o1 * o1; e3n += (double)o3 * o3; }
+            }
+        }
+    }
+    // MicDsp=1 averages mic0 with the quiet mic1 (talker at 0.79 of mic0);
+    // MicDsp=3 matches mic1 and keeps the talker at mic0's level: +2 dB.
+    printf("  beam: talker %+.2f dB, noise %+.2f dB vs MicDsp=1, gains %.3f %.3f\n",
+           10 * log10(e3s / e1s), 10 * log10(e3n / e1n), s3.Beam.Gain[1] / 65536.0, s3.Beam.Gain[2] / 65536.0);
+    CHECK(fabs(10 * log10(e3s / e1s) - 2.0) < 0.7, "beam talker level %+.2f dB vs MicDsp=1", 10 * log10(e3s / e1s));
+    // Speech-to-noise improves by at least 2 dB.
+    CHECK(10 * log10(e3s / e1s) - 10 * log10(e3n / e1n) > 2.0, "beam SNR gain only %.2f dB",
+          10 * log10(e3s / e1s) - 10 * log10(e3n / e1n));
+    CHECK(s3.Beam.Gain[1] > 100000 && s3.Beam.Gain[1] < 122000, "mic1 gain %u, expected ~1.70", s3.Beam.Gain[1]);
+    CHECK(s3.Beam.Gain[2] > 62000 && s3.Beam.Gain[2] < 69000, "mic2 gain %u, expected ~1.0", s3.Beam.Gain[2]);
+}
+
 // Headset microphone ("Codec Input"): signed 32-bit mono passes unchanged,
 // one 32-bit slot per frame, and the ring wraps like the array's.
 static void test_headset_mic(void)
@@ -650,6 +695,7 @@ int main(void)
     test_dsp();
     test_capture_aim();
     test_anc();
+    test_beam();
     test_store_sample();
     test_headset_mic();
     test_jack_report();

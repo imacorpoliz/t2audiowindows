@@ -35,6 +35,7 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression,
     [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,
     [ValidateRange(0, 1)] [Nullable[int]]$MicCanceller,
+    [ValidateRange(0, 1)] [Nullable[int]]$MicBeam,
 
     [ValidateSet('Speakers', 'Headphones', 'Toggle')]
     [string]$To = 'Toggle',
@@ -92,6 +93,7 @@ if ($null -ne $AntiRattle)         { $splat['AntiRattle'] = $AntiRattle }
 if ($null -ne $MicNoiseSuppression) { $splat['MicNoiseSuppression'] = $MicNoiseSuppression }
 if ($null -ne $HeadsetMic)         { $splat['HeadsetMic'] = $HeadsetMic }
 if ($null -ne $MicCanceller)       { $splat['MicCanceller'] = $MicCanceller }
+if ($null -ne $MicBeam)            { $splat['MicBeam'] = $MicBeam }
 if ($resolvedAction -eq 'Switch')  { $splat['To'] = $To }
 if ($File)                         { $splat['File'] = $File }
 if ($Force)                        { $splat['Force'] = $true }

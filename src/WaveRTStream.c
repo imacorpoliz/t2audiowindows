@@ -94,6 +94,13 @@ typedef struct _T2AUDIO_WAVERT_STREAM {
     // Frames written as silence because the headphones were plugged in
     // (HeadphoneAutoMute), per run.
     ULONG64 JackMutedFrames;
+    // Headphone run diagnostics: peak |sample| written per channel (ring
+    // units) and frames where the left channel carried signal while the
+    // right one was exactly zero - tells a lost channel in the driver from
+    // one lost at the jack or cable.
+    ULONG HpPeakL;
+    ULONG HpPeakR;
+    ULONG64 HpRightSilentFrames;
     // Tweeter high-pass state of the stereo path; reset on a fresh run.
     T2AUDIO_SPEAKER_STATE SpeakerState;
     // Speaker DSP state (context->SpeakerDsp); reset with SpeakerState.
@@ -349,6 +356,27 @@ T2AudioStreamRenderHeadphoneFrames(
                 Source,
                 Frames * 2,
                 shift);
+        }
+    }
+
+    // Per-channel diagnostics of the stereo input as it reaches the ring
+    // (same shift; computed from the source, since reading the ring back
+    // from write-combined device memory would be slow).
+    for (i = 0; instance->Channels == 2 && i < Frames; i++) {
+        int l = (int)T2AudioSar32(Source[i * 2], shift);
+        int r = (int)T2AudioSar32(Source[i * 2 + 1], shift);
+        ULONG al = (l < 0) ? (ULONG)(0u - (unsigned int)l) : (ULONG)l;
+        ULONG ar = (r < 0) ? (ULONG)(0u - (unsigned int)r) : (ULONG)r;
+
+        if (al > instance->HpPeakL) {
+            instance->HpPeakL = al;
+        }
+        if (ar > instance->HpPeakR) {
+            instance->HpPeakR = ar;
+        }
+        // Left above about -60 dBFS (24-bit ring) while right is digital zero.
+        if (al > 8400u && r == 0) {
+            instance->HpRightSilentFrames++;
         }
     }
 }
@@ -1088,6 +1116,9 @@ T2AudioStreamSetStateLocked(
                 instance->SlowRenders = 0;
                 instance->RenderPasses = 0;
                 instance->JackMutedFrames = 0;
+                instance->HpPeakL = 0;
+                instance->HpPeakR = 0;
+                instance->HpRightSilentFrames = 0;
                 instance->ClockCorrections = 0;
                 // Event-driven: count packet boundaries from where the run resumes.
                 instance->NotifyPacket = T2AudioNotificationPacket(
@@ -1143,6 +1174,10 @@ T2AudioStreamSetStateLocked(
                  // autogain at the end of the run, tenths of a dB (Q16 log2 * 6.02)
                  instance->Dsp.AgcLog * 602 / 65536,
                  instance->JackMutedFrames));
+        if (instance->Headphone) {
+            KdPrint(("T2Audio: headphone run: peakL=%u peakR=%u rightSilentFrames=%I64u (24-bit units)\n",
+                     instance->HpPeakL, instance->HpPeakR, instance->HpRightSilentFrames));
+        }
         if (State == KSSTATE_STOP && instance->DeviceContext != NULL) {
             PT2AUDIO_DEVICE_CONTEXT context = instance->DeviceContext;
 

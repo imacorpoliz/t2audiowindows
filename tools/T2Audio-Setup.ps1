@@ -60,6 +60,7 @@ param(
     [ValidateRange(0, 1)] [Nullable[int]]$MicNoiseSuppression, # microphone noise gate
     [ValidateRange(0, 1)] [Nullable[int]]$HeadsetMic,      # 3.5 mm headset microphone (experimental)
     [ValidateRange(0, 1)] [Nullable[int]]$MicCanceller,    # 3-mic canceller of the speakers' sound (MicDsp=2)
+    [ValidateRange(0, 1)] [Nullable[int]]$MicBeam,         # all 3 capsules, level-matched (MicDsp=3)
 
     # -Action UpdateGuard: 1 = stop Windows Update from installing drivers
     # (so it cannot bring AppleAudio back), 0 = restore the previous settings.
@@ -978,6 +979,12 @@ $FeatureDefinitions = [ordered]@{
         On = @{ HeadsetMicInput = 1; HeadsetMicStartIo = 1 }
         Off = @{ HeadsetMicInput = 0; HeadsetMicStartIo = 0 }
     }
+    MicBeam = [ordered]@{
+        Title = 'Mic: all 3 capsules, level-matched (beta)'
+        Params = @('MicDsp')
+        On = @{ MicDsp = 3 }
+        Off = @{ MicDsp = 1 }
+    }
     MicCanceller = [ordered]@{
         Title = 'Mic: cancel speaker sound (3 mics, beta)'
         Params = @('MicDsp')
@@ -1079,7 +1086,7 @@ function Get-FeatureArgumentValues {
         Headphones = $Headphones; Microphone = $Microphone; ResumeAfterSleep = $ResumeAfterSleep
         ExtraFormats = $ExtraFormats; HeadphoneCrossfeed = $HeadphoneCrossfeed
         DspLoudness = $DspLoudness; AntiRattle = $AntiRattle; MicNoiseSuppression = $MicNoiseSuppression
-        HeadsetMic = $HeadsetMic; MicCanceller = $MicCanceller
+        HeadsetMic = $HeadsetMic; MicCanceller = $MicCanceller; MicBeam = $MicBeam
     }
 }
 
@@ -1165,6 +1172,13 @@ function Invoke-Features([switch]$Interactive) {
         $changes['Microphone'] = 1
     }
     # The speaker-sound canceller runs on the built-in microphones.
+    if ($changes.Contains('MicBeam') -and $changes['MicBeam'] -eq 1 -and $changes.Contains('MicCanceller') -and $changes['MicCanceller'] -eq 1) {
+        Write-Warn 'The 3-capsule beam and the canceller are alternatives; using the beam.'
+        $changes.Remove('MicCanceller')
+    }
+    if ($changes.Contains('MicBeam') -and $changes['MicBeam'] -eq 1 -and -not $micAfter) {
+        $changes['Microphone'] = 1
+    }
     if ($changes.Contains('MicCanceller') -and $changes['MicCanceller'] -eq 1 -and -not $micAfter) {
         Write-Warn 'The speaker-sound canceller needs the built-in microphones; enabling them too.'
         $changes['Microphone'] = 1

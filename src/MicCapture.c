@@ -1413,13 +1413,10 @@ static const IMiniportWaveRTVtbl g_T2AudioMicMiniportVtbl = {
 };
 
 // ---------------------------------------------------------------------------
-// Microphone topology ("TopologyMic"): microphone array -> bridge
+// Microphone topology ("TopologyMic"): microphone -> bridge. The endpoint is a
+// plain mono microphone: the three capsules are combined in the driver (MicDsp),
+// so Windows must not treat it as an array and expect one channel per capsule.
 // ---------------------------------------------------------------------------
-
-typedef struct {
-    KSAUDIO_MIC_ARRAY_GEOMETRY Geometry;
-    KSAUDIO_MICROPHONE_COORDINATES AdditionalCoords[2];
-} T2AUDIO_MIC_ARRAY_GEOMETRY_EX;
 
 static NTSTATUS
 T2AudioMicBasicSupport(_Inout_ PPCPROPERTY_REQUEST Request)
@@ -1444,82 +1441,6 @@ T2AudioMicBasicSupport(_Inout_ PPCPROPERTY_REQUEST Request)
     }
     Request->ValueSize = sizeof(KSPROPERTY_DESCRIPTION);
     return STATUS_BUFFER_OVERFLOW;
-}
-
-static NTSTATUS
-T2AudioMicArrayProperty(_Inout_ PPCPROPERTY_REQUEST Request)
-{
-    ULONG needed;
-    T2AUDIO_MIC_ARRAY_GEOMETRY_EX *geom;
-
-    if (Request == NULL || Request->PropertyItem == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    if (Request->PropertyItem->Id != KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY) {
-        return STATUS_NOT_SUPPORTED;
-    }
-    // A filter property addressed to a pin (KSP_PIN): only the array pin.
-    if (Request->InstanceSize >= sizeof(ULONG) && Request->Instance != NULL &&
-        *(PULONG)Request->Instance != T2AUDIO_MIC_TOPO_PIN_MIC) {
-        return STATUS_NOT_SUPPORTED;
-    }
-    if (Request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) {
-        return T2AudioMicBasicSupport(Request);
-    }
-    if (!(Request->Verb & KSPROPERTY_TYPE_GET)) {
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    needed = sizeof(T2AUDIO_MIC_ARRAY_GEOMETRY_EX);
-    if (Request->ValueSize == 0) {
-        Request->ValueSize = needed;
-        return STATUS_BUFFER_OVERFLOW;
-    }
-    if (Request->ValueSize < needed || Request->Value == NULL) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    geom = (T2AUDIO_MIC_ARRAY_GEOMETRY_EX *)Request->Value;
-    RtlZeroMemory(geom, sizeof(*geom));
-
-    // Linear 3-microphone array on MacBookPro16,1
-    geom->Geometry.usVersion = 0x0100;
-    geom->Geometry.usMicArrayType = KSMICARRAY_MICARRAYTYPE_LINEAR;
-    // Work volume: -pi/2 to +pi/2 vertical and horizontal (radians * 10000)
-    geom->Geometry.wVerticalAngleBegin = -T2AUDIO_MIC_ARRAY_WORK_ANGLE;
-    geom->Geometry.wVerticalAngleEnd = T2AUDIO_MIC_ARRAY_WORK_ANGLE;
-    geom->Geometry.wHorizontalAngleBegin = -T2AUDIO_MIC_ARRAY_WORK_ANGLE;
-    geom->Geometry.wHorizontalAngleEnd = T2AUDIO_MIC_ARRAY_WORK_ANGLE;
-    geom->Geometry.usFrequencyBandLo = T2AUDIO_MIC_ARRAY_FREQ_LO;
-    geom->Geometry.usFrequencyBandHi = T2AUDIO_MIC_ARRAY_FREQ_HI;
-    geom->Geometry.usNumberOfMicrophones = T2AUDIO_MIC_ARRAY_COUNT;
-
-    // Mic 0 (Left): -40mm on X axis
-    geom->Geometry.KsMicCoord[0].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
-    geom->Geometry.KsMicCoord[0].wXCoord = T2AUDIO_MIC0_X_MM;
-    geom->Geometry.KsMicCoord[0].wYCoord = 0;
-    geom->Geometry.KsMicCoord[0].wZCoord = 0;
-    geom->Geometry.KsMicCoord[0].wVerticalAngle = 0;
-    geom->Geometry.KsMicCoord[0].wHorizontalAngle = 0;
-
-    // Mic 1 (Center): 0mm on X axis
-    geom->AdditionalCoords[0].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
-    geom->AdditionalCoords[0].wXCoord = T2AUDIO_MIC1_X_MM;
-    geom->AdditionalCoords[0].wYCoord = 0;
-    geom->AdditionalCoords[0].wZCoord = 0;
-    geom->AdditionalCoords[0].wVerticalAngle = 0;
-    geom->AdditionalCoords[0].wHorizontalAngle = 0;
-
-    // Mic 2 (Right): +40mm on X axis
-    geom->AdditionalCoords[1].usType = KSMICARRAY_MICTYPE_OMNIDIRECTIONAL;
-    geom->AdditionalCoords[1].wXCoord = T2AUDIO_MIC2_X_MM;
-    geom->AdditionalCoords[1].wYCoord = 0;
-    geom->AdditionalCoords[1].wZCoord = 0;
-    geom->AdditionalCoords[1].wVerticalAngle = 0;
-    geom->AdditionalCoords[1].wHorizontalAngle = 0;
-
-    Request->ValueSize = needed;
-    return STATUS_SUCCESS;
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,14 +1598,9 @@ T2AudioMicJackEvent(_In_ PPCEVENT_REQUEST Request)
     }
 }
 
-// Built-in array pin: geometry plus the jack it reports while yielding.
+// Built-in microphone pin: the jack it reports while yielding to a headset.
 static PCPROPERTY_ITEM g_T2AudioMicProperties[] = {
-    {
-        &KSPROPSETID_Audio,
-        KSPROPERTY_AUDIO_MIC_ARRAY_GEOMETRY,
-        PCPROPERTY_ITEM_FLAG_GET | PCPROPERTY_ITEM_FLAG_BASICSUPPORT,
-        T2AudioMicArrayProperty
-    },
+
     {
         &KSPROPSETID_Jack,
         KSPROPERTY_JACK_DESCRIPTION,
@@ -1809,7 +1725,7 @@ static PCPIN_DESCRIPTOR g_T2AudioMicTopoPins[] = {
             0, NULL, 0, NULL,
             SIZEOF_ARRAY(g_T2AudioMicBridgeRanges), g_T2AudioMicBridgeRanges,
             KSPIN_DATAFLOW_IN, KSPIN_COMMUNICATION_NONE,
-            &KSNODETYPE_MICROPHONE_ARRAY, NULL, 0
+            &KSNODETYPE_MICROPHONE, NULL, 0
         }
     },
     // Pin 1: bridge to the capture WaveRT filter.

@@ -18,6 +18,19 @@ This document tracks the verified status, supported features, and release histor
 
 ## Release History
 
+### v1.0.13.29 (2026-11-05, installed on the test machine)
+- Built-in microphone endpoint declared as a plain microphone (was a
+  3-capsule array with geometry, while the stream is mono).
+- `MicDsp=3` (`-Action Features -MicBeam 1`, off by default): level-matched
+  average of all three capsules. Host test: +2 dB speech-to-noise against
+  MicDsp=1. On hardware it adapts (mic1 gain ~1.7) and records about 2-4 dB
+  louder; quality by ear not judged yet.
+- Headphone run summary logs per-channel peaks and frames with the right
+  channel at digital zero while the left plays, to tell a driver-side
+  channel loss from one at the jack (reported right-channel dropouts with
+  external speakers on the 3.5 mm jack; no channel-specific path found in
+  the driver).
+
 ### v1.0.13.27 (2026-11-04)
 Hardware run on MacBookPro16,1, Windows 11 build 28000 (2026-11-03/04), installed
 through `-Action Install` (update path, settings kept):
