@@ -61,8 +61,8 @@ this first in the same window: `Set-ExecutionPolicy -Scope Process Bypass`.
 
 ## Update
 
-Extract the new release and run `-Action Install` again. Your sound settings
-and switched-on features are kept. Older copies of the driver are removed from
+Extract the new release and run `-Action Install` again. Your sound settings,
+switched-on features and volume are kept. Older copies of the driver are removed from
 Windows' driver store automatically.
 
 ## Uninstall
@@ -141,6 +141,11 @@ couple of seconds.
   `-Action Report`, then `-Action ResetGuard`.
 - **Windows Update put AppleAudio back:** `-Action Install` again, then
   `-Action UpdateGuard -Block 1`.
+- **Sound device found disabled after booting macOS and back to Windows:**
+  turn off Windows Fast Startup (`powercfg /h off` as administrator, or
+  Control Panel → Power Options → Choose what the power buttons do). With it,
+  Windows does not really shut down, and the T2 reset by macOS no longer
+  matches what Windows resumes. `-Action Doctor` warns about it.
 - **Safe Mode:** the driver never starts in Safe Mode, so you can always get
   in and uninstall from there.
 

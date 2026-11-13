@@ -77,7 +77,8 @@ if ($resolvedAction -eq 'Preset' -or
     $splat['Preset'] = $effectivePreset
 }
 if ($resolvedAction -in @('Install', 'Balance')) {
-    $splat['Volume'] = $Volume
+    # Only an explicit -Volume: an update keeps the user's volume.
+    if ($PSBoundParameters.ContainsKey('Volume')) { $splat['Volume'] = $Volume }
 }
 if ($null -ne $BassDb)             { $splat['BassDb'] = $BassDb }
 if ($null -ne $TrebleDb)           { $splat['TrebleDb'] = $TrebleDb }

@@ -4,7 +4,7 @@ PnpLockdown=1
 Class=Media
 ClassGuid={4D36E96C-E325-11CE-BFC1-08002BE10318}
 Provider=%ProviderName%
-DriverVer=11/13/2026,1.0.13.35
+DriverVer=11/14/2026,1.0.13.36
 CatalogFile=T2AudioMiniport.cat
 
 [Manufacturer]

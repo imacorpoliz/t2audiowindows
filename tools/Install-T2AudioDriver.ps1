@@ -22,10 +22,10 @@ if (-not (Test-Path -LiteralPath $T2Setup)) {
 
 $splat = [ordered]@{
     Action = 'Install'
-    Volume = $Volume
 }
 # Only an explicit -Preset overwrites the sound settings of an update.
 if ($PSBoundParameters.ContainsKey('Preset')) { $splat['Preset'] = $Preset }
+if ($PSBoundParameters.ContainsKey('Volume')) { $splat['Volume'] = $Volume }
 if ($Force) { $splat['Force'] = $true }
 
 & $T2Setup @splat

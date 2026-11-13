@@ -85,6 +85,9 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 # -Preset given on the command line (or picked in the menu): only then does
 # an update overwrite the current sound settings.
 $script:PresetGiven = $PSBoundParameters.ContainsKey('Preset')
+# The same for -Volume: an update keeps the user's volume (issue #15: an
+# update reset the speakers to 30 % and they sounded much quieter).
+$script:VolumeGiven = $PSBoundParameters.ContainsKey('Volume')
 $script:PresetChosen = $false
 
 $HardwareId   = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
@@ -754,7 +757,8 @@ function Invoke-Install {
         $d = Confirm-NewDriverLoaded $d $pkgVer
         Write-Ok "T2AudioPort $(Get-DeviceDriverVersion $d) is installed and running."
         Remove-StaleT2Packages $d
-        Set-T2Volume $Volume
+        if (-not $update -or $script:VolumeGiven) { Set-T2Volume $Volume }
+        else { Write-Ok 'Volume kept (use -Volume 0.3 or -Action Balance to set it).' }
         Write-Host ''
         Write-Info 'Pick the Apple T2 "Speakers" as the output in Sound settings if Windows did not do it by itself.'
         Write-Info 'Change the preset any time: .\T2Audio-Setup.ps1 -Action Preset -Preset bright (the device restarts once)'
@@ -1481,6 +1485,13 @@ function Invoke-Doctor {
     $dumps = @(Get-ChildItem "$env:SystemRoot\Minidump\*.dmp" -ErrorAction SilentlyContinue | Where-Object LastWriteTime -gt $since)
     if ($dumps.Count) { Write-Warn "$($dumps.Count) crash dump(s) in the last 7 days in $env:SystemRoot\Minidump (-Action Report lists them)" }
     if (Get-UpdateGuardOn) { Write-Info 'Windows Update driver guard: on' }
+    # Fast Startup turns "shut down" into hibernation. With macOS on the same
+    # Mac the T2 is reset in between, and Windows then resumes the audio
+    # device in a state the T2 no longer has (issue #15: device found
+    # disabled after booting macOS and back).
+    $hb = $null
+    try { $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction Stop).HiberbootEnabled } catch { }
+    if ($hb -eq 1) { Write-Warn 'Fast Startup is on: if you also boot macOS, audio can come back disabled. Turn it off: powercfg /h off, or Control Panel > Power Options > Choose what the power buttons do' }
     if (Test-Path $TestSession) { Write-Warn 'A test-agent session (TestSession) is present - removed at reboot.' }
     Write-Host ''
     if ($script:doctorIssues -eq 0) { Write-Ok 'Everything looks fine.' } else { Write-Warn "$($script:doctorIssues) problem(s) - see the fixes above." }
