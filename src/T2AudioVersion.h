@@ -5,6 +5,6 @@
 #ifndef T2AUDIO_VERSION_H
 #define T2AUDIO_VERSION_H
 
-#define T2AUDIO_VERSION_W L"1.0.13.34"
+#define T2AUDIO_VERSION_W L"1.0.13.35"
 
 #endif

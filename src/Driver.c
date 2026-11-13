@@ -52,6 +52,7 @@ T2AudioPnpHandler(
             // The jack poll sends BCE requests: stop it before the transport
             // is closed with the resources.
             T2AudioStopResumeWork(context);
+            T2AudioStopLateProbe(context);
             T2AudioStopJackPoll(context);
             T2AudioReleaseHeadphoneEvents(context);
             T2AudioReleaseHeadsetMicEvents(context);
@@ -450,6 +451,161 @@ T2AudioReloadLiveParameters(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
     }
 }
 
+// Parameters\AudioPathState for -Action Doctor: 1 = wired to the T2,
+// 0 = waiting for the T2 (late probe running), 2 = gave up.
+static VOID
+T2AudioSetAudioPathState(_In_ ULONG State)
+{
+    (VOID)T2AudioWriteDwordParameter(T2AUDIO_PARAMETERS_KEY, L"AudioPathState", State);
+}
+
+// Wire the discovered speaker into the audio path only at stage 4+. Below
+// that the endpoint stays in system-buffer mode and START_IO/STOP_IO cannot
+// run (SpeakerDeviceId stays 0). The transport is held open at stage 4 even
+// when EnableBceIo=0, so a run can prove that holding it open across the
+// stream lifecycle is safe before any command is sent. Returns TRUE when the
+// speaker is wired. PASSIVE_LEVEL.
+static BOOLEAN
+T2AudioWireAudioPath(_Inout_ PT2AUDIO_DEVICE_CONTEXT context)
+{
+    if (context->DiagStage < T2AUDIO_STAGE_HW_IO ||
+        !context->BceProbed || context->BceSpeakerDeviceId == 0) {
+        return FALSE;
+    }
+        context->SpeakerDeviceId = context->BceSpeakerDeviceId;
+
+        // Remote access is not requested here. AppleUSBVHCI already sends
+        // NOTIFICATION_ALIVE and SET_REMOTE_ACCESS(mode 1) itself when it
+        // initializes and on resume (0x140002690 / 0x140002864), and
+        // AppleAudio.sys never sends SET_REMOTE_ACCESS. Sending kaiT2en's
+        // mode 2 would change a state the Windows stack set up.
+
+        KdPrint(("T2Audio: audio path ENABLED for speaker 0x%I64X (bceIo=%u, transport held open)\n",
+                 context->SpeakerDeviceId, context->BceIoEnabled ? 1u : 0u));
+        if (context->HeadphoneFormatValid &&
+            context->BceHeadphoneDeviceId != 0) {
+            context->HeadphoneDeviceId = context->BceHeadphoneDeviceId;
+            KdPrint(("T2Audio: audio path ENABLED for headphones 0x%I64X ring 0x%Ix+0x%Ix\n",
+                     context->HeadphoneDeviceId, context->HeadphoneBufferOffset,
+                     context->HeadphoneBufferSize));
+        }
+        // Microphones: register the host ring with the T2 (writes BufferStruct
+        // and sends msg 18), only in the BCE I/O configuration.
+        if (context->Mic.FiltersRegistered && context->Mic.FormatValid &&
+            context->Mic.BceDeviceId != 0 && context->BceIoEnabled) {
+            NTSTATUS micStatus = T2AudioMicRegister(context, &context->Mic);
+
+            if (NT_SUCCESS(micStatus)) {
+                context->Mic.DeviceId = context->Mic.BceDeviceId;
+            }
+            KdPrint(("T2Audio: audio path %s for microphones 0x%I64X (0x%08X)\n",
+                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
+                     context->Mic.BceDeviceId, micStatus));
+        }
+        // Headset microphone: the same, with its own ring and BufferStruct entry.
+        if (context->HeadsetMic.FiltersRegistered && context->HeadsetMic.FormatValid &&
+            context->HeadsetMic.BceDeviceId != 0 && context->BceIoEnabled) {
+            NTSTATUS micStatus = T2AudioMicRegister(context, &context->HeadsetMic);
+
+            if (NT_SUCCESS(micStatus)) {
+                context->HeadsetMic.DeviceId = context->HeadsetMic.BceDeviceId;
+            }
+            KdPrint(("T2Audio: audio path %s for headset microphone 0x%I64X (0x%08X)\n",
+                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
+                     context->HeadsetMic.BceDeviceId, micStatus));
+        }
+    T2AudioSetAudioPathState(1);
+    return TRUE;
+}
+
+// Late probe (GitHub issue #15): at boot the T2 bridge (AppleUSBVHCI) can
+// come up after this driver - with a Thunderbolt eGPU in particular - so the
+// one probe in StartDevice failed and the endpoints stayed silent until the
+// device was restarted by hand. A work item then retries the probe once a
+// second for T2AUDIO_LATE_PROBE_TRIES seconds and wires the path when the T2
+// answers; streams already in RUN are restarted so they start I/O.
+#define T2AUDIO_LATE_PROBE_TRIES 120
+
+static IO_WORKITEM_ROUTINE T2AudioLateProbeWork;
+
+static VOID
+T2AudioLateProbeWork(_In_ PDEVICE_OBJECT DeviceObject, _In_opt_ PVOID WorkContext)
+{
+    PIO_WORKITEM workItem = (PIO_WORKITEM)WorkContext;
+    PT2AUDIO_DEVICE_CONTEXT context = T2AudioGetContext(DeviceObject);
+    LARGE_INTEGER delay;
+    ULONG attempt;
+    BOOLEAN wired = FALSE;
+
+    PAGED_CODE();
+
+    delay.QuadPart = -10000000ll; // 1 s
+    for (attempt = 1; attempt <= T2AUDIO_LATE_PROBE_TRIES && context->LateProbeStop == 0; attempt++) {
+        KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        if (context->LateProbeStop != 0) {
+            break;
+        }
+        if (context->PoweredDown || !context->HardwareReady) {
+            continue;
+        }
+        KeWaitForSingleObject(&context->StreamMutex, Executive, KernelMode, FALSE, NULL);
+        if (context->LateProbeStop == 0 && NT_SUCCESS(T2AudioProbeBceDevices(context))) {
+            wired = T2AudioWireAudioPath(context);
+            if (wired) {
+                ULONG i;
+
+                KdPrint(("T2Audio: late probe: T2 answered after %u s, audio path wired\n", attempt));
+                for (i = 0; i < 2; i++) {
+                    if (context->RunningStream[i] != NULL) {
+                        T2AudioStreamStartLateIo(context->RunningStream[i]);
+                    }
+                }
+            } else {
+                T2AudioCloseBceTransport();
+            }
+        }
+        KeReleaseMutex(&context->StreamMutex, FALSE);
+        if (wired) {
+            break;
+        }
+    }
+    if (!wired && context->LateProbeStop == 0) {
+        KdPrint(("T2Audio: late probe: no answer from the T2 in %u s; audio path stays disabled\n",
+                 T2AUDIO_LATE_PROBE_TRIES));
+        T2AudioSetAudioPathState(2);
+    }
+    IoFreeWorkItem(workItem);
+    KeSetEvent(&context->LateProbeDone, IO_NO_INCREMENT, FALSE);
+}
+
+static VOID
+T2AudioStartLateProbe(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PIO_WORKITEM workItem;
+
+    if (Context->DeviceObject == NULL) {
+        return;
+    }
+    workItem = IoAllocateWorkItem(Context->DeviceObject);
+    if (workItem == NULL) {
+        T2AudioSetAudioPathState(2);
+        return;
+    }
+    InterlockedExchange(&Context->LateProbeStop, 0);
+    KeClearEvent(&Context->LateProbeDone);
+    IoQueueWorkItem(workItem, T2AudioLateProbeWork, DelayedWorkQueue, workItem);
+}
+
+// PnP stop/removal (PASSIVE): end the late probe before the transport and
+// the mappings go away. The event is signalled when no probe runs.
+VOID
+T2AudioStopLateProbe(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context)
+{
+    PAGED_CODE();
+
+    InterlockedExchange(&Context->LateProbeStop, 1);
+    KeWaitForSingleObject(&Context->LateProbeDone, Executive, KernelMode, FALSE, NULL);
+}
 static NTSTATUS
 T2AudioStartDeviceInner(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -582,6 +738,7 @@ T2AudioStartDeviceInner(
     KeInitializeEvent(&context->JackWorkDone, NotificationEvent, TRUE);
     KeInitializeSpinLock(&context->ResumeWorkLock);
     KeInitializeEvent(&context->ResumeWorkDone, NotificationEvent, TRUE);
+    KeInitializeEvent(&context->LateProbeDone, NotificationEvent, TRUE);
     T2AudioMicInitPaths(context);
     T2AudioDetectHardwareModel(context);
 
@@ -969,61 +1126,20 @@ T2AudioStartDeviceInner(
                  context->DiagStage));
     }
 
-    // Wire the discovered speaker into the audio path only at stage 4+. Below
-    // that the endpoint stays in system-buffer mode and START_IO/STOP_IO cannot
-    // run (SpeakerDeviceId stays 0). The transport is held open at stage 4 even
-    // when EnableBceIo=0, so a run can prove that holding it open across the
-    // stream lifecycle is safe before any command is sent.
-    if (context->DiagStage >= T2AUDIO_STAGE_HW_IO &&
-        context->BceProbed && context->BceSpeakerDeviceId != 0) {
-        context->SpeakerDeviceId = context->BceSpeakerDeviceId;
-
-        // Remote access is not requested here. AppleUSBVHCI already sends
-        // NOTIFICATION_ALIVE and SET_REMOTE_ACCESS(mode 1) itself when it
-        // initializes and on resume (0x140002690 / 0x140002864), and
-        // AppleAudio.sys never sends SET_REMOTE_ACCESS. Sending kaiT2en's
-        // mode 2 would change a state the Windows stack set up.
-
-        KdPrint(("T2Audio: audio path ENABLED for speaker 0x%I64X (bceIo=%u, transport held open)\n",
-                 context->SpeakerDeviceId, context->BceIoEnabled ? 1u : 0u));
-        if (context->HeadphoneFormatValid &&
-            context->BceHeadphoneDeviceId != 0) {
-            context->HeadphoneDeviceId = context->BceHeadphoneDeviceId;
-            KdPrint(("T2Audio: audio path ENABLED for headphones 0x%I64X ring 0x%Ix+0x%Ix\n",
-                     context->HeadphoneDeviceId, context->HeadphoneBufferOffset,
-                     context->HeadphoneBufferSize));
-        }
-        // Microphones: register the host ring with the T2 (writes BufferStruct
-        // and sends msg 18), only in the BCE I/O configuration.
-        if (context->Mic.FiltersRegistered && context->Mic.FormatValid &&
-            context->Mic.BceDeviceId != 0 && context->BceIoEnabled) {
-            NTSTATUS micStatus = T2AudioMicRegister(context, &context->Mic);
-
-            if (NT_SUCCESS(micStatus)) {
-                context->Mic.DeviceId = context->Mic.BceDeviceId;
-            }
-            KdPrint(("T2Audio: audio path %s for microphones 0x%I64X (0x%08X)\n",
-                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
-                     context->Mic.BceDeviceId, micStatus));
-        }
-        // Headset microphone: the same, with its own ring and BufferStruct entry.
-        if (context->HeadsetMic.FiltersRegistered && context->HeadsetMic.FormatValid &&
-            context->HeadsetMic.BceDeviceId != 0 && context->BceIoEnabled) {
-            NTSTATUS micStatus = T2AudioMicRegister(context, &context->HeadsetMic);
-
-            if (NT_SUCCESS(micStatus)) {
-                context->HeadsetMic.DeviceId = context->HeadsetMic.BceDeviceId;
-            }
-            KdPrint(("T2Audio: audio path %s for headset microphone 0x%I64X (0x%08X)\n",
-                     NT_SUCCESS(micStatus) ? "ENABLED" : "NOT enabled",
-                     context->HeadsetMic.BceDeviceId, micStatus));
-        }
+    if (T2AudioWireAudioPath(context)) {
+        // Wired (see T2AudioWireAudioPath).
+    } else if (context->DiagStage >= T2AUDIO_STAGE_HW_IO && context->HardwareReady) {
+        // The T2 did not answer yet (bridge still starting): retry in the
+        // background instead of leaving the endpoints silent for good.
+        T2AudioCloseBceTransport();
+        T2AudioSetAudioPathState(0);
+        KdPrint(("T2Audio: audio path not wired yet - T2 not ready; retrying in the background\n"));
+        T2AudioStartLateProbe(context);
     } else {
         T2AudioCloseBceTransport();
         KdPrint(("T2Audio: audio path stays disabled (stage %u)\n",
                  context->DiagStage));
     }
-
     KdPrint(("T2Audio: StartDevice SUCCESS - Topology + WaveRT registered and physically connected\n"));
     return STATUS_SUCCESS;
 }

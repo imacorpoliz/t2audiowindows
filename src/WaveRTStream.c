@@ -1299,6 +1299,30 @@ T2AudioStreamResumeAfterPower(_In_ PVOID Stream)
     KdPrint(("T2Audio: resume after sleep: status=0x%08X\n", status));
 }
 
+// Late probe (Driver.c): the audio path was wired after this stream entered
+// RUN without hardware I/O (the T2 was not ready at start). With StreamMutex
+// held, at PASSIVE_LEVEL: leave RUN and enter it again, which sends START_IO
+// from a silent ring with a fresh clock anchor.
+VOID
+T2AudioStreamStartLateIo(_In_ PVOID Stream)
+{
+    PT2AUDIO_WAVERT_STREAM instance = (PT2AUDIO_WAVERT_STREAM)Stream;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    if (instance == NULL || instance->DeviceContext == NULL ||
+        instance->State != KSSTATE_RUN || instance->HardwareIoStarted) {
+        return;
+    }
+    status = T2AudioStreamSetStateLocked(instance, KSSTATE_PAUSE);
+    if (NT_SUCCESS(status)) {
+        status = T2AudioStreamSetStateLocked(instance, KSSTATE_RUN);
+    }
+    KdPrint(("T2Audio: late probe: %s stream restarted with I/O: 0x%08X\n",
+             instance->Headphone ? "headphone" : "speaker", status));
+}
+
 static NTSTATUS STDMETHODCALLTYPE
 T2AudioStreamGetPosition(
     _In_ PMINIPORTWAVERTSTREAM Stream,

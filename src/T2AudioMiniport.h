@@ -268,6 +268,11 @@ typedef struct _T2AUDIO_DEVICE_CONTEXT {
     volatile LONG ResumeWorkPending;
     volatile LONG ResumeWorkRunning;
     volatile LONG ResumeStop;
+    // Late probe (Driver.c, issue #15): retries the BCE probe after a start
+    // at which the T2 bridge was not ready yet. LateProbeDone is signalled
+    // while no probe work item runs.
+    volatile LONG LateProbeStop;
+    KEVENT LateProbeDone;
     // Parameters\ExtendedProbe=1: log every BCE device's streams, formats,
     // latencies and jacks, and the whole BufferStruct table (read-only), as
     // groundwork for the headphone and microphone endpoints (docs/ROADMAP.md).
@@ -499,6 +504,8 @@ NTSTATUS T2AudioStopIoDevice(_In_ PT2AUDIO_DEVICE_CONTEXT Context, _In_ ULONG64 
 VOID T2AudioNotifyJackChange(_In_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioReleaseHeadphoneEvents(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 VOID T2AudioStreamResumeAfterPower(_In_ PVOID Stream);
+VOID T2AudioStreamStartLateIo(_In_ PVOID Stream);
+VOID T2AudioStopLateProbe(_Inout_ PT2AUDIO_DEVICE_CONTEXT Context);
 
 // Microphones (MicCapture.c).
 #define T2AUDIO_MIC_WAVE_PIN_CAPTURE  0u

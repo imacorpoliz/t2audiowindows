@@ -1423,6 +1423,14 @@ function Invoke-Doctor {
         $inst = Get-DeviceDriverVersion $d; $run = Get-LoadedVersion
         if ((Test-RebootRequired $d) -or ($run -and $run -ne $inst)) { Bad "Driver $inst installed, but $(if ($run) { $run } else { 'an older build' }) still runs" 'reboot, or -Action Install again (restarts Windows Audio)' }
         else { Write-Ok "Driver T2AudioPort $inst running" }
+        # Parameters\AudioPathState (1.0.13.35+): whether the driver reached the
+        # T2 audio chip. The endpoints exist either way, but stay silent
+        # without it (issue #15: T2 bridge not ready at boot).
+        switch (Get-Param 'AudioPathState') {
+            0 { Bad 'The driver is still waiting for the T2 audio chip (sound is silent until it answers)' 'wait a minute; if it stays, -Action Restart' }
+            2 { Bad 'The T2 audio chip did not answer after start: the endpoints are silent' '-Action Restart (or reboot); then -Action Report' }
+            1 { Write-Ok 'Audio path connected to the T2' }
+        }
     }
     elseif ($svc -eq 'AppleAudio') { Bad 'The device runs AppleAudio' '-Action Install' }
     else { Bad "Device: $($d.Status), driver $svc" '-Action Report and look at the log' }
