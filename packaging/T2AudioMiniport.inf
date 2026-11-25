@@ -12,6 +12,7 @@ CatalogFile=T2AudioMiniport.cat
 
 [Standard.NTamd64]
 %T2Audio.DeviceDesc%=T2Audio_Install,PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01
+%T2Audio.DeviceDesc%=T2Audio_Install,PCI\VEN_106B&DEV_1803&SUBSYS_1881106B&REV_01
 
 [T2Audio_Install.NT]
 ; Standard audio-driver registration (KS + wdmaudio), as in the WDK samples.

@@ -90,7 +90,14 @@ $script:PresetGiven = $PSBoundParameters.ContainsKey('Preset')
 $script:VolumeGiven = $PSBoundParameters.ContainsKey('Volume')
 $script:PresetChosen = $false
 
-$HardwareId   = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'
+$HardwareId   = 'PCI\VEN_106B&DEV_1803&SUBSYS_1887106B&REV_01'   # MacBookPro16,1
+$HardwareId2  = 'PCI\VEN_106B&DEV_1803&SUBSYS_1881106B&REV_01'   # MacBookPro15,1 (A1990)
+$HardwareIds  = @($HardwareId, $HardwareId2)
+
+function Test-T2HardwareId([string]$Value) {
+    foreach ($h in $HardwareIds) { if ($Value.StartsWith($h)) { return $true } }
+    return $false
+}
 $ServiceName  = 'T2AudioMiniport'
 $ParamsPath   = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
 $TestSession  = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\TestSession"
@@ -198,7 +205,7 @@ function Test-Admin {
 
 function Get-T2Device {
     Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstanceId -like "$HardwareId*" } | Select-Object -First 1
+        Where-Object { $iid = $_.InstanceId; @($HardwareIds | Where-Object { $iid -like "$_*" }).Count -gt 0 } | Select-Object -First 1
 }
 
 function Get-DeviceService($dev) {
@@ -488,7 +495,7 @@ function Get-T2RenderEndpoint($kind) {
         if (-not (Test-Path $props)) { continue }
         $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
         $v = $all.$prop
-        if (-not ($v -and $v.StartsWith($HardwareId))) { continue }
+        if (-not ($v -and (Test-T2HardwareId $v))) { continue }
         if ((Get-T2EndpointKind 'Render' $all) -ne $kind) { continue }
         $id = '{0.0.0.00000000}.' + $k.PSChildName
         if ($st -eq 1) { return $id }
@@ -1261,7 +1268,7 @@ function Get-T2Endpoints {
             if (-not (Test-Path $props)) { continue }
             $all = Get-ItemProperty -Path $props -ErrorAction SilentlyContinue
             $hw = $all.$hwProp
-            if (-not ($hw -and $hw.StartsWith($HardwareId))) { continue }
+            if (-not ($hw -and (Test-T2HardwareId $hw))) { continue }
             $st = (Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue).DeviceState
             $kind = Get-T2EndpointKind $flow $all
             [pscustomobject]@{
